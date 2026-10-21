@@ -51,19 +51,28 @@ class Task:
     run_status: RunStatus = RunStatus.CREATED
     stage: str | None = None
     created_at: datetime = datetime.min.replace(tzinfo=UTC)
+    project_id: str | None = None
+    dimension_id: str | None = None
+    batch_id: str | None = None
+    confirmed_proposal_json: str | None = None
+    active_cleaning_operation_id: str | None = None
+    active_plan_digest: str | None = None
 
     def to_summary(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "confirmed_revision": self.confirmed_revision,
-            "pending_revision": self.pending_revision,
+            "pending_draft": None,
             "task_version": self.task_version,
             "task_lifecycle": self.lifecycle.value,
-            "revision_status": None,
+            "revision_status": "confirmed" if self.confirmed_revision is not None else None,
+            "project_id": self.project_id,
+            "dimension_id": self.dimension_id,
+            "batch_id": self.batch_id,
+            "active_cleaning_operation_id": self.active_cleaning_operation_id,
             "run_generation": self.run_generation,
             "run_status": self.run_status.value,
             "stage": self.stage,
             "status_url": f"/v1/retrieval/tasks/{self.task_id}",
             "events_url": f"/v1/retrieval/tasks/{self.task_id}/events",
         }
-

@@ -9,14 +9,15 @@ v1.8 及更早版本保留供追溯。代码仍为 P0 切片，尚未实现新�
 
 当前实现刻意只覆盖可独立验证的第一条纵向切片：
 
-- 严格的 `query-spec@1` 结构与业务校验；
+- 新草稿使用 `query-spec@2` 的图片/手动模式子集；`query-spec@1` 仅保留历史校验；
 - 规范化 JSON 与 SHA-256 摘要；
-- 可信请求身份、任务创建、幂等重放与任务读取；
+- 项目草稿创建/读取/修订、发起人明确确认、幂等创建任务与批次、不可变方案快照；
 - 任务运行状态转换和 generation 栅栏；
 - OpenAPI 3.1、JSON Schema、PostgreSQL DDL；
-- 对应 A01、A22、A52、A64 的基础测试。
+- A01、A22、A52、A64 基础测试及 A97/A104/A106 的部分本地测试，非完整验收。
 
-DSH、Milvus、Data-Juicer 和真实身份系统尚未接入。它们必须在各自版本与能力清单冻结后，通过 `ports.py` 中的端口接入，不能用当前内存实现进入生产。
+DSH、Milvus 和真实身份系统尚未接入。DJ 已接入内部 CleaningService，并通过合成图片真实联测；尚未开放清洗 HTTP 入口，不会在确认任务时自动执行。
+组件通过 `ports.py` 中的端口接入，不能用当前内存实现进入生产。确认后的任务停留在 PLANNING，当前没有调度 Worker。
 
 用户登录已确定对接内部 W3，当前状态为 `NOT_CONNECTED`，本地身份头仍仅供开发。
 接入所需资料与边界见 [W3 登录对接约定](docs/p0/w3-integration.md)。
@@ -41,7 +42,7 @@ DSH 的独立开发环境已安装在 `.venv-dsh`。当前冻结候选为 SDK/�
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-PYTHONPATH=src python3 -m dsh_retrieval.api
+PYTHONPATH=src python3 -m dsh_retrieval.api --demo-project --port 8080
 ```
 
 DSH 离线验证：
@@ -51,16 +52,34 @@ DSH_HOME="$PWD/var/dsh/local-smoke" .venv-dsh/bin/dsh --version
 DSH_HOME="$PWD/var/dsh/local-smoke" .venv-dsh/bin/dsh --profile sdk-minimal --help
 ```
 
-开发服务器监听 `127.0.0.1:8080`。本地请求使用 `X-Tenant-Id` 和 `X-User-Id` 模拟网关注入的可信身份：
+开发服务器只监听 loopback。`--demo-project` 显式允许 tenant-a/user-a 访问 demo/default；不加此参数默认拒绝所有项目。
+本地身份头可被伪造，不能暴露为生产服务。先保存草稿：
 
 ```bash
-curl -i http://127.0.0.1:8080/v1/retrieval/tasks \
+curl -i http://127.0.0.1:8080/v1/retrieval/projects/demo/drafts \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-1' \
   -H 'X-Tenant-Id: tenant-a' \
   -H 'X-User-Id: user-a' \
-  -d '{"request":"找 10 张室内家居图，不要水印","media_type":"image","target_count":10,"business_domain":"home_lifestyle","auto_refill":true,"execution_mode":"interactive"}'
+  --data-binary @contracts/examples/draft.json
 ```
+
+展示返回的完整 `proposal` 后，向 `POST /v1/retrieval/tasks` 发送
+`draft_id`、`expected_draft_version`（草稿返回的版本）、`proposal_digest`、`action: "confirm"`，
+并携带新的 Idempotency-Key。重复确认返回同一 task_id/batch_id；旧版直接创建请求返回 422。
+本轮只启用图片目标、文字需求、五节点 manual、本批 exact-content、无历史去重、input_only/manual；
+未实现的策略明确拒绝，不自动降级。接口用于业务状态验证，不承诺实际素材产出。
+
+端到端与契约验证（前者需要本机 loopback 端口权限）：
+
+```bash
+PYTHONPATH=src python3 tools/api_smoke.py
+var/dj-runtime/bin/python tools/validate_api_contracts.py
+```
+
+DJ 环境恢复及图片探针见 [第一轮落地记录](docs/dev/implementation-slice-01.md)。
+
+内部清洗提交、取消栅栏及逐素材回传见 [第二轮落地记录](docs/dev/implementation-slice-02.md)。
 
 ## 目录
 

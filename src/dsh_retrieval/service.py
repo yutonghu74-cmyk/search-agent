@@ -1,74 +1,76 @@
 from __future__ import annotations
 
+import json
+import re
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 from .errors import ServiceError, invalid
-from .models import Actor, Task
-from .query_spec import digest
-from .ports import TaskRepository
-# Compatibility export for existing local callers.
-from .adapters.memory import InMemoryTaskRepository
+from .models import Actor
+from .ports import TaskRepository, ProjectContextProvider
+from .proposals import Draft, normalize_proposal
+from .adapters.memory import InMemoryTaskRepository  # compatibility import
+from .adapters.projects import LocalProjectAccess
 
 
-CREATE_FIELDS = {"request", "media_type", "target_count", "business_domain", "auto_refill", "execution_mode"}
+def require_key(key: str) -> None:
+    if not isinstance(key, str) or not key.strip() or len(key) > 255:
+        raise ServiceError("IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must be 1-255 characters", 400)
+
+
+def require_version(value: Any) -> None:
+    if type(value) is not int or value < 1:
+        raise invalid("expected_draft_version must be a positive integer", "$.expected_draft_version")
 
 
 class TaskService:
-    def __init__(self, repository: TaskRepository) -> None:
+    def __init__(self, repository: TaskRepository, projects: ProjectContextProvider | None = None) -> None:
         self.repository = repository
+        self.projects = projects if projects is not None else LocalProjectAccess()
+
+    def save_draft(self, actor: Actor, project_id: str, key: str, body: dict,
+                   draft_id: str | None = None) -> tuple[dict, bool]:
+        require_key(key)
+        if not isinstance(body, dict):
+            raise invalid("body must be an object", "$")
+        raw = dict(body)
+        version = raw.pop("expected_draft_version", None) if draft_id else None
+        if draft_id:
+            require_version(version)
+            existing = self.repository.get_draft(actor, draft_id)
+            if existing.project_id != project_id:
+                raise ServiceError("NOT_FOUND", "draft was not found", 404)
+        proposal = normalize_proposal(raw)
+        self.projects.require_access(actor, project_id, proposal["dimension_id"], "create")
+        draft = Draft(draft_id or "draft_" + uuid.uuid4().hex, actor.tenant_id, actor.user_id,
+                      project_id, proposal["dimension_id"], json.dumps(proposal, sort_keys=True, ensure_ascii=False))
+        stored, replayed = self.repository.save_draft(actor, key, draft, version)
+        return stored.to_summary(), replayed
+
+    def get_draft(self, actor: Actor, project_id: str, draft_id: str) -> dict:
+        draft = self.repository.get_draft(actor, draft_id)
+        if draft.project_id != project_id:
+            raise ServiceError("NOT_FOUND", "draft was not found", 404)
+        self.projects.require_access(actor, draft.project_id, draft.dimension_id, "read")
+        return draft.to_summary()
 
     def create_task(self, actor: Actor, idempotency_key: str, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        if not idempotency_key.strip():
-            raise ServiceError("IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key is required", 400)
-        if not isinstance(body, dict):
-            raise invalid("request body must be an object", "$")
-        unknown = sorted(set(body) - CREATE_FIELDS)
-        if unknown:
-            raise invalid(f"unknown field: {unknown[0]}", f"$.{unknown[0]}")
-        missing = sorted({"request", "media_type", "target_count", "business_domain"} - set(body))
-        if missing:
-            raise invalid("required field is missing", f"$.{missing[0]}")
-        if not isinstance(body["request"], str) or not body["request"].strip():
-            raise invalid("must be a non-empty string", "$.request")
-        if body["media_type"] != "image":
-            raise ServiceError("FEATURE_NOT_SUPPORTED", "P0/P1 enables image tasks only", 422, field_path="$.media_type")
-        if isinstance(body["target_count"], bool) or not isinstance(body["target_count"], int) or body["target_count"] <= 0:
-            raise invalid("must be a positive integer", "$.target_count")
-        if not isinstance(body["business_domain"], str) or not body["business_domain"].strip():
-            raise invalid("must be a non-empty string", "$.business_domain")
-        auto_refill = body.get("auto_refill", True)
-        if not isinstance(auto_refill, bool):
-            raise invalid("must be a boolean", "$.auto_refill")
-        execution_mode = body.get("execution_mode", "interactive")
-        if execution_mode != "interactive":
-            raise ServiceError("FEATURE_NOT_SUPPORTED", "background execution is not enabled in P0/P1", 422, field_path="$.execution_mode")
-
-        normalized = {
-            "request": body["request"],
-            "media_type": body["media_type"],
-            "target_count": body["target_count"],
-            "business_domain": body["business_domain"],
-            "auto_refill": auto_refill,
-            "execution_mode": execution_mode,
-        }
-        request_digest = digest(normalized)
-        task = Task(
-            task_id="rt_" + uuid.uuid4().hex,
-            tenant_id=actor.tenant_id,
-            owner_user_id=actor.user_id,
-            raw_request=normalized["request"],
-            media_type=normalized["media_type"],
-            target_count=normalized["target_count"],
-            business_domain=normalized["business_domain"],
-            auto_refill=normalized["auto_refill"],
-            execution_mode=normalized["execution_mode"],
-            request_digest=request_digest,
-            created_at=datetime.now(UTC),
-        )
-        stored, replayed = self.repository.create(actor, idempotency_key, request_digest, task)
+        require_key(idempotency_key)
+        fields = {"draft_id", "expected_draft_version", "proposal_digest", "action"}
+        if not isinstance(body, dict) or set(body) != fields:
+            raise ServiceError("CONFIRMATION_REQUIRED", "create requires an explicit draft confirmation", 422)
+        require_version(body["expected_draft_version"])
+        if body["action"] != "confirm" or not isinstance(body["draft_id"], str) or not body["draft_id"]:
+            raise invalid("explicit confirm action and draft_id are required")
+        if not isinstance(body["proposal_digest"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", body["proposal_digest"]):
+            raise invalid("proposal_digest must be a SHA-256 digest", "$.proposal_digest")
+        draft = self.repository.get_draft(actor, body["draft_id"])
+        self.projects.require_access(actor, draft.project_id, draft.dimension_id, "approve")
+        stored, replayed = self.repository.confirm_draft(actor, idempotency_key, body["draft_id"],
+                                                        body["expected_draft_version"], body["proposal_digest"])
         return stored.to_summary(), replayed
 
     def get_task(self, actor: Actor, task_id: str) -> dict[str, Any]:
-        return self.repository.get(actor, task_id).to_summary()
+        task = self.repository.get(actor, task_id)
+        self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
+        return task.to_summary()

@@ -1,11 +1,68 @@
 openapi: 3.1.0
 info:
   title: DSH Retrieval Business API
-  version: 0.1.0-p0
-  description: P0/P1 contract slice. Identity is supplied by a trusted gateway, never by the request body.
+  version: 0.2.0-draft-confirmation
+  description: v1.9 initial draft/confirmation slice. Local memory implementation, no execution dispatch or W3. New requests require QuerySpec v2. Identity comes from a trusted gateway in production, not request bodies.
 servers:
   - url: http://127.0.0.1:8080
 paths:
+  /v1/retrieval/projects/{project_id}/drafts:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      operationId: saveDraft
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DraftBody'}
+      responses:
+        '200': {$ref: '#/components/responses/Draft'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/retrieval/projects/{project_id}/drafts/{draft_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: draft_id
+        in: path
+        required: true
+        schema: {type: string, minLength: 1}
+    get:
+      operationId: getDraft
+      responses:
+        '200': {$ref: '#/components/responses/Draft'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: reviseDraft
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/DraftFields'
+                - type: object
+                  required: [expected_draft_version]
+                  properties:
+                    expected_draft_version: {type: integer, minimum: 1}
+              unevaluatedProperties: false
+      responses:
+        '200': {$ref: '#/components/responses/Draft'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
   /v1/retrieval/tasks:
     post:
       operationId: createRetrievalTask
@@ -24,6 +81,8 @@ paths:
               schema: {$ref: '#/components/schemas/TaskSummary'}
         '400': {$ref: '#/components/responses/Error'}
         '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
   /v1/retrieval/tasks/{task_id}:
@@ -41,39 +100,77 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/TaskSummary'}
         '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
 components:
   parameters:
+    ProjectId:
+      name: project_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
     IdempotencyKey:
       name: Idempotency-Key
       in: header
       required: true
       schema: {type: string, minLength: 1, maxLength: 255}
   responses:
+    Draft:
+      description: Draft saved or read; no formal task or batch created
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/DraftSummary'}
     Error:
       description: Stable error envelope
       content:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
   schemas:
+    DraftFields:
+      type: object
+      required: [dimension_id, query_spec]
+      properties:
+        dimension_id: {type: string, minLength: 1}
+        query_spec:
+          $ref: './query-spec-v2.schema.json'
+        node_modes:
+          const: {expansion: manual, retrieval: manual, cleaning: manual, refill: manual, packaging: manual}
+          default: {expansion: manual, retrieval: manual, cleaning: manual, refill: manual, packaging: manual}
+    DraftBody:
+      allOf:
+        - $ref: '#/components/schemas/DraftFields'
+      unevaluatedProperties: false
+    DraftSummary:
+      type: object
+      required: [draft_id, draft_version, project_id, dimension_id, proposal, proposal_digest, status, confirmed_task_id]
+      properties:
+        draft_id: {type: string}
+        draft_version: {type: integer, minimum: 1}
+        project_id: {type: string}
+        dimension_id: {type: string}
+        proposal: {$ref: '#/components/schemas/DraftBody'}
+        proposal_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        status: {enum: [draft, confirmed]}
+        confirmed_task_id: {type: [string, 'null']}
     CreateTaskRequest:
       type: object
       additionalProperties: false
-      required: [request, media_type, target_count, business_domain]
+      required: [draft_id, expected_draft_version, proposal_digest, action]
       properties:
-        request: {type: string, minLength: 1}
-        media_type: {const: image}
-        target_count: {type: integer, minimum: 1}
-        business_domain: {type: string, minLength: 1}
-        auto_refill: {type: boolean, default: true}
-        execution_mode: {const: interactive, default: interactive}
+        draft_id: {type: string, minLength: 1}
+        expected_draft_version: {type: integer, minimum: 1}
+        proposal_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        action: {const: confirm}
     TaskSummary:
       type: object
       required: [task_id, task_version, task_lifecycle, run_generation, run_status, status_url, events_url, trace_id]
       properties:
         task_id: {type: string}
         confirmed_revision: {type: [integer, 'null']}
-        pending_revision: {type: [integer, 'null']}
+        pending_draft: {type: 'null'}
+        project_id: {type: string}
+        dimension_id: {type: string}
+        batch_id: {type: string}
         task_version: {type: integer, minimum: 1}
         task_lifecycle: {enum: [active, archived, deleted]}
         revision_status: {type: [string, 'null']}

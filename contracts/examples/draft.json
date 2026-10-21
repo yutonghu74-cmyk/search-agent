@@ -1,0 +1,33 @@
+{
+  "dimension_id": "default",
+  "query_spec": {
+    "schema_version": "query-spec@2",
+    "raw_request": "找 10 张客厅图片",
+    "media_type": "image",
+    "target_count": 10,
+    "business_domain": "home_lifestyle",
+    "intra_batch_dedup": {
+      "policy_ref": "exact-content",
+      "config_version": "1"
+    },
+    "cross_batch_dedup": {
+      "scope": "none",
+      "references": [],
+      "comparison_methods": [],
+      "reference_digest": null
+    },
+    "refill_policy": {
+      "mode": "input_only",
+      "target_count": 10,
+      "approved_library_ids": [],
+      "progression": "manual"
+    }
+  },
+  "node_modes": {
+    "expansion": "manual",
+    "retrieval": "manual",
+    "cleaning": "manual",
+    "refill": "manual",
+    "packaging": "manual"
+  }
+}

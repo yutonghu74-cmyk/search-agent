@@ -4,39 +4,31 @@ from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.models import Actor, RunStatus, Task
 from dsh_retrieval.service import InMemoryTaskRepository, TaskService
 from dsh_retrieval.state_machine import accept_worker_commit, transition
-
-
-BODY = {
-    "request": "找 10 张室内家居图，不要水印",
-    "media_type": "image",
-    "target_count": 10,
-    "business_domain": "home_lifestyle",
-    "auto_refill": True,
-    "execution_mode": "interactive",
-}
+from draft_helpers import confirmation, make_service
 
 
 class TaskServiceTest(unittest.TestCase):
     def setUp(self):
-        self.service = TaskService(InMemoryTaskRepository())
+        self.service = make_service(InMemoryTaskRepository())
         self.actor = Actor("tenant-a", "user-a")
+        self.body = confirmation(self.service, self.actor)
 
     def test_same_idempotency_key_and_body_replays_task(self):
-        first, first_replayed = self.service.create_task(self.actor, "key-1", BODY)
-        second, second_replayed = self.service.create_task(self.actor, "key-1", BODY)
+        first, first_replayed = self.service.create_task(self.actor, "key-1", self.body)
+        second, second_replayed = self.service.create_task(self.actor, "key-1", self.body)
         self.assertFalse(first_replayed)
         self.assertTrue(second_replayed)
         self.assertEqual(first["task_id"], second["task_id"])
 
     def test_same_idempotency_key_with_new_body_conflicts(self):
-        self.service.create_task(self.actor, "key-1", BODY)
-        changed = {**BODY, "target_count": 20}
+        self.service.create_task(self.actor, "key-1", self.body)
+        changed = {**self.body, "proposal_digest": "sha256:" + "0" * 64}
         with self.assertRaises(ServiceError) as raised:
             self.service.create_task(self.actor, "key-1", changed)
         self.assertEqual(raised.exception.code, "IDEMPOTENCY_CONFLICT")
 
     def test_cross_user_task_is_hidden(self):
-        created, _ = self.service.create_task(self.actor, "key-1", BODY)
+        created, _ = self.service.create_task(self.actor, "key-1", self.body)
         with self.assertRaises(ServiceError) as raised:
             self.service.get_task(Actor("tenant-a", "user-b"), created["task_id"])
         self.assertEqual(raised.exception.status, 404)
