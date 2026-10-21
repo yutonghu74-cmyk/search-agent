@@ -28,3 +28,11 @@
 - core 原交付再次运行角色检查 PASS（60 项），A 演示增量使用全量 73 项回归；A 无专属角色检查器，不伪造角色范围通过。
 - 演示用短独立临时目录，报告标注 synthetic_fixed_input 与执行模式，保留证据但不提供进程重启恢复。未推送、部署或读取真实数据。
 - 合并 87ee197 后，主工作区全量 73 项回归通过；真实终端交互 `--executor real` 经三个确认点运行成功，报告 /tmp/d2zhzqvqk/demo-report.json：status=preview_ready、清洗 3 pass/1 fail、唯一通过 2、重复 1、预览缺口 1、accepted_count=null、任务 RUNNING。这是开发者使用合成数据的验收，不代表用户已验收业务效果。
+
+## 本地持久化与恢复（更新上述内存演示边界）
+
+- A 分派基线 551eae4052fbc9e1dacf7c086ecc2972c0dc7d39，core 按 docs/dev/storage-task.md 在独立工作区完成 SQLite 仓库，角色门禁及 81 项测试 PASS，提交 78e457e 后集成。
+- A / codex/integration / var/worktrees/integration 在 78e457e 上装配演示恢复；公共仓库协议不变。交互演示改用 workspace/ledger.sqlite3，清洗批准后以原子替换保存 session.json；HTTP 入口仍为内存，未宣称全部入口持久化。
+- `--resume <原目录>` 校验原执行模式、任务/代次和源文件摘要，使用原任务/operation/批准摘要。已完成操作不重新提交；已批准而未完成的操作支持幂等继续；暂停/取消拒绝自动恢复。候选批准前状态、已清理临时媒体、旧演示目录不支持该恢复入口。
+- A 新增 5 项测试，完整 86 项通过：完成会话由新进程恢复、模拟提交中断后的已预约 operation 重用、内容变化拒绝、模式不匹配拒绝、取消后拒绝。提交中断通过注入 SystemExit 模拟，非真实断电测试。
+- SQLite 为本地开发单快照实现，16 MB 上限；schema format=1，版本不匹配或坏记录失败关闭，不自动清库。不是内网生产选型、SSE/outbox 或后台恢复调度；跨系统授权事务与断电故障注入尚未验证。无新增依赖、无 PostgreSQL 安装。

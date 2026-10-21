@@ -23,7 +23,7 @@ DSH、Milvus 和真实身份系统尚未接入。DJ 已接入内部 CleaningServ
 接入所需资料与边界见 [W3 登录对接约定](docs/p0/w3-integration.md)。
 
 公司内部使用 ClickHouse 和 Milvus，暂无可复用的 PostgreSQL。
-任务服务已通过 `TaskRepository` 接口与存储解耦，外部开发使用内存适配器；
+任务服务已通过 `TaskRepository` 接口与存储解耦；HTTP 开发入口仍使用内存适配器，交互演示已使用本地 SQLite 快照适配器；
 生产任务存储保持待选，PostgreSQL DDL 仅为候选草案。
 参见 [内网对接约定](docs/p0/internal-integration.md) 和
 [对接配置模板](config/internal-integration.example.json)。模板尚未接入运行时加载。
@@ -102,7 +102,16 @@ PYTHONPATH=src python3 -m dsh_retrieval.demo --executor real
 依次查看需求、4 张固定合成候选和宽度清洗规则，每步输入 `确认` 或 `y` 才继续。
 其他输入停止；执行中 Ctrl-C 请求取消并先撤销结果提交资格。没有自动批准参数。
 预期宽度通过 3、失败 1、重复剔除 1、唯一通过 2，目标 3 的预览缺口为 1；不自动补数。
-报告和合成图片保留在终端显示的 `/tmp/d...` 目录，可能被系统清理；业务账本仍为内存，退出不支持恢复。
+报告、合成图片与本地 SQLite 账本保留在终端显示的 `/tmp/d...` 目录，可能被系统清理。
+本次升级后，已确认清洗的会话支持恢复（用实际目录替换下方占位符）：
+
+```bash
+PYTHONPATH=src python3 -m dsh_retrieval.demo --executor real --resume /tmp/d实际目录
+```
+
+必须使用原执行模式，模拟会话用 `--executor simulated`。恢复沿用原任务/operation，已完成作业只读回结果，未完成作业继续查询或重放同一提交；仍需明确确认。
+已取消/暂停的任务不会自动重跑。清洗确认之前的退出、源图片丢失/变化、旧版内存演示目录不支持此恢复入口。
+SQLite 目前是上限 16 MB 的单快照开发账本，验证本机事务与进程重启，不是正式生产存储、outbox 或内网数据库选型。
 这不是最终业务交付，`accepted_count` 仍为空；真实模式只代表 DJ 确实运行，不代表真实库检索或全部业务规则通过。
 
 ## 目录
