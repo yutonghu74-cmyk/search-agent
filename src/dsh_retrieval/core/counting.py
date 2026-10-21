@@ -22,6 +22,7 @@ class CountingPreviewService:
         if operation is None:
             raise ServiceError("CLEANING_NOT_READY", "complete cleaning before counting", 409)
         proposal = operation.proposal
+        self.catalog.require_scope(task, proposal.manifest_ref)
         candidates, width = self.catalog.resolve(actor.tenant_id, task.project_id,
                                                   proposal.manifest_ref, proposal.recipe_ref)
         if candidates != proposal.candidates or width != proposal.min_width:

@@ -127,6 +127,14 @@ class CleaningExecutor(Protocol):
 
 
 class CleaningCatalog(Protocol):
+    def require_scope(self, task: Task, manifest_ref: str) -> None:
+        """Check manifest task/revision/generation binding before resolving it.
+
+        Legacy local fixtures are project-scoped only; published intake manifests
+        must enforce exact task ownership and current generation.
+        """
+        ...
+
     def resolve(self, tenant_id: str, project_id: str, manifest_ref: str,
                 recipe_ref: str) -> tuple[tuple[Candidate, ...], int]: ...
 

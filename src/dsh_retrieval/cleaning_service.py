@@ -20,6 +20,7 @@ class CleaningService:
 
     def prepare(self, actor, task_id, manifest_ref, recipe_ref="image-width@1"):
         task = self._authorize(actor, task_id, "approve")
+        self.catalog.require_scope(task, manifest_ref)
         candidates, width = self.catalog.resolve(actor.tenant_id, task.project_id, manifest_ref, recipe_ref)
         proposal = CleaningProposal("cp_" + uuid.uuid4().hex, actor.tenant_id, actor.user_id,
                                     task.project_id, task_id, task.confirmed_revision, task.run_generation,
@@ -33,7 +34,8 @@ class CleaningService:
         if action != "confirm":
             raise ServiceError("CONFIRMATION_REQUIRED", "explicit owner confirmation is required", 422)
         proposal = self.repository.get_cleaning_proposal(actor, proposal_id)
-        self._authorize(actor, proposal.task_id, "approve")
+        task = self._authorize(actor, proposal.task_id, "approve")
+        self.catalog.require_scope(task, proposal.manifest_ref)
         # Revalidate current authorized inputs; never execute changed bytes under an old approval.
         current, width = self.catalog.resolve(actor.tenant_id, proposal.project_id, proposal.manifest_ref, proposal.recipe_ref)
         if current != proposal.candidates or width != proposal.min_width:

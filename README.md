@@ -81,6 +81,12 @@ DJ 环境恢复及图片探针见 [第一轮落地记录](docs/dev/implementatio
 
 内部清洗提交、取消栅栏及逐素材回传见 [第二轮落地记录](docs/dev/implementation-slice-02.md)。
 
+固定合成候选接入、明确确认、真实 DJ 与去重预览的串联入口：
+`PYTHONPATH=src python3 tools/cleaning_smoke.py`。
+需先准备前述独立 DJ 环境；候选来源是模拟固定输入，不是语义检索，不查询 ClickHouse/Milvus。
+该演示生成 4 张图片（含一对内容重复），预期清洗通过 3 张、唯一通过 2 张；
+accepted_count 仍为空，任务不自动完成。最新进度见 [总控交接](docs/dev/handoffs/integration.md)。
+
 ## 目录
 
 - `src/dsh_retrieval/`：领域契约、状态机、应用服务和最小 HTTP 适配器。

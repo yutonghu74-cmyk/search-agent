@@ -15,6 +15,10 @@ class LocalCleaningCatalog:
             raise ValueError("min_width must be 1..8192")
         self.min_width = min_width
 
+    def require_scope(self, task, manifest_ref):
+        if (task.tenant_id, task.project_id, manifest_ref) not in self.manifests:
+            raise ServiceError("NOT_FOUND", "authorized input manifest was not found", 404)
+
     def resolve(self, tenant_id, project_id, manifest_ref, recipe_ref):
         if recipe_ref != "image-width@1":
             raise ServiceError("FEATURE_NOT_SUPPORTED", "recipe is not allowlisted", 422)
