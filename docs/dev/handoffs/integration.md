@@ -36,3 +36,4 @@
 - `--resume <原目录>` 校验原执行模式、任务/代次和源文件摘要，使用原任务/operation/批准摘要。已完成操作不重新提交；已批准而未完成的操作支持幂等继续；暂停/取消拒绝自动恢复。候选批准前状态、已清理临时媒体、旧演示目录不支持该恢复入口。
 - A 新增 5 项测试，完整 86 项通过：完成会话由新进程恢复、模拟提交中断后的已预约 operation 重用、内容变化拒绝、模式不匹配拒绝、取消后拒绝。提交中断通过注入 SystemExit 模拟，非真实断电测试。
 - SQLite 为本地开发单快照实现，16 MB 上限；schema format=1，版本不匹配或坏记录失败关闭，不自动清库。不是内网生产选型、SSE/outbox 或后台恢复调度；跨系统授权事务与断电故障注入尚未验证。无新增依赖、无 PostgreSQL 安装。
+- 主工作区集成 3ae6249 后，86 项回归 PASS；真实 DJ 新会话 /tmp/dm6avsi8a 运行成功，再由独立 CLI 进程执行 `--executor real --resume /tmp/dm6avsi8a`，恢复 PASS。operation_id 始终 clean_e7dfd2bd0ddd43e5a197bed94d2e1aab，task_version=3、unique_pass_count=2 不变，原 DJ run_r001 未重新提交。证据 /tmp/dm6avsi8a/demo-report.json（合成临时数据）。这验证已完成作业跨进程恢复；真实运行中的强杀/断电恢复尚未实测。
