@@ -87,6 +87,24 @@ DJ 环境恢复及图片探针见 [第一轮落地记录](docs/dev/implementatio
 该演示生成 4 张图片（含一对内容重复），预期清洗通过 3 张、唯一通过 2 张；
 accepted_count 仍为空，任务不自动完成。最新进度见 [总控交接](docs/dev/handoffs/integration.md)。
 
+### 交互演示（终端版）
+
+在仓库根目录执行：
+
+```bash
+# 无额外依赖，明确标注模拟执行；不代表真实 DJ 验证
+PYTHONPATH=src python3 -m dsh_retrieval.demo --executor simulated
+
+# 使用已经准备好的本工作区 DJ 环境；不自动安装或退回模拟
+PYTHONPATH=src python3 -m dsh_retrieval.demo --executor real
+```
+
+依次查看需求、4 张固定合成候选和宽度清洗规则，每步输入 `确认` 或 `y` 才继续。
+其他输入停止；执行中 Ctrl-C 请求取消并先撤销结果提交资格。没有自动批准参数。
+预期宽度通过 3、失败 1、重复剔除 1、唯一通过 2，目标 3 的预览缺口为 1；不自动补数。
+报告和合成图片保留在终端显示的 `/tmp/d...` 目录，可能被系统清理；业务账本仍为内存，退出不支持恢复。
+这不是最终业务交付，`accepted_count` 仍为空；真实模式只代表 DJ 确实运行，不代表真实库检索或全部业务规则通过。
+
 ## 目录
 
 - `src/dsh_retrieval/`：领域契约、状态机、应用服务和最小 HTTP 适配器。
