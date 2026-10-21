@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dsh-retrieval:query-spec:1",
+  "title": "QuerySpec v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "raw_request", "media_type", "target_count", "business_domain"],
+  "properties": {
+    "schema_version": {"const": "query-spec@1"},
+    "raw_request": {"type": "string", "minLength": 1},
+    "media_type": {"enum": ["image", "video"]},
+    "count_unit": {"enum": ["image", "clip", "distinct_video"]},
+    "target_count": {"type": "integer", "minimum": 1},
+    "quotas": {"type": "array", "default": [], "items": {"type": "object"}},
+    "business_domain": {"type": "string", "minLength": 1},
+    "source_constraints": {"type": "array", "default": [], "items": {"type": "object"}},
+    "rules": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "predicate_ref", "operator", "value", "hardness", "origin"],
+        "properties": {
+          "rule_id": {"type": "string", "minLength": 1},
+          "predicate_ref": {"type": "string", "minLength": 1},
+          "operator": {"type": "string", "minLength": 1},
+          "value": {},
+          "hardness": {"enum": ["hard", "soft"]},
+          "origin": {"enum": ["user_explicit", "user_confirmed", "skill_suggested", "system_default"]}
+        }
+      }
+    },
+    "preferences": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "value"],
+        "properties": {"field": {"type": "string"}, "value": {}}
+      }
+    },
+    "query_seeds": {"type": "array", "default": [], "items": {"type": "string", "minLength": 1}},
+    "dedup_policy": {"type": "string", "default": "visual-near-duplicate-v1"},
+    "unknown_policy": {"const": "hold_for_review", "default": "hold_for_review"},
+    "allow_auto_refill": {"type": "boolean", "default": true}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"media_type": {"const": "image"}}, "required": ["media_type"]},
+      "then": {"properties": {"count_unit": {"const": "image"}}}
+    },
+    {
+      "if": {"properties": {"media_type": {"const": "video"}}, "required": ["media_type"]},
+      "then": {"properties": {"count_unit": {"enum": ["clip", "distinct_video"]}}, "required": ["count_unit"]}
+    }
+  ]
+}

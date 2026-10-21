@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dsh-retrieval-agent"
+version = "0.1.0"
+description = "P0 contract baseline for the DSH multimodal retrieval agent"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

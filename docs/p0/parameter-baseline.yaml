@@ -1,0 +1,10 @@
+baseline_version: p0-draft-1
+status: DRAFT
+parameters:
+  T_first: {value: UNRESOLVED, unit: milliseconds, owner: UNRESOLVED, evidence: UNRESOLVED}
+  T_batch_p95: {value: UNRESOLVED, unit: milliseconds, owner: UNRESOLVED, evidence: UNRESOLVED}
+  C_item: {value: UNRESOLVED, unit: UNRESOLVED, owner: UNRESOLVED, evidence: UNRESOLVED}
+  T_cancel: {value: UNRESOLVED, unit: milliseconds, owner: UNRESOLVED, evidence: UNRESOLVED}
+  target_concurrency: {value: UNRESOLVED, unit: tasks, owner: UNRESOLVED, evidence: UNRESOLVED}
+  idempotency_retention: {value: UNRESOLVED, unit: hours, owner: UNRESOLVED, evidence: UNRESOLVED}
+  event_retention: {value: UNRESOLVED, unit: hours, owner: UNRESOLVED, evidence: UNRESOLVED}

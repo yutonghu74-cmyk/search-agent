@@ -1,0 +1,95 @@
+openapi: 3.1.0
+info:
+  title: DSH Retrieval Business API
+  version: 0.1.0-p0
+  description: P0/P1 contract slice. Identity is supplied by a trusted gateway, never by the request body.
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /v1/retrieval/tasks:
+    post:
+      operationId: createRetrievalTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTaskRequest'}
+      responses:
+        '202':
+          description: Task accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskSummary'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/retrieval/tasks/{task_id}:
+    get:
+      operationId: getRetrievalTask
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Authoritative task status
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskSummary'}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 255}
+  responses:
+    Error:
+      description: Stable error envelope
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    CreateTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [request, media_type, target_count, business_domain]
+      properties:
+        request: {type: string, minLength: 1}
+        media_type: {const: image}
+        target_count: {type: integer, minimum: 1}
+        business_domain: {type: string, minLength: 1}
+        auto_refill: {type: boolean, default: true}
+        execution_mode: {const: interactive, default: interactive}
+    TaskSummary:
+      type: object
+      required: [task_id, task_version, task_lifecycle, run_generation, run_status, status_url, events_url, trace_id]
+      properties:
+        task_id: {type: string}
+        confirmed_revision: {type: [integer, 'null']}
+        pending_revision: {type: [integer, 'null']}
+        task_version: {type: integer, minimum: 1}
+        task_lifecycle: {enum: [active, archived, deleted]}
+        revision_status: {type: [string, 'null']}
+        run_generation: {type: integer, minimum: 1}
+        run_status: {enum: [CREATED, PARSING, AWAITING_INPUT, PLANNING, RUNNING, PAUSED, COMPLETED, PARTIAL, FAILED, CANCELLED]}
+        stage: {type: [string, 'null']}
+        status_url: {type: string}
+        events_url: {type: string}
+        trace_id: {type: string}
+    Error:
+      type: object
+      additionalProperties: true
+      required: [code, message, retryable, trace_id]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        retryable: {type: boolean}
+        field_path: {type: string}
+        trace_id: {type: string}

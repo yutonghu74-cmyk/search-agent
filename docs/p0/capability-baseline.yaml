@@ -1,0 +1,44 @@
+baseline_version: p0-draft-1
+status: DRAFT
+scope:
+  media_types: [image]
+  count_units: [image]
+  business_domains: [home_lifestyle]
+  group_quotas: disabled
+  execution_modes: [interactive]
+runtime:
+  dsh_release: 0.2.1rc2
+  dsh_cli_version: 0.2.1-rc.2
+  dsh_platform: macos-14-arm64
+  dsh_python: 3.13.3
+  dsh_installation_manifest_sha256:
+    sdk_record: 763747f3819ad14d74df6e01170affc538bb3e71f181c8fff62f708a381d4c71
+    runtime_record: 389480101aed1a664e328f0cf0b44b734caf08df425de2153436e71f31bb2d71
+  dsh_validation:
+    sdk_import: passed
+    runtime_version: passed
+    sdk_profile_help: passed
+    sdk_minimal_profile_help: passed
+    model_turn: NOT_RUN
+  data_juicer_release: 1.5.4
+  operator_package_digest: UNRESOLVED
+connectors:
+  clickhouse_release: UNRESOLVED
+  milvus_release: UNRESOLVED
+  collections: UNRESOLVED
+  encoder_manifest: UNRESOLVED
+  media_mapping_contract: UNRESOLVED
+task_storage:
+  reusable_internal_postgresql: false
+  development_adapter: memory
+  production_adapter: UNRESOLVED
+  postgresql_ddl_status: optional_draft_not_applied
+  decision_ref: docs/p0/internal-integration.md
+security:
+  identity_provider: W3
+  identity_integration_status: NOT_CONNECTED
+  identity_protocol: UNRESOLVED
+  identity_contract_ref: docs/p0/w3-integration.md
+  authorization_source: UNRESOLVED
+  external_model_data_policy: UNRESOLVED
+note: UNRESOLVED values block the corresponding P0 exit gate.

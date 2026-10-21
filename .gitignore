@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+.venv/
+.venv-dsh/
+var/
+.uv-cache/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Existing local dependency (source + environments/data); separately audited packaging required.
+/data-juicer-codex-dj-plan-explorer/
+dist/
+build/
+*.egg-info/

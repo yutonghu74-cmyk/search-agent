@@ -1,0 +1,36 @@
+{
+  "spec": "规格书/DSH检索Agent_设计方案与落地规格书_v1.9.md",
+  "roles": {
+    "core": {
+      "branch": "codex/task-core",
+      "allow": [
+        "src/dsh_retrieval/service.py",
+        "src/dsh_retrieval/state_machine.py",
+        "src/dsh_retrieval/adapters/memory.py",
+        "src/dsh_retrieval/core/",
+        "src/dsh_retrieval/adapters/task_storage/",
+        "tests/core/",
+        "tests/test_service.py",
+        "tests/test_task_repository.py",
+        "docs/dev/handoffs/core.md"
+      ]
+    },
+    "retrieval": {
+      "branch": "codex/retrieval-adapters",
+      "allow": [
+        "src/dsh_retrieval/adapters/retrieval/",
+        "src/dsh_retrieval/adapters/dsh/",
+        "tests/retrieval/",
+        "docs/dev/handoffs/retrieval.md"
+      ]
+    },
+    "cleaning": {
+      "branch": "codex/cleaning-adapter",
+      "allow": [
+        "src/dsh_retrieval/adapters/cleaning/",
+        "tests/cleaning/",
+        "docs/dev/handoffs/cleaning.md"
+      ]
+    }
+  }
+}

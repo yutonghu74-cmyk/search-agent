@@ -1,0 +1,9 @@
+# Installed and verified on macOS 15.6.1 arm64 with Python 3.13.3.
+# DSH SDK and runtime must remain on exactly the same version.
+annotated-types==0.8.0
+deepseek-harness-runtime-bin==0.2.1rc2
+deepseek-harness-sdk==0.2.1rc2
+pydantic==2.14.1
+pydantic_core==2.50.1
+typing-inspection==0.4.4
+typing_extensions==4.16.0
