@@ -37,3 +37,26 @@
 - 新增 8 项测试：新实例重放、新进程恢复结果、18 次跨连接并发确认一次、重启后取消栅栏、注入序列化失败事务回滚、未知格式/损坏拒绝、身份隔离、operation 重放。完整测试 81 项通过；无额外依赖安装，无真实数据。
 - 生产持久性、断电故障注入、网络文件系统、内网授权竞争与完整运行调度 NOT_RUN；只支持本机文件，不替用户决定内网账本。
 - 未改公共端口、共享模型或检查器；交付前运行该基线 core 角色门禁。A 后续接演示恢复入口，候选临时目录失效仍须明确报错，不能悄悄使用新内容。
+
+## 2026-10-22 检索计划账本任务卡（本轮）
+
+- 角色 core / codex/task-core / /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core；基线 7e9e33832352b22e2d68fcb82bdb86cca44973c1。
+- 用户继续开发，沿用本地测试后提交/审查集成授权；不推送、部署、安装依赖或接内网。本轮单窗口，无其他修改者。
+- 范围：adapters/task_storage/、tests/core/、本交接；消费 contracts/retrieval-plan.md 与 RetrievalPlanRepository，不改公共协议、模型及检查器。
+- 实现目标：独立 SQLite 检索账本与已有 local_ledger 同库同事务；原子确认/CAS/多键幂等、页预约与游标来源、过期回传拒绝、页与本地待发事件原子记录、新连接/进程恢复。
+- 验收：v1.9 6.5、11.2.2、13.5；A12/A14/A15/A16/A20/A37/A49 的本地存储子集。并发确认只一次；失败回滚；撤权拒绝；空页不创建清洗/不标业务完成；旧 epoch/代次不能发布；保持旧任务账本可读。
+- 存储策略：保留原 local_ledger format=1 数据，新增独立版本化 retrieval_ledger 表；旧二进制遇扩展表会失败关闭，不承诺无迁移降级。每个快照仍有开发大小上限；不是生产 outbox 消费器或真实内网授权事务。
+- 状态：开发中。测试与实际结果待补；不运行 DSH 或真实 DJ。
+
+### 本轮交付结果
+
+- 状态 READY_FOR_REVIEW（本地账本切片）；代码待本地提交后由 A 审查集成。
+- 文件：adapters/task_storage/retrieval.py、adapters/task_storage/sqlite.py、tests/core/test_retrieval_storage.py、本交接文件；未改公共模型/协议/责任表/检查器。
+- 实现 SQLiteRetrievalPlanRepository：共用任务数据库的 BEGIN IMMEDIATE；计划确认/CAS/epoch/当前指针/幂等同事务；重复提案确认与同页多键预约仅一次效果；回传验证 operation、scope、查询及游标/快照，记录不可变页和本地待发事件。重放旧确认返回历史记录但不重新激活；旧计划执行拒绝。
+- 权限：每个入口重新核验任务所有人、项目、库权限；未配置/撤权/依赖不可用均失败关闭。写入前再次检查不等于对外部 ACL 加锁。没有读取真实内网授权或数据。
+- 旧 local_ledger payload/format=1 不迁移、不清空；检索另用 retrieval_ledger format=1，每份快照最多 16 MB。旧二进制会拒绝带新表的文件，不支持无条件降级。SQLite 全快照串行写仅供开发，未改变生产选型。
+- 验证：2026-10-22 10:26（Asia/Shanghai），Python 3.13.3；`python3 tools/collab_gate.py check --role core --base 7e9e33832352b22e2d68fcb82bdb86cca44973c1` 退出码 0，SCOPE PASS / LOCAL GATE PASS，144 项通过（原 123 + 新 21）；git diff --check 通过。
+- 新测试覆盖：18 次跨连接确认、12 次并发预约/回传各一次效果；事务序列化故障回滚；新进程恢复批准计划及原 operation；变更正文冲突；旧确认不激活；旧代次/取消拒绝；游标前驱与不可变页；空页不清洗/不完成；撤权及授权故障；原账本兼容与检索格式损坏；模拟网关→页校验→账本的两页串联。
+- NOT_RUN：真实 DJ/ClickHouse/Milvus/W3、断电/网络文件系统故障、生产性能、跨系统授权原子性、事件 relay、业务 UI/HTTP/清洗装配。本地事件只是待发记录，没有发送或消费保证。
+- 约束：每个 task 的 plan_id 不可变；新提案使用新 ID 和账本下一 epoch（不符返回期望 epoch）。get_current 遇陈旧 task scope 会拒绝，不返回可执行旧计划。已有清洗尚未终结时不允许新检索计划确认；支持流水线并发需要另行冻结兼容承接契约。
+- 后续接口缺口：现有协议可通过同 key 恢复预约，但缺少按任务列举待执行作业/读取已提交页的公共接口。下一步由 A 冻结恢复读取与候选清单发布契约，再装配自动恢复及清洗；本轮不私增公共接口，不宣称全业务闭环。

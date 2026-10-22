@@ -19,9 +19,13 @@ from ...cleaning_models import Candidate, CleaningOperation, CleaningProposal
 from ...errors import ServiceError
 from ...models import Task, TaskLifecycle, RunStatus
 from ...proposals import Draft
+from ...integration_models import IndexBinding, QueryVector, SearchRequest, SearchHit, SearchPage
+from ...retrieval_contracts import RetrievalPlan, RetrievalScope
 
 
-TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal, Task, Draft)}
+TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal, Task, Draft,
+                              IndexBinding, QueryVector, SearchRequest, SearchHit, SearchPage,
+                              RetrievalPlan, RetrievalScope)}
 ENUMS = {t.__name__: t for t in (TaskLifecycle, RunStatus)}
 FORMAT = 1
 MAX_BYTES = 16 * 1024 * 1024
@@ -108,7 +112,7 @@ class SQLiteTaskRepository:
             with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if tables and tables != {"local_ledger"}:
+                if tables and ("local_ledger" not in tables or tables - {"local_ledger", "retrieval_ledger"}):
                     raise ServiceError("STORAGE_FORMAT_UNSUPPORTED", "not a local demo ledger", 500)
                 db.execute("CREATE TABLE IF NOT EXISTS local_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)")
                 row = db.execute("SELECT format, payload FROM local_ledger WHERE id=1").fetchone()
