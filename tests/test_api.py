@@ -87,6 +87,13 @@ class ApiTest(unittest.TestCase):
             f"/v1/retrieval/conversations/{draft['conversation_id']}")
         self.assertEqual([item["kind"] for item in conversation["messages"]], ["request", "feedback"])
         self.assertEqual([item["revision"] for item in conversation["confirmations"]], [1, 2])
+        status, progress, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/progress")
+        self.assertEqual(status, 200)
+        self.assertEqual(progress["revision"], 2)
+        self.assertEqual([item["node_status"] for item in progress["nodes"]],
+                         ["running", "pending", "pending", "pending", "pending"])
+        self.assertEqual(progress["counts"]["target"], 10)
+        self.assertIsNone(progress["counts"]["accepted"])
 
     def test_feedback_requires_identity_and_idempotency_key(self):
         status, body, _ = self.request("/v1/retrieval/tasks/missing/feedback", body={}, identity=False)
@@ -98,6 +105,8 @@ class ApiTest(unittest.TestCase):
         status, body, _ = self.request("/v1/retrieval/projects/demo/tasks", identity=False)
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
         status, body, _ = self.request("/v1/retrieval/projects/demo/conversations", identity=False)
+        self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
+        status, body, _ = self.request("/v1/retrieval/tasks/missing/progress", identity=False)
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
 
 

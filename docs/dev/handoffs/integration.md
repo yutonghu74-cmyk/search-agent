@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 五节点只读进度快照与页面（2026-10-23）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/task-progress-ui.json`，可信任务基线 `e0dd3322676245d1ad7f505fb50aa42b7738a1f5`，任务起点 `3967615f90e884edebda3512733e1d5a4aaf31dc`；状态 READY_FOR_REVIEW（等待本地浏览器验收）。
+- 新增五节点只读投影与 `GET /v1/retrieval/tasks/{task_id}/progress`。快照绑定 task/revision/task_version/generation，显示确认方案中的 manual/auto；只根据现有 run_status/stage 和已进入后继阶段这一事实推进节点，未知 stage 不猜测完成状态。
+- 目标数量来自已确认方案；没有权威结果集时 returned/passed/duplicate/accepted/pending_review/gap 全部为 null，页面显示“未知”，不计算整体百分比。当前本地 `PLANNING` 任务仅把扩词/选库/计划节点显示为 running，不声称检索或清洗已启动。
+- 定向命令 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_progress_models tests.test_api tests.test_chat_ui -q`：11 项通过、退出码 0；`PYTHONPATH=src python3 ... | node --check`：退出码 0；integration 门禁：SCOPE PASS、425 项通过、LOCAL GATE PASS。按用户要求不额外重复完整回归。
+- 边界：即时只读投影，不是持久 workflow_node_instance 或事件历史；没有统计水位、结果分页、SSE、节点批准、控制命令或后台执行，不访问内网/真实数据/DJ。
+
 ## 草稿会话历史 HTTP/UI（2026-10-23）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/conversation-history-ui.json`，可信任务基线 `8805aff4ae7bb73d84dd629d926b210604d92941`，任务起点 `b3b13c6b98964402df9ed4e43eebf7a1259c8557`；状态 ACCEPTED（本地体验切片）。

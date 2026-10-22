@@ -15,6 +15,7 @@ from .service import InMemoryTaskRepository, TaskService
 from .adapters.projects import LocalProjectAccess
 from .adapters.task_storage.sqlite import SQLiteTaskRepository
 from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
+from .progress_models import build_task_progress
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -22,6 +23,7 @@ DRAFT_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/drafts(?:/([^/]+))?$")
 FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$")
 CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
 REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
+PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/progress$")
 PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
@@ -126,12 +128,13 @@ class Handler(BaseHTTPRequestHandler):
         draft_match = DRAFT_PATH.fullmatch(self.path)
         feedback_match = FEEDBACK_PATH.fullmatch(self.path)
         revisions_match = REVISIONS_PATH.fullmatch(self.path)
+        progress_match = PROGRESS_PATH.fullmatch(self.path)
         project_tasks_match = PROJECT_TASKS_PATH.fullmatch(self.path)
         project_conversations_match = PROJECT_CONVERSATIONS_PATH.fullmatch(self.path)
         conversation_match = CONVERSATION_PATH.fullmatch(self.path)
         if (match is None and not (draft_match and draft_match.group(2))
                 and not (feedback_match and feedback_match.group(2))
-                and revisions_match is None and project_tasks_match is None
+                and revisions_match is None and progress_match is None and project_tasks_match is None
                 and project_conversations_match is None and conversation_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
@@ -145,6 +148,16 @@ class Handler(BaseHTTPRequestHandler):
             if revisions_match:
                 return HTTPStatus.OK, {"items": list(self.service.list_revisions(
                     self._actor(), revisions_match.group(1)))}, False
+            if progress_match:
+                actor = self._actor()
+                task = self.service.get_task(actor, progress_match.group(1))
+                revisions = self.service.list_revisions(actor, progress_match.group(1))
+                proposal = next((item["proposal"] for item in revisions
+                                 if item["revision"] == task["confirmed_revision"]), None)
+                try:
+                    return HTTPStatus.OK, build_task_progress(task, proposal).to_view(), False
+                except ValueError:
+                    raise ServiceError("STORAGE_CORRUPT", "task progress binding is invalid", 500) from None
             if project_tasks_match:
                 return HTTPStatus.OK, {"items": list(self.service.list_tasks(
                     self._actor(), project_tasks_match.group(1)))}, False
