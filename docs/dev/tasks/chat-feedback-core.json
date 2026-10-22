@@ -1,0 +1,14 @@
+{
+  "role": "core",
+  "branch": "codex/task-core",
+  "source_base": "b7b871b83e7d13e118c4b04bf6c1a3bed7936b57",
+  "files": [
+    "src/dsh_retrieval/service.py",
+    "src/dsh_retrieval/adapters/memory.py",
+    "src/dsh_retrieval/adapters/task_storage/sqlite.py",
+    "tests/core/test_feedback.py",
+    "tests/core/test_sqlite_storage.py",
+    "docs/dev/handoffs/core.md"
+  ],
+  "acceptance": "实现 chat-feedback.md 的本地业务事务：创建人提交 all-scope 反馈时，服务端从当前 confirmed_proposal_json 派生完整规范化方案，把反馈文本明确追加到 raw_request；草稿保存和读取每次校验 owner/project 权限、expected_revision/task_version，且不改变 task、generation 或 run。确认/拒绝绑定 draft_version、proposal_digest、task_version、action 和 route-scoped Idempotency-Key；确认原子发布新 revision，task_version/generation 各加一，旧 active run 被替代且新版本进入 PLANNING；拒绝只更新草稿。实现不可变 revision 历史读取、同键重放/异体冲突、并发仅一次生效、跨用户隐藏、权限撤销、陈旧版本/摘要拒绝、SQLite 重启恢复与旧快照兼容。完整方案仍需用户确认，反馈文本不冒充已编译执行规则。不修改 HTTP/UI，不运行真实检索/DJ、不访问内网；定向测试和 core 门禁通过。"
+}
