@@ -1,0 +1,16 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "4963dd7cea4b466193eb4afe239186bd60854fec",
+  "files": [
+    "src/dsh_retrieval/detector_artifacts.py",
+    "src/dsh_retrieval/detector_release_config.py",
+    "src/dsh_retrieval/released_detectors.py",
+    "tests/test_detector_artifacts.py",
+    "tests/test_detector_release_config.py",
+    "tests/test_released_detectors.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "增加仅由服务端显式指定的受信检测器发布 JSON 配置加载入口；严格拒绝未知字段、错误 schema、重复后端/制品、绝对或越界路径、非法摘要、非普通或符号链接配置文件及超限输入。部署根目录不从配置或业务请求取得，不动态导入模块、安装或下载制品。加载时将配置转换为现有 DetectorArtifactManifest，并对全部已登记运行时检测器及实现/模型文件执行启动预检；缺失、多余、元数据/绑定错配、文件缺失或摘要漂移均在任何候选媒体读取前失败关闭。保留执行前复核、批准/权限/代次和预览幂等栅栏。用本地合成配置及制品覆盖成功、格式错误、启动失败和执行前漂移；不注册真实模型、不运行真实 DJ、不访问内网。更新契约和 integration 交接，定向测试、完整回归及 integration 角色门禁通过。"
+}
