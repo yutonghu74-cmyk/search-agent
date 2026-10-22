@@ -1,5 +1,15 @@
 # core 精确内容计数预览交接
 
+## 当前任务：候选清单本地账本
+
+- core / codex/task-core / var/worktrees/core；基线 8d7dcc8b39a672ad174cf91704a84e5c66eec883；范围 task_storage/、tests/core/、本交接，验收见 docs/dev/candidate-ledger-task.md。
+- 实现 CandidateManifestRepository；本地 SQLite，同任务/检索账本事务读取栅栏，发布清单/幂等键/待发事件一起保存。无真实媒体/内网或自动清洗。
+- 2026-10-22 12:15（Asia/Shanghai）完成候选账本与 20 项测试；修改 candidates.py、sqlite.py（类型注册及新表兼容）、test_candidate_storage.py、本交接。旧任务/检索 payload 不变；新 candidate_ledger format=1，16 MB 限制，不迁移或修改用户已有运行库。旧程序不认识新增表，不能直接降级读该库。
+- `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 初轮 202 项通过；新增空页和损坏事件检查后，`python3 tools/collab_gate.py check --role core --base 8d7dcc8b39a672ad174cf91704a84e5c66eec883` 退出码 0，范围和全部 204 项通过（178 原基线 + 6 契约 + 20 存储/模拟集成）。git diff --check 通过。
+- 验证：重启/独立进程恢复、六连接并发同提案多键单次发布、同键异体冲突、确认/读授权、第二次授权失败与序列化失败回滚、跨任务/租户隔离、旧代次/计划拒绝、task_version 递增后清单读取且旧检索仍拒绝、空页无清洗、存储损坏不重置。
+- 模拟服务组合：真实本地物化器 + 合成字节网关 + SQLite，预览后重新读取确认；更改字节拒绝发布；临时目录清理，任务状态/有效数量不变。不是真实召回、DJ 或内网验收。
+- 未验证/下一步：受控清单再次物化与 CleaningCatalog 生命周期装配、跨页候选池、当前授权投影、后台恢复/relay、生产数据库、真实素材可用性。仅保存引用，不承诺远端内容永久可用；跨系统 ACL 与 SQLite 非原子。
+
 - 角色 / 分支：core / codex/task-core。
 - 独立 worktree：/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core。
 - 分派任务：docs/dev/core-counting-task.md；规格 7.11、7.14、8.1 局部场景。
