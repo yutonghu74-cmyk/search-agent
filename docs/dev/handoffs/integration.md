@@ -319,3 +319,9 @@
 - 完整回归：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 退出码 0，391 项通过；输出中的 LOCAL GATE FAIL 是既有负例夹具。integration 门禁待运行。
 - 22:33 CST 交付：`python3 tools/collab_gate.py check --role integration --base 1606e5812910a3b19d9b8f17e4b95556f86f5031 --task docs/dev/tasks/released-cleaning-approval-entry.json` 退出码 0，SCOPE PASS、内部 391 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。状态 READY_FOR_REVIEW。
 - NOT_RUN：真实 DJ、真实检测器/模型、生产配置发布与回滚、ClickHouse/Milvus/W3、内网数据；入口只证明受信身份来源和失败关闭，不证明检测效果或完整产品装配。
+# Chat 提单与反馈领域契约（2026-10-22）
+
+- 角色：A integration；分支 `codex/integration`；基线 `9308a73`；任务卡 `docs/dev/tasks/chat-feedback-contract.json`；22:40 开工，22:43 完成端口与契约草案。
+- 冻结 `save/get/confirm_feedback_draft` 与 `list_revisions` 端口：反馈草稿不改变正式版本或运行，确认绑定 draft/task 版本、完整摘要和幂等键，拒绝不影响当前正式版本。
+- 首个体验版明确只把反馈文本追加进完整确认方案，不宣称已经把自然语言编译为可执行规则；真实 W3、检索、DJ、模型语义编译和内网均为 NOT_RUN/NOT_CONNECTED。
+- 验证：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 共 391 项通过；`python3 tools/collab_gate.py check --role integration --base 9308a7353df7663417942855ff468cc51cebcc4b --task docs/dev/tasks/chat-feedback-contract.json` 为 SCOPE PASS、内部 391 项通过、LOCAL GATE PASS。输出中的 `LOCAL GATE FAIL` 来自既有负向门禁夹具。

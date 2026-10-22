@@ -143,6 +143,36 @@ class TaskRepository(Protocol):
         """
         ...
 
+    def save_feedback_draft(self, actor: Actor, key: str, task_id: str, *,
+                            expected_revision: int, expected_task_version: int,
+                            proposal_json: str, feedback_text: str, scope: str,
+                            draft_id: str | None = None,
+                            expected_draft_version: int | None = None) -> tuple[dict[str, Any], bool]:
+        """Save an owner-only proposed revision without changing the active task.
+
+        The proposal is a complete normalized snapshot prepared by the business
+        service, not executable text. Creating/updating a draft must preserve the
+        confirmed revision, generation and run. Idempotency is route scoped.
+        """
+        ...
+
+    def get_feedback_draft(self, actor: Actor, task_id: str, draft_id: str) -> dict[str, Any]: ...
+
+    def confirm_feedback_draft(self, actor: Actor, key: str, task_id: str, *,
+                               draft_id: str, expected_draft_version: int,
+                               proposal_digest: str, expected_task_version: int,
+                               action: str) -> tuple[dict[str, Any], bool]:
+        """Confirm or reject one still-current feedback draft atomically.
+
+        Confirmation publishes one immutable revision, increments task_version
+        and generation, supersedes an active run and starts planning the new
+        revision. Rejection changes only the draft. Replays return the recorded
+        response; stale task/draft versions or changed bodies conflict.
+        """
+        ...
+
+    def list_revisions(self, actor: Actor, task_id: str) -> tuple[dict[str, Any], ...]: ...
+
 
 class ProjectContextProvider(Protocol):
     def require_access(self, actor: Actor, project_id: str, dimension_id: str, action: str) -> None: ...
