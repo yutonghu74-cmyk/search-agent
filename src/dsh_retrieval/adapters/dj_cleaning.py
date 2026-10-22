@@ -26,6 +26,7 @@ class DJCleaningExecutor:
         environment.update(PYTHONPATH=self.source_root, PYTHONDONTWRITEBYTECODE="1",
                            HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", UV_OFFLINE="1",
                            DJ_PLAN_FLOW_SINGLE_USER="1", HF_HOME=str(Path(self.workspace) / "hf"),
+                           DSH_HOME=str(Path(self.workspace) / "dsh"),
                            DSH_USER_DATA_ROOT=str(Path(self.workspace) / "users"))
         try:
             result = subprocess.run([self.python, self.bridge_script],

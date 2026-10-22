@@ -1,5 +1,15 @@
 # A 总控集成交接
 
+## 持久清单真实 DJ 合成联测（2026-10-22 12:32，Asia/Shanghai）
+
+- A / codex/integration / var/worktrees/integration；基线 084c65b80d8cae52fc096604b4adf3bfb3724a36；范围/验收见 docs/dev/manifest-real-smoke-task.md。新增可重复真实 smoke 入口和两项安全入口测试；DJ 子进程显式独立 DSH_HOME。
+- 实际命令：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 tools/manifest_cleaning_smoke.py --run-real --dj-python /Users/hw-edit/Documents/ChatGPT/search-agent/var/dj-runtime/bin/python --dj-source /Users/hw-edit/Documents/ChatGPT/search-agent/data-juicer-codex-dj-plan-explorer`。只读使用已有解释器/源码，无安装；运行、缓存、DSH_HOME 独立，不共享 DJ 可变 workspace。
+- 首次失败：macOS 默认临时路径导致 DJ multiprocessing `OSError: AF_UNIX path too long`；证据 `/var/folders/sn/hl5d_x_d6f951djxc0rdlx800000gn/T/dsm-r9kzt618/manifest-cleaning-report.json`，stderr 位于该目录 `.dj/tasks/task_07a909a575f3/runs/run_r001/logs/stderr.log`。改 smoke 使用唯一 /tmp 短路径，未改 vendored DJ。
+- 重试退出码 0，REAL_DJ_SYNTHETIC_MEDIA PASS：4 张程序生成 PNG，pass=3/fail=1/unknown=0；operation=clean_c87aa1620e6c49ffb1493d9db4d2bc0f，DJ task_c38950ebba69/run_r001。新下载路径重新 submit 同已批准 operation，仍同 backend；临时下载目录为空；SQLite 操作只有逻辑输入、不留临时路径；重建仓库后 start/poll 幂等。
+- 原始证据 `/tmp/dsm-bgs9ukcy/manifest-cleaning-report.json`，本地报告副本 `var/status/evidence/2026-10-22-manifest-cleaning.json`（Git 忽略）；临时 workspace 日后可能被清理。accepted_count=null、任务仍 RUNNING；没有把 3 个 pass 当去重交付数。检索与授权为模拟夹具，不能称真实语义检索/内网验收。
+- 完整 unittest 命令本轮 224 项通过（222+2）、退出码 0；git diff --check 通过。cleaning 角色检查基线同上，退出码 1（A 分支不匹配）；无 A 专用门禁，不声称通过角色范围检查。
+- 下一步：无路径候选去重与正式结果契约；全规则、生产恢复、运行中断电、内网仍未验证。未推送、部署或修改用户业务数据。
+
 ## 已发布候选接入清洗（2026-10-22 12:24，Asia/Shanghai）
 
 - 集成更新：实现 0bb335942f43a48e045f4308f2400caa0e80e7c6 已快进合入 master；主工作区重跑完整 unittest 命令，222 项通过、退出码 0。ACCEPTED 仅本地模拟装配切片，真实 DJ 新模式仍 NOT_RUN。
