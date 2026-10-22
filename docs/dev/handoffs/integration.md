@@ -2,11 +2,12 @@
 
 ## 草稿会话历史 HTTP/UI（2026-10-23）
 
-- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/conversation-history-ui.json`，可信任务基线 `8805aff4ae7bb73d84dd629d926b210604d92941`，任务起点 `b3b13c6b98964402df9ed4e43eebf7a1259c8557`；状态 READY_FOR_REVIEW。
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/conversation-history-ui.json`，可信任务基线 `8805aff4ae7bb73d84dd629d926b210604d92941`，任务起点 `b3b13c6b98964402df9ed4e43eebf7a1259c8557`；状态 ACCEPTED（本地体验切片）。
 - 新增当前项目会话列表和单会话读取 GET 路由，均要求可信身份并通过服务层创建人/项目权限复验。历史侧栏分为“草稿会话”和“正式需求”；会话详情按序展示需求/反馈及独立“方案已确认”关联，可跳转正式 revision，且明确会话不是业务执行时间线。
 - 旧 SQLite 账本通过 core 迁移保持可读；功能上线前未记录的消息不会伪造补齐，因此旧任务仍只出现在“正式需求”。公开消息不含 tenant/owner，消息本身不携带 task/revision。
 - `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_api tests.test_chat_ui tests.core.test_conversation_storage -q`：11 项通过、退出码 0；`PYTHONPATH=src python3 ... | node --check`：退出码 0。首次 JS 管道提取遗漏 `PYTHONPATH` 产生 `ModuleNotFoundError`，已修正后真实通过。`python3 tools/collab_gate.py check --role integration --base 8805aff4ae7bb73d84dd629d926b210604d92941 --task docs/dev/tasks/conversation-history-ui.json`：SCOPE PASS、420 项通过、LOCAL GATE PASS、退出码 0；其中 `LOCAL GATE FAIL` 是既有负向夹具输出。按用户要求不额外重复完整回归。
-- 边界：本地模拟身份/SQLite 体验；没有附件、assistant 消息、保留清理、全文搜索、W3/内网/真实数据或 DJ。服务重启和浏览器验证待门禁后执行。
+- 本地 8080 服务已用主账本重启。浏览器验证：旧账本显示“暂无已记录会话；旧账本无法补回此前聊天”且原 2 条正式任务保留；新建“会话历史体验验证：找 3 张明亮书房图片”后侧栏显示 1 条输入/0 次确认，确认后显示 1 次正式确认及 revision 1；打开会话可见原始输入、独立边界说明、任务 ID 与“查看正式版本”入口。验证产生 1 条本地合成正式任务，未触发检索或清洗。
+- 边界：本地模拟身份/SQLite 体验；没有附件、assistant 消息、保留清理、全文搜索、W3/内网/真实数据或 DJ。
 
 ## 独立草稿会话记录公共契约（2026-10-23）
 
