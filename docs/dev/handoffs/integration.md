@@ -1,5 +1,19 @@
 # A 总控集成交接
 
+## input-only 精确去重结果集契约（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/exact-result-set-contract.json`，执行基线 `990cb523e93ce7500c604554d405d92003203d25`；状态 READY_FOR_REVIEW。
+- 新增 `result_contracts.py`、`test_result_contracts.py`、`contracts/result-set.md` 及本交接。`build_exact_result_set` 只消费与已批准作业完整匹配的 `CleaningJobResult`；全硬规则 pass 才参与计数，按 content_digest 精确分组并稳定选代表，目标内 accepted、多余 reserve，fail/unknown/重复分别保留且不计 accepted。
+- 当 accepted 达标时停止原因为 `TARGET_MET`；input-only 输入已用尽但不足时为 `SEARCH_STRATEGIES_EXHAUSTED`，不声称穷尽全库。`PublishedResultSet` 绑定 result_set_id 和发布后版本；契约不持久化、不授权、不派发补数。
+- 定向契约测试 4 项通过；完整回归 343 项通过，退出码 0。`python3 tools/collab_gate.py check --role integration --base 990cb523e93ce7500c604554d405d92003203d25 --task docs/dev/tasks/exact-result-set-contract.json` 退出码 0，SCOPE PASS / LOCAL GATE PASS，门禁内回归 344 项通过（包含门禁自身当前夹具）。NOT_RUN：跨批/近重复、自动补数、delivery、生产账本、内网及性能/质量验收。下游 core 须在短事务中重验授权与代次，原子发布结果集/当前指针/事件。
+
+## input_only 精确结果预览契约（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/exact-result-set-contract.json`，发布基线 `990cb523e93ce7500c604554d405d92003203d25`；状态 READY_FOR_REVIEW。
+- 修改 `src/dsh_retrieval/result_contracts.py`、`tests/test_result_contracts.py`、`contracts/result-set.md` 与本交接。输入只接受完整且绑定批准作业的逐素材结果，限定 `image` 固定输入；全规则 pass 后按内容摘要精确去重、稳定选代表，目标内 accepted，余量 reserve，fail/unknown/重复分别计数。缺口与停止原因一致，输出摘要绑定 operation/代次/版本/清洗结果。
+- 验收：合成契约测试覆盖目标达成/不足、重复代表、非通过排除、旧绑定/缺候选/非法目标拒绝、摘要稳定性。`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_result_contracts -q`：5 项通过；完整 unittest 344 项通过。`python3 tools/collab_gate.py check --role integration --base 990cb523e93ce7500c604554d405d92003203d25 --task docs/dev/tasks/exact-result-set-contract.json`：SCOPE PASS / LOCAL GATE PASS，344 项通过。测试输出中的 LOCAL GATE FAIL 来自既有门禁负例，不是本轮门禁失败。
+- 边界：纯函数预览，不鉴权、不读取当前任务、不落账、不计算跨轮/近重复、不执行偏好排序、不派发补数；`SEARCH_STRATEGIES_EXHAUSTED` 只指本次固定输入用尽。不得作为正式 accepted_count 或交付快照。真实 DJ 多规则与内网未验证。
+
 ## 逐素材多规则清洗结果契约（2026-10-22）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/cleaning-result-contract.json`，受信执行基线 `e7ca2224a00ed4b32416677ce3ae70b3fd72d667`；状态 READY_FOR_REVIEW。
