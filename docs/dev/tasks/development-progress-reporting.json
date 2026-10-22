@@ -1,0 +1,14 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "71136e19d20d8a02abb9f657e6e36787dacf52d2",
+  "files": [
+    "AGENTS.md",
+    "docs/dev/parallel-plan.md",
+    "docs/dev/window-prompts.md",
+    "docs/dev/handoff-template.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "把开发进度与开发明细的定期更新写入持久开发规范：新增总控进度看板，明确各角色明细仍写各自交接；活跃开发至少每 30 分钟及开工、关键里程碑、阻塞/恢复、交付时更新，短于 30 分钟的任务至少覆盖开工和交付。规定时间、角色、基线、状态、已完成、进行中、阻塞、下一步、变更文件、决策、测试命令/真实结果和未验证项等最小字段；无变化说明原因，不伪造进度，不把模拟、待运行或计划命令写成完成。A 负责汇总 progress.md，B/C/D 只写职责内 handoff，避免多人并发改同一看板。提供当前真实进度初始快照。仅文档变更，执行 JSON/格式/链接及 integration 范围检查；按规范说明跳过代码测试与完整回归。"
+}
