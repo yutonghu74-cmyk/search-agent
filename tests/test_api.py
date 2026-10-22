@@ -7,8 +7,19 @@ from urllib.request import Request, urlopen
 
 from dsh_retrieval.adapters.projects import LocalProjectAccess
 from dsh_retrieval.api import create_handler
+from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.service import InMemoryTaskRepository, TaskService
 from draft_helpers import BODY
+
+
+class ResultReader:
+    def __init__(self):
+        self.items = {}
+
+    def get_current_result_set(self, actor, task_id):
+        if task_id not in self.items:
+            raise ServiceError("NOT_FOUND", "Current result set not found", 404)
+        return self.items[task_id]
 
 
 class ApiTest(unittest.TestCase):
@@ -16,7 +27,8 @@ class ApiTest(unittest.TestCase):
     def setUpClass(cls):
         service = TaskService(InMemoryTaskRepository(), LocalProjectAccess([
             ("tenant-a", "user-a", "demo", "default")]))
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(service))
+        cls.results = ResultReader()
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(service, cls.results))
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
@@ -94,6 +106,34 @@ class ApiTest(unittest.TestCase):
                          ["running", "pending", "pending", "pending", "pending"])
         self.assertEqual(progress["counts"]["target"], 10)
         self.assertIsNone(progress["counts"]["accepted"])
+        status, unavailable, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/results?view=accepted&limit=1")
+        self.assertEqual(status, 200)
+        self.assertFalse(unavailable["available"])
+        self.assertIsNone(unavailable["counts"]["accepted"])
+        current_task = result["task"]
+        self.results.items[task["task_id"]] = {
+            "result_set_id": "resultset-api", "status": "published",
+            "as_of_task_version": current_task["task_version"],
+            "generation": current_task["run_generation"],
+            "result_set_digest": "sha256:" + "a" * 64, "target_count": 10,
+            "eligible_unique_count": 2, "accepted_count": 2, "reserve_count": 0,
+            "duplicate_count": 1, "failed_count": 1, "pending_review_count": 1,
+            "counts_status": "fresh", "gap": 8,
+            "stop_reason": "SEARCH_STRATEGIES_EXHAUSTED",
+            "accepted": ({"candidate_id": "asset-a", "asset_version": "v1"},
+                         {"candidate_id": "asset-b", "asset_version": "v1"}),
+            "reserve": (),
+        }
+        status, first, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/results?view=accepted&limit=1")
+        self.assertEqual((status, first["available"], first["counts"]["accepted"]),
+                         (200, True, 2))
+        self.assertEqual(first["items"][0]["candidate_id"], "asset-a")
+        status, second, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/results?view=accepted&limit=1&cursor={first['next_cursor']}")
+        self.assertEqual(second["items"][0]["candidate_id"], "asset-b")
+        self.assertIsNone(second["next_cursor"])
 
     def test_feedback_requires_identity_and_idempotency_key(self):
         status, body, _ = self.request("/v1/retrieval/tasks/missing/feedback", body={}, identity=False)
@@ -107,6 +147,8 @@ class ApiTest(unittest.TestCase):
         status, body, _ = self.request("/v1/retrieval/projects/demo/conversations", identity=False)
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
         status, body, _ = self.request("/v1/retrieval/tasks/missing/progress", identity=False)
+        self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
+        status, body, _ = self.request("/v1/retrieval/tasks/missing/results", identity=False)
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
 
 

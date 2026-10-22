@@ -22,6 +22,10 @@ class ChatUiTest(unittest.TestCase):
         self.assertIn("不是业务执行时间线", CHAT_JS)
         self.assertIn("五节点进度", CHAT_JS)
         self.assertIn("progress.counts.accepted===null?'未知'", CHAT_JS)
+        self.assertIn("结果尚未发布", CHAT_JS)
+        self.assertIn("权威结果统计", CHAT_JS)
+        self.assertIn("preview_status==='unavailable'", CHAT_JS)
+        self.assertIn("loadMoreResults", CHAT_JS)
         self.assertNotIn("完成百分比", CHAT_JS)
 
     def test_assets_do_not_embed_remote_dependencies_or_dynamic_html(self):

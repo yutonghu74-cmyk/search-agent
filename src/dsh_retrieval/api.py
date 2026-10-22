@@ -8,6 +8,7 @@ from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from .errors import ServiceError
 from .models import Actor
@@ -16,6 +17,7 @@ from .adapters.projects import LocalProjectAccess
 from .adapters.task_storage.sqlite import SQLiteTaskRepository
 from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
 from .progress_models import build_task_progress
+from .result_views import ResultCursorError, build_result_page
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -24,6 +26,7 @@ FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$
 CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
 REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
 PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/progress$")
+RESULTS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/results$")
 PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
@@ -32,6 +35,7 @@ CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 class Handler(BaseHTTPRequestHandler):
     server_version = "dsh-retrieval-p0"
     service: TaskService
+    result_reader: Any = None
 
     def _trace_id(self) -> str:
         return self.headers.get("X-Request-Id") or "tr_" + uuid.uuid4().hex
@@ -115,26 +119,29 @@ class Handler(BaseHTTPRequestHandler):
         self._run(action)
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/":
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        if path == "/":
             self._asset("text/html", CHAT_HTML)
             return
-        if self.path == "/chat.css":
+        if path == "/chat.css":
             self._asset("text/css", CHAT_CSS)
             return
-        if self.path == "/chat.js":
+        if path == "/chat.js":
             self._asset("text/javascript", CHAT_JS)
             return
-        match = TASK_PATH.fullmatch(self.path)
-        draft_match = DRAFT_PATH.fullmatch(self.path)
-        feedback_match = FEEDBACK_PATH.fullmatch(self.path)
-        revisions_match = REVISIONS_PATH.fullmatch(self.path)
-        progress_match = PROGRESS_PATH.fullmatch(self.path)
-        project_tasks_match = PROJECT_TASKS_PATH.fullmatch(self.path)
-        project_conversations_match = PROJECT_CONVERSATIONS_PATH.fullmatch(self.path)
-        conversation_match = CONVERSATION_PATH.fullmatch(self.path)
+        match = TASK_PATH.fullmatch(path)
+        draft_match = DRAFT_PATH.fullmatch(path)
+        feedback_match = FEEDBACK_PATH.fullmatch(path)
+        revisions_match = REVISIONS_PATH.fullmatch(path)
+        progress_match = PROGRESS_PATH.fullmatch(path)
+        results_match = RESULTS_PATH.fullmatch(path)
+        project_tasks_match = PROJECT_TASKS_PATH.fullmatch(path)
+        project_conversations_match = PROJECT_CONVERSATIONS_PATH.fullmatch(path)
+        conversation_match = CONVERSATION_PATH.fullmatch(path)
         if (match is None and not (draft_match and draft_match.group(2))
                 and not (feedback_match and feedback_match.group(2))
-                and revisions_match is None and progress_match is None and project_tasks_match is None
+                and revisions_match is None and progress_match is None and results_match is None and project_tasks_match is None
                 and project_conversations_match is None and conversation_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
@@ -158,6 +165,35 @@ class Handler(BaseHTTPRequestHandler):
                     return HTTPStatus.OK, build_task_progress(task, proposal).to_view(), False
                 except ValueError:
                     raise ServiceError("STORAGE_CORRUPT", "task progress binding is invalid", 500) from None
+            if results_match:
+                actor = self._actor()
+                task = self.service.get_task(actor, results_match.group(1))
+                revisions = self.service.list_revisions(actor, results_match.group(1))
+                proposal = next((item["proposal"] for item in revisions
+                                 if item["revision"] == task["confirmed_revision"]), None)
+                try:
+                    params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+                    if set(params) - {"view", "limit", "cursor"} or any(len(values) != 1 for values in params.values()):
+                        raise ValueError
+                    view_type = params.get("view", ["accepted"])[0]
+                    limit = int(params.get("limit", ["20"])[0])
+                    cursor = params.get("cursor", [None])[0]
+                except (ValueError, TypeError):
+                    raise ServiceError("INVALID_RESULT_VIEW", "result view query is invalid", 422) from None
+                result_set = None
+                if self.result_reader is not None:
+                    try:
+                        result_set = self.result_reader.get_current_result_set(actor, task["task_id"])
+                    except ServiceError as error:
+                        if error.code != "NOT_FOUND":
+                            raise
+                try:
+                    return HTTPStatus.OK, build_result_page(
+                        task, proposal, result_set, view_type=view_type, limit=limit, cursor=cursor), False
+                except ResultCursorError as error:
+                    raise ServiceError("INVALID_CURSOR", str(error), 422) from None
+                except ValueError:
+                    raise ServiceError("STORAGE_CORRUPT", "current result view is invalid", 500) from None
             if project_tasks_match:
                 return HTTPStatus.OK, {"items": list(self.service.list_tasks(
                     self._actor(), project_tasks_match.group(1)))}, False
@@ -176,12 +212,13 @@ class Handler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
 
-def create_handler(service: TaskService) -> type[Handler]:
+def create_handler(service: TaskService, result_reader: Any = None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
 
     BoundHandler.service = service
+    BoundHandler.result_reader = result_reader
     return BoundHandler
 
 
