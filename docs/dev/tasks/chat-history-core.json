@@ -1,0 +1,13 @@
+{
+  "role": "core",
+  "branch": "codex/task-core",
+  "source_base": "b91007e28fb5106067e08637cf58a19b53dcbcc8",
+  "files": [
+    "src/dsh_retrieval/service.py",
+    "src/dsh_retrieval/adapters/memory.py",
+    "src/dsh_retrieval/adapters/task_storage/sqlite.py",
+    "tests/core/test_chat_history.py",
+    "docs/dev/handoffs/core.md"
+  ],
+  "acceptance": "为本地 Chat 体验提供当前创建人在指定项目内的已确认任务列表。账本只返回 caller tenant/owner/project 匹配的任务副本，按 created_at 降序、task_id 稳定排序，最大 100 条且不写状态；服务层对每条任务重新校验当前项目/子维度 read 权限，只输出 task_id、正式 revision、task_version、run status、dimension/batch、创建时间、完整需求快照中的 raw_request 和 pending_draft 摘要。跨租户/用户/项目不得泄露；撤权任务不得出现；SQLite 重启可恢复。列表是正式需求/版本入口，不伪装成确认前逐句 conversation_message 历史。定向测试与 core 门禁通过；不修改 HTTP/UI，不访问内网。"
+}
