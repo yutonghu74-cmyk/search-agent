@@ -1,0 +1,12 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "46d693771a619aa6c8c7dcb7651c63488bdb6eb6",
+  "files": [
+    "src/dsh_retrieval/recipe_bridge.py",
+    "tests/test_recipe_bridge.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "在受信业务层已读取正式任务后，验证当前任务保存的不可变确认方案摘要、媒体类型及全部硬规则与清洗配方逐项一致；额外、遗漏、值变化或旧/无确认任务拒绝，软规则不进入硬过滤。此校验不授权作业、不替代当前权限/版本检查，不写账本或运行检测器；完成角色门禁和完整回归。"
+}
