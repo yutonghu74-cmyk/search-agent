@@ -1,12 +1,5 @@
 # A 总控集成交接
 
-## input-only 精确去重结果集契约（2026-10-22）
-
-- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/exact-result-set-contract.json`，执行基线 `990cb523e93ce7500c604554d405d92003203d25`；状态 READY_FOR_REVIEW。
-- 新增 `result_contracts.py`、`test_result_contracts.py`、`contracts/result-set.md` 及本交接。`build_exact_result_set` 只消费与已批准作业完整匹配的 `CleaningJobResult`；全硬规则 pass 才参与计数，按 content_digest 精确分组并稳定选代表，目标内 accepted、多余 reserve，fail/unknown/重复分别保留且不计 accepted。
-- 当 accepted 达标时停止原因为 `TARGET_MET`；input-only 输入已用尽但不足时为 `SEARCH_STRATEGIES_EXHAUSTED`，不声称穷尽全库。`PublishedResultSet` 绑定 result_set_id 和发布后版本；契约不持久化、不授权、不派发补数。
-- 定向契约测试 4 项通过；完整回归 343 项通过，退出码 0。`python3 tools/collab_gate.py check --role integration --base 990cb523e93ce7500c604554d405d92003203d25 --task docs/dev/tasks/exact-result-set-contract.json` 退出码 0，SCOPE PASS / LOCAL GATE PASS，门禁内回归 344 项通过（包含门禁自身当前夹具）。NOT_RUN：跨批/近重复、自动补数、delivery、生产账本、内网及性能/质量验收。下游 core 须在短事务中重验授权与代次，原子发布结果集/当前指针/事件。
-
 ## input_only 精确结果预览契约（2026-10-22）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/exact-result-set-contract.json`，发布基线 `990cb523e93ce7500c604554d405d92003203d25`；状态 READY_FOR_REVIEW。
