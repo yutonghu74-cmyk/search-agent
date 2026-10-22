@@ -2,6 +2,8 @@
 
 ## 已发布候选接入清洗（2026-10-22 12:24，Asia/Shanghai）
 
+- 集成更新：实现 0bb335942f43a48e045f4308f2400caa0e80e7c6 已快进合入 master；主工作区重跑完整 unittest 命令，222 项通过、退出码 0。ACCEPTED 仅本地模拟装配切片，真实 DJ 新模式仍 NOT_RUN。
+
 - A / codex/integration / var/worktrees/integration；基线 59ce9e8ead931bbe68959998238c0a788de8f8e2，范围/验收见 docs/dev/manifest-cleaning-task.md。仅修改 A 文件，没有接管 core/retrieval/cleaning 角色目录。
 - 新增 manifest_cleaning.py：绑定 actor/task 的 PublishedManifestCatalog 和 ManifestCleaningExecutor；提案 source_path 为空占位，提交时短期下载验证，后端须明确声明同步冻结输入及路径无关幂等。既有 CleaningService 仍负责单独确认、CAS、回传与幂等；增加提交后/轮询/终态结果的清单权限复查。
 - DJCleaningExecutor 新增显式 ephemeral_inputs=False 默认参数；启用后 bridge 指纹忽略临时路径而覆盖身份/摘要/配方/binding，旧模式指纹不变。poll/cancel 不依赖临时源路径；后端自身冻结副本不由本下载目录清理删除。
