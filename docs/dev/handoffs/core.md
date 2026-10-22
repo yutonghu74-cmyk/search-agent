@@ -1,5 +1,15 @@
 # core 精确内容计数预览交接
 
+## 当前任务：持久候选清单去重预览
+
+- core / codex/task-core / var/worktrees/core；基线 1c89f59f00707d739e1731c4bf7334fc0bed25d1；范围 core/counting.py、tests/core/test_manifest_counting.py、本交接。没有新增共享字段/接口，复用 CleaningCatalog 已发布契约。
+- 依据 v1.9 13.5/13.5.1、A20/A36/A45/A50 的本地子集。已确认清单→清洗结果→只读精确内容去重；返回前重验当前清单和媒体权限，旧版本/撤权失败关闭。
+- 验收：无临时路径也可预览；相同内容不同来源保留记录仅选一个代表；fail/unknown 不计合格；当前媒体撤权、处理途中撤权/任务变化拒绝；结果不写账本、accepted_count=null、无补数。只做单清洗作业固定宽度规则，不冒充正式 result_set。
+- 本轮允许职责内开发/本地测试、验证后本地提交与审查集成；不安装依赖、推送、接内网。A 后续可在独立工作区更新并运行既有合成真实 DJ smoke；此工作区不运行 DJ。
+- 2026-10-22 14:08（Asia/Shanghai）：增加返回前清单/媒体授权与完整输入二次核对；8 项新组合测试。`python3 tools/collab_gate.py check --role core --base 1c89f59f00707d739e1731c4bf7334fc0bed25d1` 退出码 0，范围检查和 232 项测试通过（224+8）；git diff --check 通过。
+- 实证修正前轮假设：CountingPreviewService 本身不读路径，使用 catalog.resolve；PublishedManifestCatalog 的空路径逻辑候选可直接复用。无需复制另一套模型或去重算法。确认相同内容独立来源保留两个清单成员、只选一个 pass 代表，撤销重复来源亦拒绝整次预览、不静默换来源。
+- 本轮模拟验证，不执行 DJ；摘要对应已验证清洗输入，不保证远端仍可下载。不发布正式 result_set、accepted_count 仍 null、不跨作业聚合或自动补数。
+
 ## 当前任务：候选清单本地账本
 
 - core / codex/task-core / var/worktrees/core；基线 8d7dcc8b39a672ad174cf91704a84e5c66eec883；范围 task_storage/、tests/core/、本交接，验收见 docs/dev/candidate-ledger-task.md。

@@ -45,6 +45,13 @@ class CountingPreviewService:
         representatives.sort(key=lambda row: (row["candidate_id"], row["asset_version"]))
         duplicates.sort(key=lambda row: (row["candidate_id"], row["asset_version"]))
         self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
+        # Immutable published metadata does not freeze authorization. Revalidate
+        # every source, including duplicates, before exposing representatives.
+        self.catalog.require_scope(task, proposal.manifest_ref)
+        final_candidates, final_width = self.catalog.resolve(
+            actor.tenant_id, task.project_id, proposal.manifest_ref, proposal.recipe_ref)
+        if final_candidates != candidates or final_width != width:
+            raise ServiceError("INPUT_SNAPSHOT_CHANGED", "input changed during counting", 409)
         current = self.repository.get(actor, task_id)
         current_op = self.repository.cleaning_results(actor, task_id)
         if (current.task_version != task.task_version or current_op != operation):
