@@ -45,7 +45,8 @@ class CleaningService:
             self._authorize(actor, proposal.task_id, "approve")
             backend = self.executor.submit(operation)
             try:
-                self._authorize(actor, proposal.task_id, "approve")
+                task = self._authorize(actor, proposal.task_id, "approve")
+                self.catalog.require_scope(task, proposal.manifest_ref)
                 operation = self.repository.attach_cleaning_backend(actor, operation.operation_id, backend)
             except ServiceError:
                 # A concurrent cancellation/revocation must not leave a newly dispatched job unaddressed.
@@ -55,11 +56,13 @@ class CleaningService:
 
     def poll(self, actor, operation_id):
         operation = self.repository.get_cleaning_operation(actor, operation_id)
-        self._authorize(actor, operation.proposal.task_id, "read")
+        task = self._authorize(actor, operation.proposal.task_id, "read")
+        self.catalog.require_scope(task, operation.proposal.manifest_ref)
         if operation.status in {"succeeded", "failed", "cancelled", "queued"}:
             return operation.view()
         response = self.executor.poll(operation)
-        self._authorize(actor, operation.proposal.task_id, "read")
+        task = self._authorize(actor, operation.proposal.task_id, "read")
+        self.catalog.require_scope(task, operation.proposal.manifest_ref)
         if response.get("status") in {"succeeded", "failed"}:
             operation = self.repository.publish_cleaning(actor, operation_id, response)
         elif response.get("status") != "running" or response.get("binding") != operation.binding():
@@ -77,10 +80,11 @@ class CleaningService:
         return operation.view()
 
     def results(self, actor, task_id):
-        self._authorize(actor, task_id, "read")
+        task = self._authorize(actor, task_id, "read")
         operation = self.repository.cleaning_results(actor, task_id)
         if operation is None:
             return {"operation_id": None, "items": [], "counts": {"pass": 0, "fail": 0, "unknown": 0}}
+        self.catalog.require_scope(task, operation.proposal.manifest_ref)
         items = operation.view()["results"]["results"]
         return {"operation_id": operation.operation_id, "items": items,
                 "counts": {v: sum(item["verdict"] == v for item in items) for v in ("pass", "fail", "unknown")},

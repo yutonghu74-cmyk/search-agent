@@ -1,5 +1,15 @@
 # A 总控集成交接
 
+## 已发布候选接入清洗（2026-10-22 12:24，Asia/Shanghai）
+
+- A / codex/integration / var/worktrees/integration；基线 59ce9e8ead931bbe68959998238c0a788de8f8e2，范围/验收见 docs/dev/manifest-cleaning-task.md。仅修改 A 文件，没有接管 core/retrieval/cleaning 角色目录。
+- 新增 manifest_cleaning.py：绑定 actor/task 的 PublishedManifestCatalog 和 ManifestCleaningExecutor；提案 source_path 为空占位，提交时短期下载验证，后端须明确声明同步冻结输入及路径无关幂等。既有 CleaningService 仍负责单独确认、CAS、回传与幂等；增加提交后/轮询/终态结果的清单权限复查。
+- DJCleaningExecutor 新增显式 ephemeral_inputs=False 默认参数；启用后 bridge 指纹忽略临时路径而覆盖身份/摘要/配方/binding，旧模式指纹不变。poll/cancel 不依赖临时源路径；后端自身冻结副本不由本下载目录清理删除。
+- 修改文件：src/dsh_retrieval/manifest_cleaning.py、cleaning_service.py、adapters/dj_cleaning.py、tools/dj_cleaning_bridge.py、tests/test_manifest_cleaning.py、本交接及任务卡。
+- 实际命令 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：222 项通过（204 原基线 + 18），退出码 0；git diff --check 通过。`python3 tools/collab_gate.py check --role cleaning --base 59ce9e8ead931bbe68959998238c0a788de8f8e2` 退出码 1，原因 A 分支不是 cleaning 分支；没有 A 专用门禁，不改检查器绕过，不声称角色检查通过。
+- 模拟验收：清单发布→清洗提案→显式确认→逐条回传、重复确认不重提、失败后新目录同 operation 重试、字节变化/超限/撤权/新 generation 阻断、提交后撤权取消、终态结果重鉴权、空清单/任意配方拒绝、独立进程读无临时路径操作。bridge 只验证默认/新指纹和 mock 调用参数，未启动真实 DJ。
+- NOT_RUN：真实 DJ 新接入模式、真实图片解码、内网、强杀中间复制恢复、生产权限原子性/任务调度。不是 v1.9 全规则或 accepted_count 验收；未安装依赖/推送/部署。下一步补本链路合成图片真实 DJ 验证（单独受控运行），并衔接去重/正式结果；已有 counting 对源路径的依赖需先调整契约，不能直接用空路径计数。
+
 ## 候选清单账本集成验收（2026-10-22 12:16，Asia/Shanghai）
 
 - 契约基线 8d7dcc8b39a672ad174cf91704a84e5c66eec883；core 实现 7b9c96d763a7581a39d495ee31f6181c95ac9ba6，角色范围与 204 项测试通过；A 审查事务、稳定 scope 读取例外、来源覆盖、权限重查和模拟服务组合后快进集成。

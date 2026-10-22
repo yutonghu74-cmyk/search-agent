@@ -8,12 +8,17 @@ from ..errors import ServiceError
 
 
 class DJCleaningExecutor:
-    def __init__(self, python, source_root, workspace, bridge_script, *, timeout=30):
+    def __init__(self, python, source_root, workspace, bridge_script, *, timeout=30, ephemeral_inputs=False):
         self.python = str(Path(python).absolute())  # preserve virtualenv path, do not resolve symlink
         self.source_root = str(Path(source_root).resolve())
         self.workspace = str(Path(workspace).resolve())
         self.bridge_script = str(Path(bridge_script).resolve())
         self.timeout = timeout
+        if type(ephemeral_inputs) is not bool:
+            raise ValueError("ephemeral_inputs must be bool")
+        self.ephemeral_inputs = ephemeral_inputs
+        self.captures_inputs_on_submit = True
+        self.path_independent_identity = ephemeral_inputs
 
     def _call(self, action, operation):
         # Do not hand business-service credentials to the cleaning subprocess.
@@ -24,7 +29,8 @@ class DJCleaningExecutor:
                            DSH_USER_DATA_ROOT=str(Path(self.workspace) / "users"))
         try:
             result = subprocess.run([self.python, self.bridge_script],
-                                    input=json.dumps({"action": action, "workspace": self.workspace, "job": operation.job()}),
+                                    input=json.dumps({"action": action, "workspace": self.workspace, "job": operation.job(),
+                                                      "ephemeral_inputs": self.ephemeral_inputs}),
                                     text=True, capture_output=True, env=environment, timeout=self.timeout,
                                     cwd=self.workspace)
             payload = json.loads(result.stdout)

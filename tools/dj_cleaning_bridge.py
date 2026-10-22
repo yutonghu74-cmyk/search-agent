@@ -14,6 +14,19 @@ def sha(content):
     return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
+def job_fingerprint(job, ephemeral_inputs=False):
+    if type(ephemeral_inputs) is not bool:
+        raise ValueError("invalid input mode")
+    if ephemeral_inputs:
+        # No input path grants authority. Submit below still reads every byte,
+        # verifies the approved hash and freezes its own durable copy.
+        logical = dict(job, candidates=[{k: v for k, v in c.items() if k != "source_path"}
+                                       for c in job["candidates"]])
+        return sha(json.dumps({"mode": "ephemeral-v1", "job": logical},
+                              sort_keys=True, separators=(",", ":")).encode())
+    return sha(json.dumps(job, sort_keys=True, separators=(",", ":")).encode())
+
+
 def execute(request):
     from filelock import FileLock
     from data_juicer.tools.plan_flow.common import PlanFlowError, write_json_atomic, write_text_atomic
@@ -25,7 +38,7 @@ def execute(request):
         raise ValueError("recipe is not allowlisted")
     if not 1 <= len(job["candidates"]) <= 100 or job["deadline_seconds"] != 60:
         raise ValueError("job limits are invalid")
-    fingerprint = sha(json.dumps(job, sort_keys=True, separators=(",", ":")).encode())
+    fingerprint = job_fingerprint(job, request.get("ephemeral_inputs", False))
     # Stable operation identity must not fork into a new job when its payload changes.
     identity = {name: job["binding"][name] for name in ("tenant_id", "project_id", "operation_id")}
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
