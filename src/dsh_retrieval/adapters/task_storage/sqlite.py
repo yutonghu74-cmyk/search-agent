@@ -70,7 +70,12 @@ def decode(value):
         return datetime.fromisoformat(data)
     if kind in TYPES:
         cls = TYPES[kind]
-        if set(data) != {f.name for f in fields(cls)}:
+        expected = {f.name for f in fields(cls)}
+        missing = expected - set(data) if isinstance(data, dict) else set()
+        if (kind in {"CleaningApprovalProposal", "CleaningBinding"}
+                and missing == {"detector_release_digest"}):
+            data = {**data, "detector_release_digest": None}
+        if set(data) != expected:
             raise ValueError("incompatible model fields")
         return cls(**{k: decode(v) for k, v in data.items()})
     if kind == "tuple":

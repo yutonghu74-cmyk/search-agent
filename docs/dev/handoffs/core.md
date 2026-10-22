@@ -1,5 +1,14 @@
 # core 精确内容计数预览交接
 
+## 检测器发布摘要批准持久化（2026-10-22）
+
+- core / `codex/task-core` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`；发布基线 `d9a48e61478ccdccf28cb93998fc4b9f8132f018`，任务卡 `docs/dev/tasks/detector-release-approval-storage.json`；状态 READY_FOR_REVIEW。
+- 修改 `adapters/task_storage/multi_rule.py`、`sqlite.py`、`tests/core/test_multi_rule_approval.py` 与本交接。`prepare` 现在要求受信调用方以仅关键字参数传入合法 `detector_release_digest`，并将其写入提案、提案摘要、批准作业和持久化快照；更换发布摘要得到不同提案，原确认幂等键不能复用。
+- SQLite 白名单解码只对旧 `CleaningApprovalProposal` / `CleaningBinding` 缺少这一字段时补 `None`；其他缺字段、未知字段仍拒绝。旧对象保持 v1 摘要并可恢复审计，但 core 不猜测或补写当前发布；integration 执行入口必须用共享严格校验拒绝它。
+- 定向验证：`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest core.test_multi_rule_approval core.test_cleaning_result_storage -q`，14 项通过；`git diff --check` 通过。因本轮修改公共字段落盘与持久化解码，按仓库规则另运行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，384 项通过；输出中的 LOCAL GATE FAIL 是既有负例夹具。
+- 交付门禁：`python3 tools/collab_gate.py check --role core --base d9a48e61478ccdccf28cb93998fc4b9f8132f018` 退出码 0，SCOPE PASS、门禁内部 384 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。门禁已覆盖的测试未另行第三次手工回归。
+- NOT_RUN：真实 DJ、真实检测器/模型制品、生产账本迁移、ClickHouse/Milvus/W3、内网数据；core 只持久化调用方提供的受信发布身份，不自行加载或选择发布。
+
 ## 当前任务：input-only 精确去重预览原子发布（2026-10-22）
 
 - core / `codex/task-core` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`；执行基线 `4cfd13ebb9657be3dd3728d5571576b4bc720688`，任务卡 `docs/dev/exact-result-publication-task.md`；状态 READY_FOR_REVIEW。

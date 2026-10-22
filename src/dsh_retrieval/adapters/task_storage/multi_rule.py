@@ -6,6 +6,7 @@ verdicts, or claim business-accepted counts.
 
 from contextlib import closing
 import json
+import re
 import sqlite3
 import uuid
 
@@ -24,6 +25,7 @@ from ...service import require_key, require_version
 
 
 FORMAT = 3
+_RELEASE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 def empty_state():
@@ -179,9 +181,13 @@ class SQLiteMultiRuleApprovalRepository:
                 or manifest.manifest_ref != proposal.manifest_ref or refs != proposal.candidates):
             raise ServiceError("INPUT_SNAPSHOT_CHANGED", "Approved cleaning inputs changed", 409)
 
-    def prepare(self, actor, task_id, manifest_ref, recipe: CleaningRecipe):
+    def prepare(self, actor, task_id, manifest_ref, recipe: CleaningRecipe, *, detector_release_digest):
         if type(recipe) is not CleaningRecipe:
             raise ServiceError("RECIPE_INVALID", "Trusted cleaning recipe required", 422)
+        if (not isinstance(detector_release_digest, str)
+                or _RELEASE_DIGEST.fullmatch(detector_release_digest) is None):
+            raise ServiceError("DETECTOR_RELEASE_INVALID",
+                               "Trusted detector release digest required", 422)
         def prepare(memory, retrieval, candidates, state):
             task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
                                             manifest_ref, "approve")
@@ -194,7 +200,8 @@ class SQLiteMultiRuleApprovalRepository:
                 task.project_id, task.task_id, task.confirmed_revision, task.run_generation,
                 task.task_version, task.request_digest, manifest_ref, recipe,
                 tuple(CleaningCandidateRef(item.candidate_id, item.media.asset_version,
-                                           item.media.content_digest) for item in manifest.proposal.items))
+                                           item.media.content_digest) for item in manifest.proposal.items),
+                detector_release_digest)
             self._same_inputs(task, manifest, proposal)
             self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
             old = state["proposals"].get(proposal.proposal_digest)

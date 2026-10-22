@@ -17,6 +17,7 @@ from dsh_retrieval.integration_models import MediaRecord
 from dsh_retrieval.materialization_models import MaterializedCandidate, MaterializedPage
 from dsh_retrieval.models import Actor
 from dsh_retrieval.multi_rule_contracts import CleaningRecipe, CleaningRule, DetectionStep
+from dsh_retrieval.adapters.task_storage.sqlite import decode, encode
 from dsh_retrieval.query_spec import digest
 
 
@@ -54,15 +55,17 @@ class MultiRuleApprovalTest(unittest.TestCase):
             digest({"registry": "fixture"}), (step,), (
                 CleaningRule("text", "features", "text.present@1", "eq", False),
                 CleaningRule("mark", "features", "watermark.present@1", "eq", False)))
+        self.release_digest = digest({"detector_release": "fixture-v1"})
         self.repo = self.reopen()
 
     def reopen(self):
         return SQLiteMultiRuleApprovalRepository(self.f.path, projects=self.f.projects,
                                                  authorization=self.f.auth)
 
-    def prepare(self, repo=None, recipe=None):
+    def prepare(self, repo=None, recipe=None, release_digest=None):
         return (repo or self.repo).prepare(self.f.actor, self.f.tid, self.manifest.manifest_ref,
-                                           recipe or self.recipe)
+                                           recipe or self.recipe,
+                                           detector_release_digest=release_digest or self.release_digest)
 
     def confirm(self, proposal=None, repo=None, **changes):
         proposal = proposal or self.proposal
@@ -87,6 +90,8 @@ class MultiRuleApprovalTest(unittest.TestCase):
         self.assertEqual(self.f.tasks.get(self.f.actor, self.f.tid), before)
         approval, replayed = self.confirm()
         self.assertFalse(replayed)
+        self.assertEqual(approval.proposal.detector_release_digest, self.release_digest)
+        self.assertEqual(approval.job.binding.detector_release_digest, self.release_digest)
         self.assertEqual(approval.job.binding.task_version, before.task_version + 1)
         self.assertEqual(self.f.tasks.get(self.f.actor, self.f.tid).task_version, before.task_version + 1)
         self.assertEqual(self.reopen().get_current(self.f.actor, self.f.tid, approval.operation_id), approval)
@@ -117,11 +122,47 @@ class MultiRuleApprovalTest(unittest.TestCase):
             key="approve", expected_task_version=self.proposal.expected_task_version,
             action="confirm"))
 
+    def test_release_digest_is_required_and_changes_proposal_identity(self):
+        with self.assertRaises(TypeError):
+            self.repo.prepare(self.f.actor, self.f.tid, self.manifest.manifest_ref, self.recipe)
+        self.assert_code("DETECTOR_RELEASE_INVALID", lambda: self.repo.prepare(
+            self.f.actor, self.f.tid, self.manifest.manifest_ref, self.recipe,
+            detector_release_digest="release-v1"))
+        first = self.prepare()
+        second = self.prepare(release_digest=digest({"detector_release": "fixture-v2"}))
+        self.assertNotEqual(first.proposal_digest, second.proposal_digest)
+        self.proposal = first
+        self.confirm()
+        self.assert_code("IDEMPOTENCY_CONFLICT", lambda: self.repo.confirm(
+            self.f.actor, self.f.tid, second.proposal_digest, key="approve",
+            expected_task_version=second.expected_task_version, action="confirm"))
+
+    def test_decoder_only_defaults_missing_release_field_for_legacy_types(self):
+        proposal = self.prepare()
+        encoded = encode(proposal)
+        encoded["value"].pop("detector_release_digest")
+        legacy = decode(encoded)
+        self.assertIsNone(legacy.detector_release_digest)
+
+        binding = encode(self.confirm(proposal=proposal)[0].job.binding)
+        binding["value"].pop("detector_release_digest")
+        self.assertIsNone(decode(binding).detector_release_digest)
+
+        missing_other = encode(proposal)
+        missing_other["value"].pop("manifest_ref")
+        with self.assertRaises(ValueError):
+            decode(missing_other)
+        extra = encode(proposal)
+        extra["value"]["unknown"] = None
+        with self.assertRaises(ValueError):
+            decode(extra)
+
     def test_wrong_rules_owner_and_revoked_media_rejected(self):
         changed = replace(self.recipe, rules=self.recipe.rules[:1])
         self.assert_code("RECIPE_RULE_MISMATCH", lambda: self.prepare(recipe=changed))
         self.assert_code("NOT_FOUND", lambda: self.repo.prepare(
-            Actor("tenant", "other"), self.f.tid, self.manifest.manifest_ref, self.recipe))
+            Actor("tenant", "other"), self.f.tid, self.manifest.manifest_ref, self.recipe,
+            detector_release_digest=self.release_digest))
         self.f.auth.denied = True
         self.assert_code("ACCESS_DENIED", self.prepare)
         self.f.auth.denied = False
