@@ -26,6 +26,7 @@ from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal,
                                      CleaningRule, CleaningRuleVerdict, DetectionStep)
 from ...retrieval_contracts import RetrievalPlan, RetrievalScope
 from ...result_contracts import ExactRepresentative, ExactResultSetPreview
+from ...conversation_models import ConversationConfirmation, ConversationMessage
 
 
 TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal, Task, Draft,
@@ -35,7 +36,8 @@ TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal,
                               CleaningApprovalProposal, CleaningBinding, CleaningCandidateRef, CleaningRecipe,
                               CleaningRule, DetectionStep, CleaningRuleVerdict,
                               CleaningCandidateVerdict, CleaningJobResult,
-                              ExactRepresentative, ExactResultSetPreview)}
+                              ExactRepresentative, ExactResultSetPreview,
+                              ConversationConfirmation, ConversationMessage)}
 ENUMS = {t.__name__: t for t in (TaskLifecycle, RunStatus)}
 FORMAT = 1
 MAX_BYTES = 16 * 1024 * 1024
@@ -75,6 +77,8 @@ def decode(value):
         if (kind in {"CleaningApprovalProposal", "CleaningBinding"}
                 and missing == {"detector_release_digest"}):
             data = {**data, "detector_release_digest": None}
+        if kind in {"Task", "Draft"} and missing == {"conversation_id"}:
+            data = {**data, "conversation_id": None}
         if set(data) != expected:
             raise ValueError("incompatible model fields")
         return cls(**{k: decode(v) for k, v in data.items()})
@@ -104,7 +108,8 @@ def restore(payload):
         raise ValueError("invalid snapshot length")
     state = decode(json.loads(payload))
     expected = set(vars(memory)) - {"_lock"}
-    for key in {"_feedback_drafts", "_feedback_requests", "_revisions"} - set(state if isinstance(state, dict) else ()):
+    for key in {"_feedback_drafts", "_feedback_requests", "_revisions",
+                "_conversation_messages", "_conversation_confirmations"} - set(state if isinstance(state, dict) else ()):
         state[key] = {}
     if not isinstance(state, dict) or set(state) != expected:
         raise ValueError("incompatible ledger state")
@@ -181,6 +186,8 @@ class SQLiteTaskRepository:
     def confirm_feedback_draft(self, *args, **kwargs): return self._call("confirm_feedback_draft", True, *args, **kwargs)
     def list_revisions(self, *args, **kwargs): return self._call("list_revisions", False, *args, **kwargs)
     def list_tasks(self, *args, **kwargs): return self._call("list_tasks", False, *args, **kwargs)
+    def get_conversation(self, *args, **kwargs): return self._call("get_conversation", False, *args, **kwargs)
+    def list_conversations(self, *args, **kwargs): return self._call("list_conversations", False, *args, **kwargs)
     def put_cleaning_proposal(self, *args, **kwargs): return self._call("put_cleaning_proposal", True, *args, **kwargs)
     def get_cleaning_proposal(self, *args, **kwargs): return self._call("get_cleaning_proposal", False, *args, **kwargs)
     def get_cleaning_operation(self, *args, **kwargs): return self._call("get_cleaning_operation", False, *args, **kwargs)

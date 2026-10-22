@@ -4,8 +4,10 @@ import json
 import re
 import uuid
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any
 
+from .conversation_models import ConversationMessage
 from .errors import ServiceError, invalid
 from .models import Actor
 from .ports import TaskRepository, ProjectContextProvider
@@ -48,9 +50,25 @@ class TaskService:
                 raise ServiceError("NOT_FOUND", "draft was not found", 404)
         proposal = normalize_proposal(raw)
         self.projects.require_access(actor, project_id, proposal["dimension_id"], "create")
-        draft = Draft(draft_id or "draft_" + uuid.uuid4().hex, actor.tenant_id, actor.user_id,
-                      project_id, proposal["dimension_id"], json.dumps(proposal, sort_keys=True, ensure_ascii=False))
-        stored, replayed = self.repository.save_draft(actor, key, draft, version)
+        resolved_draft_id = draft_id or "draft_" + uuid.uuid4().hex
+        conversation_id = (existing.conversation_id if draft_id else None) or "conversation_" + uuid.uuid4().hex
+        try:
+            previous = self.repository.get_conversation(actor, conversation_id)
+            sequence = len(previous.messages) + 1
+        except ServiceError as error:
+            if error.code != "NOT_FOUND":
+                raise
+            sequence = 1
+        draft = Draft(resolved_draft_id, actor.tenant_id, actor.user_id,
+                      project_id, proposal["dimension_id"], json.dumps(proposal, sort_keys=True, ensure_ascii=False),
+                      conversation_id=conversation_id)
+        message = ConversationMessage(
+            "message_" + uuid.uuid4().hex, conversation_id, actor.tenant_id, actor.user_id,
+            project_id, resolved_draft_id, sequence, "request",
+            proposal["query_spec"]["raw_request"], datetime.now(UTC),
+        )
+        stored, replayed = self.repository.save_draft(
+            actor, key, draft, version, conversation_message=message)
         return stored.to_summary(), replayed
 
     def get_draft(self, actor: Actor, project_id: str, draft_id: str) -> dict:
@@ -115,11 +133,22 @@ class TaskService:
         proposal["query_spec"]["raw_request"] = current + "\n追加反馈：" + text.strip()
         normalized = normalize_proposal(proposal)
         proposal_json = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+        feedback_draft_id = draft_id
+        message = None
+        if task.conversation_id:
+            feedback_draft_id = draft_id or "feedback_" + uuid.uuid4().hex
+            conversation = self.repository.get_conversation(actor, task.conversation_id)
+            message = ConversationMessage(
+                "message_" + uuid.uuid4().hex, task.conversation_id,
+                actor.tenant_id, actor.user_id, task.project_id, feedback_draft_id,
+                len(conversation.messages) + 1, "feedback", text.strip(), datetime.now(UTC),
+            )
         return self.repository.save_feedback_draft(
             actor, key, task_id, expected_revision=body["expected_revision"],
             expected_task_version=body["expected_task_version"], proposal_json=proposal_json,
-            feedback_text=text.strip(), scope="all", draft_id=draft_id,
+            feedback_text=text.strip(), scope="all", draft_id=feedback_draft_id,
             expected_draft_version=body.get("expected_draft_version"),
+            conversation_message=message,
         )
 
     def get_feedback(self, actor: Actor, task_id: str, draft_id: str) -> dict[str, Any]:
@@ -176,4 +205,29 @@ class TaskService:
             view.update(raw_request=raw_request, created_at=task.created_at.isoformat(),
                         pending_draft=self.repository.get_pending_feedback(actor, task.task_id))
             result.append(view)
+        return tuple(result)
+
+    def get_conversation(self, actor: Actor, conversation_id: str) -> dict[str, Any]:
+        snapshot = self.repository.get_conversation(actor, conversation_id)
+        if not snapshot.messages:
+            raise ServiceError("STORAGE_CORRUPT", "conversation has no messages", 500)
+        draft = self.repository.get_draft(actor, snapshot.messages[0].draft_id)
+        self.projects.require_access(actor, snapshot.project_id, draft.dimension_id, "read")
+        return snapshot.to_view()
+
+    def list_conversations(self, actor: Actor, project_id: str) -> tuple[dict[str, Any], ...]:
+        if not isinstance(project_id, str) or not project_id.strip():
+            raise invalid("project_id is required", "$.project_id")
+        result = []
+        for snapshot in self.repository.list_conversations(actor, project_id):
+            if not snapshot.messages:
+                raise ServiceError("STORAGE_CORRUPT", "conversation has no messages", 500)
+            draft = self.repository.get_draft(actor, snapshot.messages[0].draft_id)
+            try:
+                self.projects.require_access(actor, project_id, draft.dimension_id, "read")
+            except ServiceError as error:
+                if error.code == "PROJECT_ACCESS_DENIED":
+                    continue
+                raise
+            result.append(snapshot.to_summary())
         return tuple(result)

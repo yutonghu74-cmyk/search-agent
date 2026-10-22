@@ -144,3 +144,9 @@
 - 23:29 里程碑：owner/project 过滤、当前权限重验、100 条上限、稳定排序、pending 摘要和 SQLite 重启读取已实现；定向 12 项通过。
 - 23:31 交付：`python3 tools/collab_gate.py check --role core --base 3304adf7ef1885e50a0dfbd70c86aafb63043b9f` 为 SCOPE PASS、完整 409 项通过、LOCAL GATE PASS；输出中的 `LOCAL GATE FAIL` 是既有负向门禁夹具。
 - 未验证：HTTP/UI、完整 `conversation_message` 草稿历史、真实 W3/内网不在本切片。
+# 独立草稿会话账本持久事务（2026-10-23）
+
+- B core / `codex/task-core` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`；任务卡 `docs/dev/tasks/conversation-message-storage.json`，基线 `2877e6ce7e0883378f3b30471361d43773790f78`；状态 READY_FOR_REVIEW。
+- 范围：`service.py`、内存/SQLite task repository、`tests/core/test_conversation_storage.py` 和本交接。实现需求草稿/反馈消息与对应草稿同事务保存，确认时写独立 task/revision 关联；消息不进入正式 revision 时间线。
+- 验证覆盖：新需求→确认→反馈→再确认的消息与两次关联；幂等不重复；错误绑定全回滚；创建人/项目撤权；SQLite 重启恢复；移除 conversation 容器及 Task/Draft 新字段的旧快照兼容。`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.core.test_conversation_storage tests.test_drafts tests.core.test_feedback tests.core.test_sqlite_storage -q`：35 项通过、退出码 0。`python3 tools/collab_gate.py check --role core --base 2877e6ce7e0883378f3b30471361d43773790f78`：SCOPE PASS、420 项通过、LOCAL GATE PASS、退出码 0；其中 `LOCAL GATE FAIL` 为既有负向夹具输出。按用户要求未在门禁外重复完整回归。
+- 不实现 HTTP/UI、附件、assistant 消息、保留/删除策略；不访问内网、真实业务数据、W3 或 DJ。

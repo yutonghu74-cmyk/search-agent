@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from dataclasses import replace
 
 from ..errors import ServiceError
+from ..conversation_models import ConversationConfirmation, ConversationMessage, ConversationSnapshot
 from ..models import Actor, Task, RunStatus
 from ..proposals import Draft
 from ..query_spec import digest
@@ -25,7 +26,29 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
         self._feedback_drafts: dict[str, dict] = {}
         self._feedback_requests: dict[tuple, tuple[str, dict]] = {}
         self._revisions: dict[str, dict[int, str]] = {}
+        self._conversation_messages: dict[str, dict[int, ConversationMessage]] = {}
+        self._conversation_confirmations: dict[str, dict[str, ConversationConfirmation]] = {}
         self._init_cleaning()
+
+    def _validate_conversation_message(self, actor, message, *, project_id, draft_id,
+                                       conversation_id):
+        if not isinstance(message, ConversationMessage):
+            raise ServiceError("INVALID_SPEC", "conversation message is invalid", 422)
+        if ((message.tenant_id, message.owner_user_id) != (actor.tenant_id, actor.user_id)
+                or message.project_id != project_id or message.draft_id != draft_id
+                or message.conversation_id != conversation_id):
+            raise ServiceError("CONVERSATION_BINDING_CONFLICT", "conversation binding does not match draft", 409)
+        messages = self._conversation_messages.get(conversation_id, {})
+        if message.sequence != len(messages) + 1:
+            raise ServiceError("CONVERSATION_VERSION_CONFLICT", "conversation sequence is stale", 409)
+        if messages:
+            first = next(iter(messages.values()))
+            if ((first.tenant_id, first.owner_user_id, first.project_id)
+                    != (message.tenant_id, message.owner_user_id, message.project_id)):
+                raise ServiceError("CONVERSATION_BINDING_CONFLICT", "conversation identity cannot change", 409)
+
+    def _store_conversation_message(self, message):
+        self._conversation_messages.setdefault(message.conversation_id, {})[message.sequence] = message
 
     @staticmethod
     def _feedback_view(draft: dict) -> dict:
@@ -47,12 +70,15 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 raise ServiceError("NOT_FOUND", "draft was not found", 404)
             return draft
 
-    def save_draft(self, actor: Actor, key: str, draft: Draft, expected_version: int | None = None) -> tuple[Draft, bool]:
+    def save_draft(self, actor: Actor, key: str, draft: Draft, expected_version: int | None = None,
+                   *, conversation_message: ConversationMessage | None = None) -> tuple[Draft, bool]:
         if (draft.tenant_id, draft.owner_user_id) != (actor.tenant_id, actor.user_id):
             raise ServiceError("ACCESS_DENIED", "draft identity does not match caller", 403)
         route = ("create", draft.project_id) if expected_version is None else ("update", draft.draft_id)
         scope = (actor.tenant_id, actor.user_id, route, key)
-        fingerprint = digest({"proposal": draft.proposal_digest, "expected_version": expected_version})
+        fingerprint = digest({"proposal": draft.proposal_digest, "expected_version": expected_version,
+                              "conversation_text": (conversation_message.text if conversation_message else None),
+                              "conversation_kind": (conversation_message.kind if conversation_message else None)})
         with self._lock:
             if scope in self._draft_requests:
                 previous, saved = self._draft_requests[scope]
@@ -68,7 +94,15 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 draft = replace(draft, draft_version=expected_version + 1)
             elif draft.draft_id in self._drafts:
                 raise ServiceError("DRAFT_ID_CONFLICT", "draft identifier is already in use", 409)
+            if conversation_message is not None:
+                if not draft.conversation_id:
+                    raise ServiceError("CONVERSATION_BINDING_CONFLICT", "draft has no conversation", 409)
+                self._validate_conversation_message(
+                    actor, conversation_message, project_id=draft.project_id,
+                    draft_id=draft.draft_id, conversation_id=draft.conversation_id)
             self._drafts[draft.draft_id] = draft
+            if conversation_message is not None:
+                self._store_conversation_message(conversation_message)
             self._draft_requests[scope] = (fingerprint, draft)
             return draft, False
 
@@ -97,22 +131,32 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 request_digest=proposal_digest, confirmed_revision=1, run_status=RunStatus.PLANNING,
                 created_at=datetime.now(UTC), project_id=draft.project_id, dimension_id=draft.dimension_id,
                 batch_id="batch_" + uuid.uuid4().hex, confirmed_proposal_json=draft.proposal_json,
+                conversation_id=draft.conversation_id,
             )
             self._tasks[task.task_id] = task
             self._revisions[task.task_id] = {1: draft.proposal_json}
             self._batches[task.batch_id] = (actor.tenant_id, draft.project_id, task.task_id)
             self._drafts[draft_id] = replace(draft, confirmed_task_id=task.task_id)
+            if draft.conversation_id:
+                link = ConversationConfirmation(
+                    "confirmation_" + uuid.uuid4().hex, draft.conversation_id,
+                    draft_id, task.task_id, 1, datetime.now(UTC))
+                self._conversation_confirmations.setdefault(draft.conversation_id, {})[draft_id] = link
             self._idempotency[scope] = (fingerprint, task.task_id)
             return replace(task), False
 
     def save_feedback_draft(self, actor, key, task_id, *, expected_revision,
                             expected_task_version, proposal_json, feedback_text, scope,
-                            draft_id=None, expected_draft_version=None):
-        route = ("update", draft_id) if draft_id else ("create", task_id)
+                            draft_id=None, expected_draft_version=None,
+                            conversation_message=None):
+        updating = expected_draft_version is not None
+        route = ("update", draft_id) if updating else ("create", task_id)
         request = {"task_id": task_id, "revision": expected_revision,
                    "task_version": expected_task_version, "proposal_json": proposal_json,
                    "feedback_text": feedback_text, "scope": scope,
-                   "draft_id": draft_id, "draft_version": expected_draft_version}
+                   "draft_id": draft_id if updating else None, "draft_version": expected_draft_version,
+                   "conversation_text": (conversation_message.text if conversation_message else None),
+                   "conversation_kind": (conversation_message.kind if conversation_message else None)}
         fingerprint = digest(request)
         request_scope = (actor.tenant_id, actor.user_id, "feedback", route, key)
         with self._lock:
@@ -132,7 +176,7 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
             except (TypeError, json.JSONDecodeError):
                 raise ServiceError("INVALID_SPEC", "feedback proposal is invalid", 422) from None
             proposal_digest = digest({"project_id": task.project_id, "proposal": proposal})
-            if draft_id:
+            if updating:
                 stored = self._feedback_drafts.get(draft_id)
                 if stored is None or stored["task_id"] != task_id or stored["owner_user_id"] != actor.user_id:
                     raise ServiceError("NOT_FOUND", "feedback draft was not found", 404)
@@ -143,7 +187,13 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 if any(d["task_id"] == task_id and d["status"] == "ready"
                        for d in self._feedback_drafts.values()):
                     raise ServiceError("PENDING_DRAFT_EXISTS", "confirm or edit the pending feedback draft", 409)
-                draft_id, version = "feedback_" + uuid.uuid4().hex, 1
+                draft_id, version = draft_id or "feedback_" + uuid.uuid4().hex, 1
+            if conversation_message is not None:
+                if not task.conversation_id:
+                    raise ServiceError("CONVERSATION_BINDING_CONFLICT", "task has no conversation", 409)
+                self._validate_conversation_message(
+                    actor, conversation_message, project_id=task.project_id,
+                    draft_id=draft_id, conversation_id=task.conversation_id)
             stored = {
                 "draft_id": draft_id, "draft_version": version, "task_id": task_id,
                 "tenant_id": actor.tenant_id, "owner_user_id": actor.user_id,
@@ -151,8 +201,11 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 "proposal_json": proposal_json, "proposal_digest": proposal_digest,
                 "feedback_text": feedback_text, "scope": scope, "status": "ready",
                 "confirmed_revision": None,
+                "conversation_id": task.conversation_id,
             }
             self._feedback_drafts[draft_id] = stored
+            if conversation_message is not None:
+                self._store_conversation_message(conversation_message)
             view = self._feedback_view(stored)
             self._feedback_requests[request_scope] = (fingerprint, view)
             return deepcopy(view), False
@@ -220,6 +273,12 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 self._revisions.setdefault(task_id, {})[task.confirmed_revision] = stored["proposal_json"]
                 stored["status"] = "confirmed"
                 stored["confirmed_revision"] = task.confirmed_revision
+                if stored.get("conversation_id"):
+                    link = ConversationConfirmation(
+                        "confirmation_" + uuid.uuid4().hex, stored["conversation_id"],
+                        draft_id, task_id, task.confirmed_revision, datetime.now(UTC))
+                    self._conversation_confirmations.setdefault(
+                        stored["conversation_id"], {})[draft_id] = link
                 result = {"task": task.to_summary(), "draft": self._feedback_view(stored)}
             else:
                 raise ServiceError("INVALID_SPEC", "action must be confirm or reject", 422)
@@ -244,6 +303,34 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                     == (actor.tenant_id, actor.user_id, project_id)]
             rows.sort(key=lambda task: task.task_id)
             rows.sort(key=lambda task: task.created_at, reverse=True)
+            return tuple(rows[:100])
+
+    def get_conversation(self, actor, conversation_id):
+        with self._lock:
+            messages = self._conversation_messages.get(conversation_id)
+            if not messages:
+                raise ServiceError("NOT_FOUND", "conversation was not found", 404)
+            ordered = tuple(message for _, message in sorted(messages.items()))
+            first = ordered[0]
+            if (first.tenant_id, first.owner_user_id) != (actor.tenant_id, actor.user_id):
+                raise ServiceError("NOT_FOUND", "conversation was not found", 404)
+            confirmations = tuple(
+                sorted(self._conversation_confirmations.get(conversation_id, {}).values(),
+                       key=lambda item: (item.revision, item.confirmation_id)))
+            return ConversationSnapshot(conversation_id, first.project_id, ordered, confirmations)
+
+    def list_conversations(self, actor, project_id):
+        with self._lock:
+            rows = []
+            for conversation_id, messages in self._conversation_messages.items():
+                if not messages:
+                    continue
+                first = next(iter(messages.values()))
+                if ((first.tenant_id, first.owner_user_id, first.project_id)
+                        != (actor.tenant_id, actor.user_id, project_id)):
+                    continue
+                rows.append(self.get_conversation(actor, conversation_id))
+            rows.sort(key=lambda item: item.messages[-1].created_at, reverse=True)
             return tuple(rows[:100])
 
     def create(self, actor: Actor, key: str, request_digest: str, task: Task) -> tuple[Task, bool]:
