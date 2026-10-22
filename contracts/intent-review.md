@@ -40,4 +40,15 @@ PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 tools/intent_review.py --reques
 
 此命令不调用模型，会如实显示全文待澄清。`--interpretation <候选JSON>` 可查看人工/外部提供的解释经校验后的结果，默认仍无已验证能力。CLI 不保存文件、不联网；向终端打印的原文应自行遵循数据保密要求。
 
-后续：受控模型适配、业务理解评测、持久草稿版本/澄清修订、确认后转换到执行规格、完整能力参数/证据 schema 和规则编译器。未实现前不能称“开放需求自动执行”。
+## 显式真实模型入口
+
+`IntentModelClient(load_dsh_config(profile_path, credential_path, yaml_python=existing_yaml_python)).interpret(raw_request)`
+复用 DSH 默认 provider/model 与对应 apiKeyEnv 凭据引用，支持当前 refs 格式及旧平面映射；不修改 DSH 配置，不读取其他服务凭据用于请求。配置必须为 HTTPS openai-completions；凭据文件不得开放组/其他用户权限。
+
+命令 `PYTHONPATH=src python3 tools/intent_model.py --run-live --profile <本地profile路径> --credentials <私有凭据路径> --yaml-python <已安装YAML的解释器路径> --request <可外发需求>` 显式联网，输出到终端，不保存原文/凭据。不要把机密业务内容放入命令行。需要可用的既有 YAML 运行时，不自动安装依赖。
+
+请求仅含系统提示和用户原文；凭据仅在认证头。禁重定向、禁自动重试；网络超时上限 60 秒（urllib 套接字操作超时，并非整体截止时间），响应上限 1 MB。上游错误脱敏。模型只提供原文 quote/occurrence，后端定位字符坐标并做已有校验；没有正式任务/HTTP入口/持久草稿或清洗派发。
+
+2026-10-22：现有 qwen3.7-plus 的一条合成需求真实调用成功，数量、文字/水印否定、横图软偏好和完整性澄清可见；此前一次连接失败，不把本次成功视为稳定性验证。默认能力目录仍为空，不能执行。模型未覆盖的功能词/标点仍保守列入待澄清，用户体验需后续改进，不静默忽略。
+
+后续：业务理解评测、持久草稿版本/澄清修订、确认后转换到执行规格、完整能力参数/证据 schema 和规则编译器。未实现前不能称“开放需求自动执行”。

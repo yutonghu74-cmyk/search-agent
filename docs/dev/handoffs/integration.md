@@ -175,4 +175,15 @@
 - 原 core/retrieval/cleaning 配置逐项与原基线相等，新增回归测试验证；它们不使用 --task 替代角色约束。
 - 执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：269 项通过、退出码 0（249 基线 + 20 新增门禁测试）。其中 30 项门禁测试含原有 10 项；测试中的预期 LOCAL GATE FAIL 是拒绝断言，不是全套测试失败。隔离 Git 仓库验证允许/拒绝路径；未访问内网、未调用真实模型/DJ。
 - 执行 `python3 tools/collab_gate.py check --role core --base 22c62143dd20d49f0426f1fccd2232fd13de6699`：退出码 1，分支不匹配。执行新命令 `check --role integration --base 22c62143dd20d49f0426f1fccd2232fd13de6699 --task docs/dev/tasks/intent-model.json`：退出码 1，旧基线无 integration 配置。保持失败，不用 baseline 模式替代角色检查。git diff --check 通过。
-- 待人工确认：审查并授权发布本次门禁和模型任务卡为新的可信基线。之后模型工作区同步基线，保留其未提交代码/交接（本交接可能需手工合并两个新增段落），用受信版本执行 integration 门禁；通过后再申请/执行获授权的本地集成。此处的测试通过不是首次门禁自认证，更不是 v1.9 全业务验收。
+- 后续：用户已一次性授权本地提交、检查和合并；门禁提交 c068af4 已快进发布到主分支，发布后的主分支 269 项回归通过。该首次发布由隔离测试和 diff 审查把关，不是新门禁自认证；不是 v1.9 全业务验收。
+
+## 真实需求解析模型接入（2026-10-22 15:27，Asia/Shanghai）
+
+- A / codex/integration / var/worktrees/integration；基线 22c62143dd20d49f0426f1fccd2232fd13de6699；范围与验收见 docs/dev/intent-model-task.md。按用户要求复用已配置凭据，持久澄清暂缓。
+- 新增 src/dsh_retrieval/intent_model.py、tools/intent_model.py、tests/test_intent_model.py；更新 contracts/intent-review.md。默认模型 qwen3.7-plus，仅从私有配置取对应 key，不保存/打印凭据或端点，不改 DSH 配置。复用现有 YAML 解释器，无安装。
+- 真实合成输入：`找10张客厅图片，不要文字和水印，横图优先，沙发要完整。`。首次 45 秒设置下连接失败（当时未区分超时，不能断言根因）；未带凭据的网关探测得到 HTTP 401，证明 TLS 可达。随后人工诊断调用使用 60 秒设置成功，无自动重试或更换模型。
+- 实际返回 6 条解释：数量 10、客厅意图、text.present=false、watermark.present=false、orientation=landscape/soft、沙发完整 unresolved。澄清问题区分超出画幅与部件可见。后端原文定位/严格校验通过；execution_allowed=false、creates_task=false。
+- 模型未包含“找”“图片，”及部分连接词/标点，审阅层追加 7 条未解析记录；未静默放行。默认能力目录为空，不能据此宣布 OCR/完整性/多规则清洗已支持。单样本不构成准确率或稳定性评测；无真实业务数据外发、无内网/DJ/正式任务执行。
+- 本地回归：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，264 项通过、退出码 0（249 基线 + 15 适配测试）。测试包括鉴权错误脱敏、不重试、超时/断连、恶意字段/伪造片段、大小上限、原文定位及私有文件权限。
+- 角色门禁：`python3 tools/collab_gate.py check --role core --base 22c62143dd20d49f0426f1fccd2232fd13de6699` 退出码 1：codex/integration 非 core 分支；现有工具没有 A 角色。未修改门禁，未宣称通过。本轮保留工作区修改待总控门禁处理，不自动合入主分支。
+- 下一步：解决 A 交付门禁；接入持久澄清/修订，降低非语义片段澄清噪声并建立多样需求评测，然后对接确认和规则编译。当前为显式 CLI/适配器入口，不是网页端完整接入。
