@@ -1,0 +1,12 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "275cc0c6cf0c64b851583230c381f23d3fc1a27d",
+  "files": [
+    "src/dsh_retrieval/result_contracts.py",
+    "tests/test_result_contracts.py",
+    "contracts/result-set.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "冻结 input_only 图片任务的精确内容去重预览结果集契约：只消费完整且绑定当前批准作业的 CleaningJobResult；仅全规则 pass 候选进入有效集，按内容摘要确定性选代表，目标内 accepted、超出目标 reserve，fail/unknown/重复分别统计且不计 accepted；TARGET_MET 与 SEARCH_STRATEGIES_EXHAUSTED 停止原因一致，结果摘要稳定。契约不授权、不持久化、不派发补数，integration 角色门禁和完整回归通过。"
+}
