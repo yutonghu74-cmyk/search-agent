@@ -1,0 +1,16 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "50c067ac39b608cbb1ce63118eabfdd1d006289f",
+  "files": [
+    "src/dsh_retrieval/conversation_models.py",
+    "src/dsh_retrieval/models.py",
+    "src/dsh_retrieval/proposals.py",
+    "src/dsh_retrieval/ports.py",
+    "tests/test_conversation_contracts.py",
+    "contracts/chat-conversation.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "冻结独立 conversation_message 会话记录契约：消息绑定租户、创建人、项目、conversation、draft 和单调序号；正式 task/revision 仅由独立确认关联记录绑定，不把逐条草稿消息写入业务执行时间线。Draft/Task 增加可选 conversation_id 且旧调用保持兼容；端口明确草稿消息与 draft 同事务保存、确认关联与正式 task/revision 同事务保存、读取时重验创建人和项目权限。契约测试覆盖摘要脱敏、非法标识/文本/序号拒绝、确认关联完整性和旧模型兼容。integration 门禁通过；不实现持久化、HTTP/UI、保留清理，不访问内网或真实业务数据。"
+}
