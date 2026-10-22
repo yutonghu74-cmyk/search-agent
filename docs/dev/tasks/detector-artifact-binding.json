@@ -1,0 +1,15 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "aa950bc2cd5022637c3beda03066ff5c02c0c907",
+  "files": [
+    "src/dsh_retrieval/released_detectors.py",
+    "src/dsh_retrieval/detector_artifacts.py",
+    "tests/test_released_detectors.py",
+    "tests/test_detector_artifacts.py",
+    "tests/test_multi_rule_pipeline.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "在现有已发布能力门禁上增加服务端受信检测器制品清单，按 backend_ref 绑定实际可读取的实现/模型文件及 SHA-256；执行前验证文件存在、摘要一致且与登记检测器匹配，缺失、替换、篡改或目录漂移在读取候选媒体前失败关闭。保留已批准作业、权限、代次及重复预览幂等栅栏，不接受客户端提供文件路径或摘要。用本地合成制品覆盖成功、缺失、内容改变、绑定错配和预览重试；不注册真实模型、不运行真实 DJ、不访问内网，也不把摘要验证当作模型质量评测。记录明确未验证项，integration 角色门禁与完整回归通过。"
+}
