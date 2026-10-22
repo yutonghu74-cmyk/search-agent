@@ -1,0 +1,13 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "d2816f4a1117aa84412a44d0e791522aeb74658c",
+  "files": [
+    "src/dsh_retrieval/multi_rule_contracts.py",
+    "tests/test_multi_rule_contracts.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/generic-cleaning-task.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "冻结已批准任务/版本/代次/清单/配方绑定、受信检测步骤与规则、候选标识及逐条事实结果；默认无检测器，任何用户或模型任意路径、未确认草稿、缺证据不得变成正式作业；契约测试、完整回归和 integration 门禁通过。"
+}
