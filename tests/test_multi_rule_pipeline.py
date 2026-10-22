@@ -92,6 +92,7 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.registry = ReleasedDetectorRegistry(self.capabilities, self.bindings,
             {self.detector.backend_ref: self.detector}, self.artifact_manifest)
         self.f.recipe = replace(self.f.recipe, registry_digest=self.registry.registry_digest)
+        self.f.release_digest = self.registry.release_digest
         self.f.proposal = self.f.prepare()
         self.approval, _ = self.f.confirm()
         self.repo = self.f.reopen()
@@ -105,10 +106,19 @@ class MultiRulePipelineTests(unittest.TestCase):
             (CleaningCandidateVerdict(candidate.candidate_id, candidate.asset_version,
                                       "pass", rules),))
 
-    def run_pipeline(self):
+    def run_pipeline(self, registry=None):
         return run_approved_multi_rule(self.repo, self.actor, self.task_id,
             self.operation_id, gateway=self.gateway,
-            registry=self.registry)
+            registry=registry or self.registry)
+
+    def changed_registry(self):
+        changed_model = replace(self.artifact_binding.artifacts[1],
+                                content_digest="sha256:" + "0" * 64)
+        binding = replace(self.artifact_binding,
+                          artifacts=(self.artifact_binding.artifacts[0], changed_model))
+        manifest = DetectorArtifactManifest(self.artifact_root, (binding,))
+        return ReleasedDetectorRegistry(self.capabilities, self.bindings,
+            {self.detector.backend_ref: self.detector}, manifest)
 
     def assert_code(self, code, action):
         with self.assertRaises(ServiceError) as caught:
@@ -151,6 +161,27 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.assert_code("DETECTOR_NOT_RELEASED", self.run_pipeline)
         self.assertEqual((self.gateway.reads, self.detector.calls), (0, 0))
         self.assertEqual(self.f.state()["result_sets"], {})
+
+    def test_release_change_blocks_saved_result_before_preview(self):
+        self.repo.publish_result(self.actor, self.task_id,
+                                 self.operation_id, self.make_result())
+        self.assert_code("DETECTOR_NOT_RELEASED",
+                         lambda: self.run_pipeline(self.changed_registry()))
+        self.assertEqual((self.gateway.reads, self.detector.calls), (0, 0))
+        self.assertEqual(self.f.state()["result_sets"], {})
+
+    def test_legacy_approval_without_release_binding_never_runs(self):
+        legacy = replace(self.approval, proposal=replace(
+            self.approval.proposal, detector_release_digest=None))
+        with patch.object(self.repo, "get_current", return_value=legacy):
+            self.assert_code("DETECTOR_NOT_RELEASED", self.run_pipeline)
+        self.assertEqual((self.gateway.reads, self.detector.calls), (0, 0))
+        self.assertEqual(self.f.state()["results"], {})
+
+    def test_published_preview_replay_does_not_rewrite_release_history(self):
+        view, _ = self.run_pipeline()
+        self.assertEqual(self.run_pipeline(self.changed_registry()), (view, True))
+        self.assertEqual((self.gateway.reads, self.detector.calls), (1, 1))
 
     def test_revocation_or_stale_generation_never_runs(self):
         self.f.f.auth.denied = True

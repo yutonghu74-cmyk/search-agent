@@ -6,6 +6,7 @@ and publication. This module never accepts a caller-built job or media path.
 
 from .adapters.cleaning import ApprovedManifestAccess, GenericCleaningExecutor
 from .errors import ServiceError
+from .multi_rule_contracts import require_released_cleaning_job
 from .released_detectors import ReleasedDetectorRegistry
 
 
@@ -31,7 +32,15 @@ def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, regi
             raise exc
         return view, True
 
-    detectors = registry.require_recipe(approval.job.recipe)
+    try:
+        job = require_released_cleaning_job(approval.job)
+    except (TypeError, ValueError) as exc:
+        raise ServiceError("DETECTOR_NOT_RELEASED",
+                           "Approved detector release unavailable", 409) from exc
+    if job.binding.detector_release_digest != registry.release_digest:
+        raise ServiceError("DETECTOR_NOT_RELEASED",
+                           "Approved detector release unavailable", 409)
+    detectors = registry.require_recipe(job.recipe)
     try:
         result = repo.get_result(actor, task_id, operation_id)
     except ServiceError as exc:
@@ -39,7 +48,7 @@ def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, regi
             raise
         access = ApprovedManifestAccess(repo, actor, task_id, gateway)
         result = GenericCleaningExecutor(guard=access, reader=access,
-                                         detectors=detectors).run(approval.job)
+                                         detectors=detectors).run(job)
         repo.publish_result(actor, task_id, operation_id, result)
 
     # This is a separate recoverable transaction. On retry, a published

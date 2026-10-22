@@ -291,3 +291,12 @@
 - 兼容边界：缺省值仅用于旧对象/账本分阶段迁移，保持原 v1 内容摘要，不能执行，也不能用当前发布静默补齐。下一步由 core 强制所有新批准保存发布摘要，再由 integration 在运行前与当前 `ReleasedDetectorRegistry.release_digest` 比对。
 - 定向验证：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_rule_contracts -q`，10 项通过；`git diff --check` 通过。`python3 tools/collab_gate.py check --role integration --base 1c7c4c88bd07d4532087bfcf7c9bae19eafe3b1c --task docs/dev/tasks/detector-release-binding-contract.json` 退出码 0，SCOPE PASS、门禁内部 382 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。未额外重复完整回归。
 - NOT_RUN：真实 DJ、真实模型/制品、生产账本迁移、ClickHouse/Milvus/W3、内网数据；本轮只冻结共享身份与失败关闭边界，不宣称已完成持久化或运行时发布漂移拦截。
+
+## 检测器发布摘要运行时栅栏（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；发布基线 `e3906f66b9b9f345d32df25f5189672775874d32`，任务卡 `docs/dev/tasks/detector-release-runtime-fence.json`；状态 READY_FOR_REVIEW。
+- 修改 `multi_rule_pipeline.py`、`test_multi_rule_pipeline.py`、`contracts/multi-rule-cleaning.md` 与本交接。流水线在任何未完成执行或预览续发前，要求批准作业含发布摘要且等于服务端当前 `ReleasedDetectorRegistry.release_digest`；不匹配统一返回 `DETECTOR_NOT_RELEASED`，随后仍执行既有能力、检测器元数据和制品逐文件复核。
+- 覆盖边界：旧批准、同逻辑 backend 下换能力目录/实现/模型清单、已保存结果但未发布预览均在素材读取和检测器调用前失败；已原子发布的历史预览仍通过业务账本重验当前权限/任务后只读重放，不重新执行或改写历史。
+- 定向验证：`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_rule_pipeline -q`，11 项通过；`git diff --check` 通过。因修改正式流水线与公共契约，按仓库规则执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，387 项通过；输出中的 LOCAL GATE FAIL 是既有负例夹具。
+- 交付门禁：`python3 tools/collab_gate.py check --role integration --base e3906f66b9b9f345d32df25f5189672775874d32 --task docs/dev/tasks/detector-release-runtime-fence.json` 退出码 0，SCOPE PASS、门禁内部 387 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。未额外重复完整回归。
+- NOT_RUN：真实 DJ、真实检测器/模型制品、生产配置发布/回滚、ClickHouse/Milvus/W3、内网数据；合成测试只证明身份栅栏和恢复顺序，不证明模型质量。
