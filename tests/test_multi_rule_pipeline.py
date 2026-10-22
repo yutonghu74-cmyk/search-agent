@@ -1,11 +1,17 @@
 from contextlib import contextmanager
 from dataclasses import replace
+from hashlib import sha256
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from core import test_multi_rule_approval as fixture
 from dsh_retrieval.errors import ServiceError
+from dsh_retrieval.detector_artifacts import (
+    DetectorArtifact, DetectorArtifactBinding, DetectorArtifactManifest,
+)
 from dsh_retrieval.intent_compiler import DetectorBinding
 from dsh_retrieval.intent_review import Capability
 from dsh_retrieval.multi_rule_contracts import (
@@ -38,6 +44,7 @@ class Detector:
     def __init__(self):
         self.calls = 0
         self.after_detect = None
+        self.artifact_binding_digest = None
 
     def detect(self, content, candidate, binding):
         self.calls += 1
@@ -57,6 +64,25 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.task_id = self.f.f.tid
         self.gateway = Gateway(self.f.f.auth)
         self.detector = Detector()
+        self.artifact_temp = TemporaryDirectory()
+        self.addCleanup(self.artifact_temp.cleanup)
+        self.artifact_root = Path(self.artifact_temp.name)
+        self.artifact_path = self.artifact_root / "fixture_detector.py"
+        self.artifact_path.write_bytes(b"synthetic detector implementation")
+        self.model_path = self.artifact_root / "fixture_model.bin"
+        self.model_path.write_bytes(b"synthetic model weights")
+        artifacts = (
+            DetectorArtifact("implementation", self.artifact_path.name,
+                "sha256:" + sha256(self.artifact_path.read_bytes()).hexdigest()),
+            DetectorArtifact("model", self.model_path.name,
+                "sha256:" + sha256(self.model_path.read_bytes()).hexdigest()),
+        )
+        self.artifact_binding = DetectorArtifactBinding(
+            self.detector.backend_ref, self.detector.validator_ref,
+            self.detector.evidence_ref, artifacts)
+        self.detector.artifact_binding_digest = self.artifact_binding.binding_digest
+        self.artifact_manifest = DetectorArtifactManifest(
+            self.artifact_root, (self.artifact_binding,))
         self.capabilities = tuple(Capability(ref, "constraint", "image", ("eq",),
             "boolean", "verified", "fixture.validator", "fixture.eval")
             for ref in ("text.present@1", "watermark.present@1"))
@@ -64,7 +90,7 @@ class MultiRulePipelineTests(unittest.TestCase):
             "fixture.detector", "fixture.eval")
             for ref in ("text.present@1", "watermark.present@1"))
         self.registry = ReleasedDetectorRegistry(self.capabilities, self.bindings,
-                                                 {self.detector.backend_ref: self.detector})
+            {self.detector.backend_ref: self.detector}, self.artifact_manifest)
         self.f.recipe = replace(self.f.recipe, registry_digest=self.registry.registry_digest)
         self.f.proposal = self.f.prepare()
         self.approval, _ = self.f.confirm()
@@ -118,6 +144,14 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.assertEqual(view["accepted_count"], 1)
         self.assertEqual((self.gateway.reads, self.detector.calls), (1, 1))
 
+    def test_artifact_change_blocks_preview_retry_after_result_write(self):
+        self.repo.publish_result(self.actor, self.task_id,
+                                 self.operation_id, self.make_result())
+        self.model_path.write_bytes(b"changed model weights")
+        self.assert_code("DETECTOR_NOT_RELEASED", self.run_pipeline)
+        self.assertEqual((self.gateway.reads, self.detector.calls), (0, 0))
+        self.assertEqual(self.f.state()["result_sets"], {})
+
     def test_revocation_or_stale_generation_never_runs(self):
         self.f.f.auth.denied = True
         self.assert_code("ACCESS_DENIED", self.run_pipeline)
@@ -140,7 +174,8 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.assertEqual(state["result_sets"], {})
 
     def test_missing_detector_fails_before_media_read(self):
-        missing = ReleasedDetectorRegistry(self.capabilities, self.bindings, {})
+        missing = ReleasedDetectorRegistry(self.capabilities, self.bindings, {},
+                                           self.artifact_manifest)
         self.assert_code("DETECTOR_NOT_RELEASED", lambda: run_approved_multi_rule(
             self.repo, self.actor, self.task_id, self.operation_id,
             gateway=self.gateway, registry=missing))

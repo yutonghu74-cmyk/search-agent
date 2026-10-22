@@ -1,10 +1,11 @@
 """Server-owned release gate between reviewed capabilities and worker code.
 
-This checks release metadata, not model quality or implementation provenance.
-The service must inject this registry from its trusted deployment configuration.
+This checks release metadata and bound local artifact integrity, not detector
+quality. The service injects the registry from trusted deployment configuration.
 """
 
 from .errors import ServiceError
+from .detector_artifacts import DetectorArtifactManifest
 from .intent_compiler import DetectorBinding
 from .intent_review import Capability, IntentReviewService
 from .multi_rule_contracts import CleaningRecipe
@@ -14,12 +15,13 @@ _VALUE_TYPES = {"boolean": bool, "integer": int, "number": (int, float), "string
 
 
 class ReleasedDetectorRegistry:
-    def __init__(self, capabilities, bindings, detectors):
+    def __init__(self, capabilities, bindings, detectors, artifact_manifest):
         self.capabilities = tuple(capabilities)
         self.bindings = tuple(bindings)
         if (not all(type(item) is Capability for item in self.capabilities)
                 or not all(type(item) is DetectorBinding for item in self.bindings)
-                or type(detectors) is not dict):
+                or type(detectors) is not dict
+                or type(artifact_manifest) is not DetectorArtifactManifest):
             raise ValueError("trusted release definitions required")
         # Use exactly the review service's canonical capability digest.
         self.registry_digest = IntentReviewService(self.capabilities).registry_digest
@@ -27,6 +29,7 @@ class ReleasedDetectorRegistry:
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate detector binding")
         self.detectors = dict(detectors)
+        self.artifact_manifest = artifact_manifest
 
     def require_recipe(self, recipe: CleaningRecipe):
         def unavailable():
@@ -66,4 +69,6 @@ class ReleasedDetectorRegistry:
                     or getattr(detector, "evidence_ref", None) != step.evidence_ref
                     or not callable(getattr(detector, "detect", None))):
                 unavailable()
+        self.artifact_manifest.require_detectors(
+            self.detectors, tuple(step.backend_ref for step in recipe.steps))
         return dict(self.detectors)

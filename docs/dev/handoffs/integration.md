@@ -1,5 +1,14 @@
 # A 总控集成交接
 
+## 检测器实现与模型制品 SHA-256 绑定（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/detector-artifact-binding.json`，可信发布基线 `3ca43f8754ecf718c978706c652f12466c5d4ca1`，任务起点 `aa950bc2cd5022637c3beda03066ff5c02c0c907`；状态 READY_FOR_REVIEW。
+- 新增 `src/dsh_retrieval/detector_artifacts.py`、`tests/test_detector_artifacts.py`，调整 `released_detectors.py`、既有发布目录/串联测试、`contracts/multi-rule-cleaning.md` 与本交接。服务端受信清单按 backend_ref 绑定 validator/evidence、实际实现文件及可选模型文件的相对路径和 SHA-256；运行时检测器须声明同一绑定摘要。
+- 每次未完成执行或预览续发前复核固定部署根目录身份、普通文件类型、路径边界、符号链接、文件摘要、检测器元数据和绑定摘要。缺失、内容改变、运行时错配或部署根目录被替换均返回 `DETECTOR_NOT_RELEASED`，且发生在候选媒体读取前。已发布预览的重复读取仍走现有业务鉴权；已批准作业、当前权限、版本/generation、逐结果发布与预览幂等栅栏未改。业务调用只传 operation，不能提交制品根目录、路径或摘要。
+- 定向命令 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_rule_pipeline tests.test_released_detectors tests.test_detector_artifacts -q`：20 项通过、退出码 0。覆盖实现+模型成功、缺失、篡改、绑定错配、目录替换、符号链接，以及结果已落账但预览未发布时制品改变仍阻断且不重读媒体。
+- 完整命令 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：370 项通过、退出码 0（364 基线 + 6 新增）。`python3 tools/collab_gate.py check --role integration --base 3ca43f8754ecf718c978706c652f12466c5d4ca1 --task docs/dev/tasks/detector-artifact-binding.json`：SCOPE PASS、370 项完整回归通过、LOCAL GATE PASS、退出码 0。提交前 `master` 新增仅调整测试分层约束的 `979c28738c0c6d01ce79b50fe244bd36391fafe9`，任务提交线性同步该提交后，以它为最新主干基线重跑同一门禁：SCOPE PASS、370 项通过、LOCAL GATE PASS、退出码 0。输出中的 LOCAL GATE FAIL 来自既有门禁负例夹具，不是本次门禁失败。
+- 边界：全部为临时目录内的合成实现字节、合成模型字节和合成检测器；没有登记或调用真实模型，没有运行真实 Data-Juicer，没有访问内网、安装依赖、推送或更改用户运行数据。SHA-256 一致仅证明本地发布文件与受信清单一致，不证明模型质量、许可证、资源策略、在线性能或规格书 7.8/15.6/17.4 的完整发布验收。
+
 ## 已发布检测能力执行前门禁（2026-10-22）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/released-detector-gate.json`，发布基线 `0da4e22de1f5300dcd18df6b0f55980e94d46c26`；状态 READY_FOR_REVIEW。

@@ -24,7 +24,7 @@ class ReleasedDetectorTests(unittest.TestCase):
 
     def test_changed_catalog_digest_rejected_before_media_read(self):
         changed = ReleasedDetectorRegistry(self.f.capabilities[:1], self.f.bindings,
-                                           {self.f.detector.backend_ref: self.f.detector})
+            {self.f.detector.backend_ref: self.f.detector}, self.f.artifact_manifest)
         self.assert_unreleased(changed, self.f.approval.job.recipe)
         self.f.registry = changed
         self.f.assert_code("DETECTOR_NOT_RELEASED", self.f.run_pipeline)
@@ -35,7 +35,7 @@ class ReleasedDetectorTests(unittest.TestCase):
         self.f.repo.publish_result(self.f.actor, self.f.task_id,
                                    self.f.operation_id, self.f.make_result())
         self.f.registry = ReleasedDetectorRegistry(self.f.capabilities[:1], self.f.bindings,
-            {self.f.detector.backend_ref: self.f.detector})
+            {self.f.detector.backend_ref: self.f.detector}, self.f.artifact_manifest)
         self.f.assert_code("DETECTOR_NOT_RELEASED", self.f.run_pipeline)
         self.assertEqual(self.f.f.state()["result_sets"], {})
 
@@ -44,7 +44,7 @@ class ReleasedDetectorTests(unittest.TestCase):
             capabilities = (replace(self.f.capabilities[0], status=status),
                             self.f.capabilities[1])
             registry = ReleasedDetectorRegistry(capabilities, self.f.bindings,
-                {self.f.detector.backend_ref: self.f.detector})
+                {self.f.detector.backend_ref: self.f.detector}, self.f.artifact_manifest)
             recipe = replace(self.f.approval.job.recipe,
                              registry_digest=registry.registry_digest)
             self.assert_unreleased(registry, recipe)
@@ -56,7 +56,7 @@ class ReleasedDetectorTests(unittest.TestCase):
         changed_caps = (replace(self.f.capabilities[0], operators=("in",)),
                         self.f.capabilities[1])
         registry = ReleasedDetectorRegistry(changed_caps, self.f.bindings,
-            {self.f.detector.backend_ref: self.f.detector})
+            {self.f.detector.backend_ref: self.f.detector}, self.f.artifact_manifest)
         self.assert_unreleased(registry, replace(recipe, registry_digest=registry.registry_digest))
 
     def test_wrong_backend_binding_or_runtime_detector_fails(self):
