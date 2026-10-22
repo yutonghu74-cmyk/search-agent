@@ -122,6 +122,78 @@ class CleaningRecipe:
                                   "value": r.value, "hardness": r.hardness} for r in self.rules]})
 
 
+def candidate_manifest_digest(candidates):
+    return digest({"candidates": [{"candidate_id": c.candidate_id,
+        "asset_version": c.asset_version, "content_digest": c.content_digest}
+        for c in candidates]})
+
+
+@dataclass(frozen=True, slots=True)
+class CleaningApprovalProposal:
+    tenant_id: str
+    owner_user_id: str
+    project_id: str
+    task_id: str
+    revision: int
+    generation: int
+    expected_task_version: int
+    confirmed_request_digest: str
+    manifest_ref: str
+    recipe: CleaningRecipe
+    candidates: tuple[CleaningCandidateRef, ...]
+
+    def __post_init__(self):
+        if (not all(_name(value) for value in (self.tenant_id, self.owner_user_id,
+                self.project_id, self.task_id, self.manifest_ref))
+                or any(type(value) is not int or value < 1 for value in
+                       (self.revision, self.generation, self.expected_task_version))
+                or not _hash(self.confirmed_request_digest)
+                or type(self.recipe) is not CleaningRecipe
+                or not isinstance(self.candidates, tuple)
+                or not 1 <= len(self.candidates) <= 100
+                or not all(type(candidate) is CleaningCandidateRef for candidate in self.candidates)
+                or len({candidate.candidate_id for candidate in self.candidates}) != len(self.candidates)):
+            raise ValueError("invalid cleaning approval proposal")
+
+    @property
+    def input_manifest_digest(self):
+        return candidate_manifest_digest(self.candidates)
+
+    @property
+    def proposal_digest(self):
+        return digest({"schema_version": "cleaning-approval-proposal@1",
+                       "tenant_id": self.tenant_id, "owner_user_id": self.owner_user_id,
+                       "project_id": self.project_id, "task_id": self.task_id,
+                       "revision": self.revision, "generation": self.generation,
+                       "expected_task_version": self.expected_task_version,
+                       "confirmed_request_digest": self.confirmed_request_digest,
+                       "manifest_ref": self.manifest_ref,
+                       "input_manifest_digest": self.input_manifest_digest,
+                       "recipe_digest": self.recipe.recipe_digest})
+
+
+@dataclass(frozen=True, slots=True)
+class CleaningApproval:
+    proposal: CleaningApprovalProposal
+    operation_id: str
+    task_version: int
+
+    def __post_init__(self):
+        if (type(self.proposal) is not CleaningApprovalProposal
+                or not _name(self.operation_id)
+                or type(self.task_version) is not int
+                or self.task_version != self.proposal.expected_task_version + 1):
+            raise ValueError("invalid approved cleaning operation")
+
+    @property
+    def job(self):
+        p = self.proposal
+        return ApprovedCleaningJob(CleaningBinding(
+            p.tenant_id, p.owner_user_id, p.project_id, p.task_id,
+            p.revision, p.generation, self.task_version, self.operation_id,
+            p.input_manifest_digest, p.recipe.recipe_digest), p.recipe, p.candidates)
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovedCleaningJob:
     binding: CleaningBinding
@@ -135,9 +207,7 @@ class ApprovedCleaningJob:
             raise ValueError("invalid approved job")
         if len({candidate.candidate_id for candidate in self.candidates}) != len(self.candidates):
             raise ValueError("duplicate candidate")
-        manifest = digest({"candidates": [{"candidate_id": c.candidate_id,
-            "asset_version": c.asset_version, "content_digest": c.content_digest}
-            for c in self.candidates]})
+        manifest = candidate_manifest_digest(self.candidates)
         if self.binding.input_manifest_digest != manifest or self.binding.recipe_digest != self.recipe.recipe_digest:
             raise ValueError("approved binding does not match immutable inputs")
 

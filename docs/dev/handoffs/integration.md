@@ -221,3 +221,11 @@
 - 调用示例：`require_confirmed_rules(current_task, recipe)` 返回 `None` 表示规则结构匹配，不表示授权执行。兼容旧固定宽度链路，未改 Task/QuerySpec/SQLite 结构。影响后续 core 批准账本：它仍须绑定解释审阅来源、任务版本/generation、候选清单与配方摘要，并原子检查批准和发布栅栏。
 - 2026-10-22（Asia/Shanghai），`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_recipe_bridge.py -q`：9 项通过（本轮新增 4 项）；`python3 tools/collab_gate.py check --role integration --base 6550e7954f008b7d125b09c330e10b3f8c7a46ef --task docs/dev/tasks/confirmed-recipe-rules.json`：SCOPE PASS、317 项完整回归通过（313+4），退出码 0。门禁输出内 LOCAL GATE FAIL 仅来自已有负例夹具，最终 LOCAL GATE PASS。
 - NOT_RUN：正式批准持久化、作业装配/回传、真实 DJ 多规则、内网。校验器信任上游任务读取，不自行鉴权、创建作业或改变任务状态；不把规则等价误报成用户已批准本次执行。
+
+## 多规则清洗批准契约（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；基线 `38f1ce37496689d66f6fe68c4a1b5893bd4b6c77`，任务卡 `docs/dev/tasks/multi-rule-approval-contract.json`；状态 READY_FOR_REVIEW。
+- 修改 `src/dsh_retrieval/multi_rule_contracts.py`、`tests/test_multi_rule_contracts.py`、`contracts/multi-rule-cleaning.md`、本交接。新增 `CleaningApprovalProposal`/`CleaningApproval`，冻结确认需求摘要、清单引用及内容摘要、配方摘要、任务版本与 operation；批准后版本严格 +1；`approval.job` 生成既有执行契约。无共享旧模型改动，不改变 SQLite 结构。
+- 契约测试验证换清单/需求/配方摘要不同，重复素材、路径型引用、错误批准版本拒绝。数据类可在内存构造，不是授权或审批凭据；只允许 core 在受信事务中持久确认后返回作业。
+- 2026-10-22（Asia/Shanghai），`python3 tools/collab_gate.py check --role integration --base 38f1ce37496689d66f6fe68c4a1b5893bd4b6c77 --task docs/dev/tasks/multi-rule-approval-contract.json`：退出码 0，SCOPE PASS、319 项回归通过（317+2），LOCAL GATE PASS。负例夹具中的 LOCAL GATE FAIL 不代表本次门禁失败。
+- 待执行：core 独立 worktree 以 A 发布基线实现本地 SQLite 同事务确认和幂等记录，检查当前任务、确认规则、授权清单；撤权/旧版本不得批准。执行结果发布和真实 DJ 多规则另行验收。

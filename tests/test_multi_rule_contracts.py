@@ -2,7 +2,8 @@ from dataclasses import replace
 import unittest
 
 from dsh_retrieval.multi_rule_contracts import (
-    ApprovedCleaningJob, CleaningBinding, CleaningCandidateRef, CleaningRecipe,
+    ApprovedCleaningJob, CleaningApproval, CleaningApprovalProposal, CleaningBinding,
+    CleaningCandidateRef, CleaningRecipe,
     CleaningRule, DetectionResult, DetectionStep, bytes_digest,
 )
 from dsh_retrieval.query_spec import digest
@@ -55,6 +56,32 @@ class MultiRuleContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(result, facts={"text.present@1": float("inf")})
         self.assertEqual(DetectionResult({}, None, "fixture_validator@1", "unknown").status, "unknown")
+
+    def test_approval_proposal_binds_request_manifest_and_recipe(self):
+        proposal = CleaningApprovalProposal("tenant", "owner", "project", "task", 1, 2, 3,
+                                            digest({"confirmed": "query"}), "manifest_1",
+                                            self.recipe, self.candidates)
+        approval = CleaningApproval(proposal, "operation_1", 4)
+        self.assertEqual(approval.job.binding.task_version, 4)
+        self.assertEqual(approval.job.binding.input_manifest_digest, proposal.input_manifest_digest)
+        self.assertEqual(approval.job.binding.recipe_digest, self.recipe.recipe_digest)
+        self.assertNotEqual(replace(proposal, manifest_ref="manifest_2").proposal_digest,
+                            proposal.proposal_digest)
+        self.assertNotEqual(replace(proposal, confirmed_request_digest=digest({"other": True})).proposal_digest,
+                            proposal.proposal_digest)
+        self.assertNotEqual(replace(proposal, recipe=replace(self.recipe,
+                            rules=self.recipe.rules[:1])).proposal_digest, proposal.proposal_digest)
+
+    def test_approval_rejects_duplicate_candidate_and_wrong_version(self):
+        proposal = CleaningApprovalProposal("tenant", "owner", "project", "task", 1, 2, 3,
+                                            digest({"confirmed": "query"}), "manifest_1",
+                                            self.recipe, self.candidates)
+        with self.assertRaises(ValueError):
+            replace(proposal, candidates=(self.candidates[0], self.candidates[0]))
+        with self.assertRaises(ValueError):
+            replace(proposal, manifest_ref="../../media")
+        with self.assertRaises(ValueError):
+            CleaningApproval(proposal, "operation_1", 3)
 
 
 if __name__ == "__main__":
