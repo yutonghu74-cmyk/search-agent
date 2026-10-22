@@ -4,7 +4,10 @@ This is a structural bridge, not a business approval. Only a trusted service
 may later attach the recipe to an explicitly approved task and manifest.
 """
 
+import json
+
 from .errors import ServiceError
+from .models import Task, TaskLifecycle
 from .multi_rule_contracts import CleaningRecipe, CleaningRule, DetectionStep
 from .query_spec import digest
 
@@ -61,3 +64,44 @@ def compile_reviewed_recipe(compiler, actor, draft_id, expected_version,
     # Preferences are deliberately not hard filters and cannot be copied into
     # the recipe. Their original review remains available by digest.
     return recipe
+
+
+def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
+    """Check rule equivalence against the task's immutable confirmed proposal.
+
+    The caller must obtain ``task`` from an authorized, current repository read.
+    This pure check neither approves a cleaning operation nor fences its commit.
+    """
+    def mismatch():
+        raise ServiceError("RECIPE_RULE_MISMATCH", "Cleaning rules differ from confirmed task", 409)
+
+    if (type(task) is not Task or type(recipe) is not CleaningRecipe
+            or task.lifecycle != TaskLifecycle.ACTIVE
+            or type(task.confirmed_revision) is not int or task.confirmed_revision < 1
+            or not isinstance(task.confirmed_proposal_json, str)):
+        mismatch()
+    try:
+        proposal = json.loads(task.confirmed_proposal_json)
+        spec = proposal["query_spec"]
+        if (type(proposal) is not dict or type(spec) is not dict
+                or spec["schema_version"] != "query-spec@2"
+                or spec["media_type"] != task.media_type
+                or spec["media_type"] != recipe.media_type
+                or spec["raw_request"] != task.raw_request
+                or spec["target_count"] != task.target_count
+                or spec["unknown_policy"] != "hold_for_review"
+                or task.request_digest != digest({"project_id": task.project_id, "proposal": proposal})
+                or type(spec["rules"]) is not list):
+            mismatch()
+        hard = [row for row in spec["rules"] if row["hardness"] == "hard"]
+        if len(hard) != len(recipe.rules):
+            mismatch()
+        for confirmed, compiled in zip(hard, recipe.rules):
+            if (type(confirmed) is not dict
+                    or (confirmed["rule_id"], confirmed["predicate_ref"], confirmed["operator"])
+                    != (compiled.rule_id, compiled.predicate_ref, compiled.operator)
+                    or type(confirmed["value"]) is not type(compiled.value)
+                    or confirmed["value"] != compiled.value):
+                mismatch()
+    except (TypeError, ValueError, KeyError, AttributeError, RecursionError):
+        mismatch()
