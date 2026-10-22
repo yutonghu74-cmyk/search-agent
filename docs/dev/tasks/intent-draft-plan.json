@@ -1,0 +1,15 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "07eedc4efc4cbfaf332b3140e8154098a9845546",
+  "files": [
+    "src/dsh_retrieval/intent_draft.py",
+    "src/dsh_retrieval/intent_compiler.py",
+    "tests/test_intent_draft.py",
+    "tests/test_intent_compiler.py",
+    "contracts/intent-review.md",
+    "docs/dev/intent-draft-plan-task.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "本地 SQLite 解释草稿可保存、按预期版本修订及重启读取；权限与幂等失败关闭；解释与澄清经后端复核。多规则仅在用户确认且所有硬条件对应已验证检测能力时编译预览；未支持、主观或软偏好不得被静默执行。无正式任务/真实 DJ 派发，回归与角色门禁通过。"
+}
