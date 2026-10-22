@@ -187,3 +187,13 @@
 - 本地回归：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，264 项通过、退出码 0（249 基线 + 15 适配测试）。测试包括鉴权错误脱敏、不重试、超时/断连、恶意字段/伪造片段、大小上限、原文定位及私有文件权限。
 - 角色门禁：`python3 tools/collab_gate.py check --role core --base 22c62143dd20d49f0426f1fccd2232fd13de6699` 退出码 1：codex/integration 非 core 分支；现有工具没有 A 角色。未修改门禁，未宣称通过。本轮保留工作区修改待总控门禁处理，不自动合入主分支。
 - 下一步：解决 A 交付门禁；接入持久澄清/修订，降低非语义片段澄清噪声并建立多样需求评测，然后对接确认和规则编译。当前为显式 CLI/适配器入口，不是网页端完整接入。
+
+## 解释草稿与多规则预编译（2026-10-22 16:23，Asia/Shanghai）
+
+- A / codex/integration / var/worktrees/integration；可信基线 92c1d0387477a990daa8bef76a53a91f04e09da0，任务卡 docs/dev/tasks/intent-draft-plan.json，范围见 docs/dev/intent-draft-plan-task.md。模型适配提交 07eedc4 已通过 integration 门禁，284 项回归通过，并快进合入主分支；此前门禁失败是历史记录。
+- 新增独立的解释草稿 SQLite 存储与多规则编译预览、纯事实逐规则判定；修改文件 src/dsh_retrieval/intent_draft.py、src/dsh_retrieval/intent_compiler.py、tests/test_intent_draft.py、tests/test_intent_compiler.py、contracts/intent-review.md、本任务卡及交接。
+- 草稿持久化原文、候选解释、版本及创建人/项目；请求键幂等，旧版本冲突，读取时复查当前项目权限与能力。数据库权限限所有者，重开新实例仍可读取。独立草稿不是正式业务任务、批次或 run。
+- 编译预览需用户明确动作、版本和当前审阅摘要；未支持或待澄清硬条件拒绝。测试夹具的两条硬条件复用同一检测步骤，横图软偏好保留但不作为硬过滤；缺事实为 unknown、失败为 fail，均不能视为 pass。默认能力目录没有真实检测器，未开放自动执行。
+- 首轮回归：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，295 项通过、退出码 0（284 基线 + 11 新增）。随后补充篡改预览拒绝用例；最终结果见下方门禁记录。覆盖重启恢复、幂等冲突、旧版本、越权、能力目录变化、绑定不匹配、共用步骤、软偏好和三态结果。
+- NOT_RUN：真实 DJ 多规则执行、真实模型理解质量评测、内网 ClickHouse/Milvus、生产账本、正式确认/清洗任务装配、业务去重计数。下一步由 cleaning 角色在新契约上实现受信算子与事实协议，再做合成素材端到端验收；不能将本预览直接当作正式 CleaningRecipe。
+- 角色门禁：`python3 tools/collab_gate.py check --role integration --base 92c1d0387477a990daa8bef76a53a91f04e09da0 --task docs/dev/tasks/intent-draft-plan.json`，范围 PASS、296 项测试 PASS、整体退出码 0（284 基线 + 12 新增）。测试输出中的 LOCAL GATE FAIL 是负向夹具预期，不是本命令失败。证据日期 2026-10-22 16:25（Asia/Shanghai）。

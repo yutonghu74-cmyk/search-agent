@@ -52,3 +52,11 @@ PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 tools/intent_review.py --reques
 2026-10-22：现有 qwen3.7-plus 的一条合成需求真实调用成功，数量、文字/水印否定、横图软偏好和完整性澄清可见；此前一次连接失败，不把本次成功视为稳定性验证。默认能力目录仍为空，不能执行。模型未覆盖的功能词/标点仍保守列入待澄清，用户体验需后续改进，不静默忽略。
 
 后续：业务理解评测、持久草稿版本/澄清修订、确认后转换到执行规格、完整能力参数/证据 schema 和规则编译器。未实现前不能称“开放需求自动执行”。
+
+## 解释草稿与多规则编译预览切片
+
+`IntentDraftStore` 使用单独的私有 SQLite 文件持久化原文和解释候选。调用方须注入项目访问检查器；创建、读取和修订均要求租户/创建人及当前项目权限。创建与修订使用请求键幂等，修订还要求 expected_version；重放返回原操作版本和当前版本，内容变化报冲突。每次读取依据当前受信能力目录重新审阅，因此能力撤回可立即阻断后续预览。数据库文件仅允许所有者访问；本地单库试验不等于内网业务账本验收。这个草稿没有 task/batch/revision/run，也不能调用既有正式任务的确认接口。
+
+`IntentCompiler.preview(actor, draft_id, expected_version, expected_review_digest, action="confirm_preview")` 只接受当前版本及用户明确审阅过的摘要。硬条件全部必须由当前能力目录判为 automatable，并有匹配的受信 DetectorBinding；现在只接受 `eq` 运算。相同后端检测步骤复用，独立硬规则逐条保留；软偏好单列，不变成硬过滤。缺失/矛盾/未支持/人工/主观澄清都阻断。默认能力目录和检测器绑定为空；测试中的 fixture 引用不代表产品已发布这些检测器。输出是稳定摘要的编译预览，`execution_allowed=false`，不构造 CleaningProposal、不发作业。
+
+`evaluate_facts` 是给可信检测事实使用的纯函数，规则 verdict 为 pass/fail/unknown，整体为任一 fail 则 fail、否则任一 unknown 则 unknown、全部 pass 才 pass。此结果不等于有效去重素材数；函数不采集媒体、验证外部事实来源、执行 DJ 或写业务账本。真正多规则 Worker 接入仍需发布算子清单、事实协议、资源/失败语义、任务版本绑定和真实合成数据验收。
