@@ -1,0 +1,17 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "c6410048117578f938a45228c7deb0a57847763c",
+  "files": [
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "src/dsh_retrieval/ports.py",
+    "tests/test_api.py",
+    "tests/test_chat_ui.py",
+    "contracts/chat-feedback.md",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "新增 GET /v1/retrieval/projects/{project_id}/tasks，只返回服务层已重验权限的当前创建人任务列表。Chat 页面增加历史需求侧栏，初始加载当前 demo 项目的正式任务；每项显示需求摘要、revision、状态和待确认反馈标记，点击后读取 task 与 revisions，展示从方案确认开始的正式版本历史，并可继续反馈。刷新恢复不再依赖唯一 localStorage 任务；历史列表为空、任务撤权、请求失败有明确状态。页面明确说明不展示确认前逐句草稿聊天，避免把正式版本历史冒充完整 conversation_message 历史。定向测试与 integration 门禁通过；不访问内网、不运行真实检索/DJ。"
+}
