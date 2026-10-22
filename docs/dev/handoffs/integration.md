@@ -81,3 +81,11 @@
 - A / codex/integration / var/worktrees/integration；基线 ecc58429096b94136627eae6b4fcab2e846926e5；任务卡 docs/dev/retrieval-read-task.md。响应 core 已登记的读取接口缺口，新增 RetrievalOperation、get_operation、list_pending，不改变已有写入接口或存储格式。
 - 本提交发布契约基线，core 同步后实施。只读当前批准计划，区分 reserved 与已提交空页；重验身份/当前权限/版本；不派发、不加 lease，不作为媒体读取权限。
 - 完整回归 146 项通过（原 144 + 2 返回模型用例），命令 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，退出码 0。A 按要求运行 core 角色检查，因 codex/integration 非 core 分支退出码 1；没有 A 专属检查器，不改检查器绕过。core 实现需独立通过角色门禁。
+
+## 授权读取本地集成（2026-10-22 10:50，Asia/Shanghai）
+
+- 契约提交 8131b443b3222285d26a313f65574d4e52b3e913；core 在此基线上交付 0ad0609，角色检查通过。A 审查读取鉴权顺序、版本拒绝和无写入路径后快进合入主分支。
+- 主分支合入契约后 146 项测试通过；合入实现后执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，退出码 0，158 项通过（144 原基线 + 2 模型 + 12 读取）。独立测试发现检查确认 ID 唯一，不使用首次含重复发现的 179 次作为数量证据。
+- ACCEPTED（本地授权读取切片）：无旧幂等键也可按任务列举待执行预约；可读取当前计划的已提交页，空页明确为 committed；读不改任务/事件、不自动执行；跨任务、旧 scope/plan、暂停/取消/撤权和故障失败关闭。
+- 证据：tests/core/test_retrieval_reads.py、tests/test_retrieval_contracts.py、docs/dev/handoffs/core.md。数据库 schema 不变，未修改用户运行库、未访问内网或真实 DJ。
+- 下一步候选发布/媒体物化仍缺契约与装配。作业读取不是历史结果浏览/媒体下载授权，也不是自动恢复调度或租约。当前没有承诺多个恢复进程不会重复发起外部请求。

@@ -44,7 +44,7 @@ snapshot exhausted 也仅指批准查询及连接器可访问集合，不证明�
 - INVALID_SEARCH_PAGE：连接器输出不可信；不是业务内容 fail。
 - 原接口未改签名；SQLiteRetrievalPlanRepository 为显式装配的本地实现，路径 src/dsh_retrieval/adapters/task_storage/retrieval.py，构造时必须注入项目/库权限服务。HTTP 和 CandidateIntake 不会自动接入。
 - 原子确认/回传/恢复的本地证据见 tests/core/test_retrieval_storage.py 与 docs/dev/handoffs/core.md。任务表和检索表共库同事务；本地事件尚无发送器，不代表生产 outbox 完成。
-- 下一切片：实现下述授权读取接口，再冻结候选清单发布/媒体物化接口并装配确认流程。真实 ClickHouse/Milvus 和清洗联测另验收。
+- 下述授权读取接口已由本地 SQLite 适配器实现并验证；下一切片冻结候选清单发布/媒体物化接口并装配确认流程。真实 ClickHouse/Milvus 和清洗联测另验收。
 
 ## 授权恢复读取（本次新增契约）
 
