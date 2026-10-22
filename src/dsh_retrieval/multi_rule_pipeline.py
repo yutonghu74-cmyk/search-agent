@@ -6,9 +6,10 @@ and publication. This module never accepts a caller-built job or media path.
 
 from .adapters.cleaning import ApprovedManifestAccess, GenericCleaningExecutor
 from .errors import ServiceError
+from .released_detectors import ReleasedDetectorRegistry
 
 
-def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, detectors):
+def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, registry):
     """Return (current preview view, replayed) for an approved operation.
 
     The return is a preview, not a delivery. Only a trusted service/worker
@@ -16,6 +17,8 @@ def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, dete
     released detector registry.
     """
 
+    if type(registry) is not ReleasedDetectorRegistry:
+        raise ValueError("trusted released detector registry required")
     try:
         approval = repo.get_current(actor, task_id, operation_id)
     except ServiceError as exc:
@@ -28,6 +31,7 @@ def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, dete
             raise exc
         return view, True
 
+    detectors = registry.require_recipe(approval.job.recipe)
     try:
         result = repo.get_result(actor, task_id, operation_id)
     except ServiceError as exc:

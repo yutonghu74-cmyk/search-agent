@@ -1,5 +1,12 @@
 # A 总控集成交接
 
+## 已发布检测能力执行前门禁（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/released-detector-gate.json`，发布基线 `0da4e22de1f5300dcd18df6b0f55980e94d46c26`；状态 READY_FOR_REVIEW。
+- 新增 `src/dsh_retrieval/released_detectors.py`、`tests/test_released_detectors.py`，调整 `src/dsh_retrieval/multi_rule_pipeline.py`、`tests/test_multi_rule_pipeline.py`、`contracts/multi-rule-cleaning.md` 与本交接。受信配置的能力目录摘要须与不可变配方相同；硬规则逐条要求已验证能力、媒体/谓词/操作符/值类型和检测步骤/实际后端一致。无匹配、目录改变或未发布能力在读取媒体前失败关闭；结果已落账但预览未发布时仍重验当前目录。
+- 定向 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_rule_pipeline tests.test_released_detectors -q`：14 项通过；完整 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：364 项通过。`python3 tools/collab_gate.py check --role integration --base 0da4e22de1f5300dcd18df6b0f55980e94d46c26 --task docs/dev/tasks/released-detector-gate.json` 退出码 0，SCOPE PASS / LOCAL GATE PASS，364 项通过；输出中的 LOCAL GATE FAIL 是门禁负例夹具。验证目录变更、人工/不可用能力、类型/操作符/后端漂移、无规则的额外步骤及旧串联回归。均为本地合成检测器。
+- 边界：目录由服务端受信部署配置构造，不从请求体接受；本门禁尚不能证明实际实现文件/权重摘要、模型评测、资源策略或运行质量。未登记真实 OCR/水印模型，未运行真实 DJ/内网；不把此切片称为真实多规则清洗。
+
 ## 已批准多规则作业的本地串联（2026-10-22）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/multi-rule-pipeline.json`，发布基线 `8bb0f576d0676ed26d35e6e403ef25e5fbb59e81`；状态 READY_FOR_REVIEW。
