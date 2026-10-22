@@ -17,7 +17,7 @@ from ...integration_models import AccessContext
 from ...models import RunStatus
 from ...query_spec import digest
 from ...retrieval_contracts import (
-    RetrievalScope, validate_plan, validate_scope, validate_confirmation,
+    RetrievalOperation, RetrievalScope, validate_plan, validate_scope, validate_confirmation,
     validate_execution, validate_page,
 )
 from ...service import require_key
@@ -186,6 +186,38 @@ class SQLiteRetrievalPlanRepository:
                 task = self._authorize(memory, actor, task_id, plan)
                 validate_execution(actor, task, plan, plan, plan.request)
             return plan
+        return self._transaction(False, read)
+
+    def get_operation(self, actor, task_id, operation_id):
+        def read(memory, state):
+            self._authorize(memory, actor, task_id)
+            record = state["operations"].get(operation_id)
+            if record is None or record[0].scope.task_id != task_id:
+                raise ServiceError("NOT_FOUND", "retrieval operation not found", 404)
+            plan, request, page = record
+            task = self._authorize(memory, actor, task_id, plan)
+            validate_execution(actor, task, plan, state["current"].get(task_id), request)
+            self._authorize(memory, actor, task_id, plan)
+            return RetrievalOperation(operation_id, plan, request, page)
+        return self._transaction(False, read)
+
+    def list_pending(self, actor, task_id):
+        def read(memory, state):
+            self._authorize(memory, actor, task_id)
+            current = state["current"].get(task_id)
+            if current is None:
+                return ()
+            task = self._authorize(memory, actor, task_id, current)
+            validate_execution(actor, task, current, current, current.request)
+            pending = []
+            for operation_id, (plan, request, page) in state["operations"].items():
+                if plan == current and page is None:
+                    validate_execution(actor, task, plan, current, request)
+                    pending.append(RetrievalOperation(operation_id, plan, request, None))
+                    if len(pending) > 100:
+                        raise ServiceError("INPUT_LIMIT", "pending operation read exceeds 100", 422)
+            self._authorize(memory, actor, task_id, current)
+            return tuple(sorted(pending, key=lambda operation: operation.operation_id))
         return self._transaction(False, read)
 
     def reserve_page(self, actor, plan, request, key):

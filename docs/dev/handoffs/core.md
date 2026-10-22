@@ -60,3 +60,18 @@
 - NOT_RUN：真实 DJ/ClickHouse/Milvus/W3、断电/网络文件系统故障、生产性能、跨系统授权原子性、事件 relay、业务 UI/HTTP/清洗装配。本地事件只是待发记录，没有发送或消费保证。
 - 约束：每个 task 的 plan_id 不可变；新提案使用新 ID 和账本下一 epoch（不符返回期望 epoch）。get_current 遇陈旧 task scope 会拒绝，不返回可执行旧计划。已有清洗尚未终结时不允许新检索计划确认；支持流水线并发需要另行冻结兼容承接契约。
 - 后续接口缺口：现有协议可通过同 key 恢复预约，但缺少按任务列举待执行作业/读取已提交页的公共接口。下一步由 A 冻结恢复读取与候选清单发布契约，再装配自动恢复及清洗；本轮不私增公共接口，不宣称全业务闭环。
+
+## 2026-10-22 授权读取实施任务
+
+- 角色 core / codex/task-core / var/worktrees/core；新基线 8131b443b3222285d26a313f65574d4e52b3e913，已快进同步；任务卡 docs/dev/retrieval-read-task.md。
+- 范围仅 task_storage/retrieval.py、tests/core/、本记录。实现已冻结 get_operation/list_pending；保持原数据库和写入语义，无 schema 变更。
+- 验收：跨身份/任务、旧 scope/epoch、暂停取消及撤权拒绝；新进程无需旧幂等键可发现预约；已提交空页不算待执行；读取不写任务/事件；故障不变空结果。
+- 状态开发中，完成后记录真实测试结果并本地提交/审查集成。不访问内网、不运行真实 DJ/DSH、不自动派发。
+
+### 授权读取交付
+
+- READY_FOR_REVIEW：已实现 get_operation/list_pending，返回不可变 RetrievalOperation；只读当前计划，库/项目授权末尾再次核验；未知/跨任务 operation 隐藏；旧版本、取消、撤权、故障拒绝。无需新表或迁移。
+- 2026-10-22 10:50（Asia/Shanghai），Python 3.13.3：`python3 tools/collab_gate.py check --role core --base 8131b443b3222285d26a313f65574d4e52b3e913` 退出码 0，SCOPE PASS / LOCAL GATE PASS，158 项通过（原 144 + A 模型 2 + 新读取 12）。git diff --check 通过。
+- 最初辅助 TestCase 的直接导入导致 21 项重复发现，已改用模块引用，未删除测试或改变发现规则。独立检查确认 158 个测试 ID 均唯一；早期 179 次执行数不作为验收数量。
+- 新测试覆盖新连接/新进程发现、读取待执行与已提交空/非空页、只读无写入、跨任务/租户/用户、旧 generation/plan、暂停/取消/FINALIZING、权限撤销/故障、末尾授权重查和存储损坏。
+- 数据库新增读取不自动执行任务，不持有 lease；多读者可见同一预约，不代表外部请求恰好一次。原始命中不能替代媒体授权。候选清单发布、媒体物化、HTTP/清洗装配、自动恢复执行器和事件 relay 均 NOT_RUN/未实现。
