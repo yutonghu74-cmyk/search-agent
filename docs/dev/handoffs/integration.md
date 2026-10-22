@@ -300,3 +300,12 @@
 - 定向验证：`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_rule_pipeline -q`，11 项通过；`git diff --check` 通过。因修改正式流水线与公共契约，按仓库规则执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，387 项通过；输出中的 LOCAL GATE FAIL 是既有负例夹具。
 - 交付门禁：`python3 tools/collab_gate.py check --role integration --base e3906f66b9b9f345d32df25f5189672775874d32 --task docs/dev/tasks/detector-release-runtime-fence.json` 退出码 0，SCOPE PASS、门禁内部 387 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。未额外重复完整回归。
 - NOT_RUN：真实 DJ、真实检测器/模型制品、生产配置发布/回滚、ClickHouse/Milvus/W3、内网数据；合成测试只证明身份栅栏和恢复顺序，不证明模型质量。
+
+## 开发进度与明细周期更新规范（2026-10-22）
+
+- 22:15 CST 开工；A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`。首张任务卡 `docs/dev/tasks/development-progress-reporting.json` 试图包含根 `AGENTS.md`，22:16 CST 门禁以“任务卡不能授权其他角色或 A 范围外文件”退出码 1；未修改检查器/责任表绕过，已撤销该文件修改。
+- 22:17 CST 恢复；修正版发布基线 `89ee3dc777fac183badd2bf9234d9e80a3298959`，任务卡 `docs/dev/tasks/development-progress-reporting-v2.json`，状态 IN_PROGRESS；范围仅保留 integration 允许的 `docs/dev/` 文件。
+- 范围：`AGENTS.md`、`parallel-plan.md`、`window-prompts.md`、`handoff-template.md`、新增 `progress.md` 与本交接。选择“总控单一快照 + 各角色独立明细”，避免多工作区并发修改同一进度文件。
+- 规则：活跃开发最长 30 分钟更新；开工、里程碑、阻塞/恢复、交付立即更新；短任务至少开工和交付。记录真实命令/结果和 NOT_RUN，无变化写原因，不把计划或模拟写成完成。
+- 22:16 CST 里程碑：`python3 -m json.tool docs/dev/tasks/development-progress-reporting.json`、引用路径存在性检查及 `git diff --check` 均通过；integration 角色门禁待运行。纯文档规范变更，按 AGENTS 文档豁免不单独运行代码测试或完整回归。
+- 22:17 CST 交付：`python3 tools/collab_gate.py check --role integration --base 89ee3dc777fac183badd2bf9234d9e80a3298959 --task docs/dev/tasks/development-progress-reporting-v2.json` 退出码 0，SCOPE PASS、内部 387 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。状态 READY_FOR_REVIEW；没有额外重复完整回归。

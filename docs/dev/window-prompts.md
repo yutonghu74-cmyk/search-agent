@@ -13,6 +13,7 @@
 未授权时不要创建其他任务、提交、推送、合并或安排自动后台执行。
 审查交付时先运行可信版本的角色检查，再审查代码与业务验收证据；逐个集成并回归。
 A 自身交付使用 integration 角色、codex/integration 独立 worktree 和已发布 JSON 任务卡；执行 check --role integration --base <可信发布SHA> --task docs/dev/tasks/<任务>.json。不允许编辑候选任务卡扩大范围，不允许进入 B/C/D 负责路径。门禁/任务卡第一次发布需独立人工审查，不能自认证。
+开工即更新 docs/dev/progress.md；活跃期间至少每 30 分钟及每个里程碑、阻塞/恢复、交付时更新，并汇总各角色 handoff 的真实状态。无变化写原因，不预填测试成功。
 ```
 
 ## B/C/D：开发窗口通用任务卡
@@ -31,6 +32,7 @@ A 自身交付使用 integration 角色、codex/integration 独立 worktree 和�
 在范围内持续实现→测试→修复；缺少外部依赖或需要扩权时记录阻塞，不伪造通过。
 交付前运行 python3 tools/collab_gate.py check --role <角色> --base <BASE_SHA>。
 按 docs/dev/handoff-template.md 写 docs/dev/handoffs/<角色>.md。
+开工、关键里程碑、阻塞/恢复和交付时追加开发明细；活跃开发最长 30 分钟不更新。不要修改总控 progress.md，由 A 汇总。
 停止条件：本轮验收满足且检查通过；或需要契约决策/外部资料/新授权。
 不要自动合并，不修改责任表或检查器以绕过失败，不把模拟联测标成真实通过。
 ```
