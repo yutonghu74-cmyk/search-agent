@@ -95,3 +95,10 @@
 - 最初辅助 TestCase 的直接导入导致 21 项重复发现，已改用模块引用，未删除测试或改变发现规则。独立检查确认 158 个测试 ID 均唯一；早期 179 次执行数不作为验收数量。
 - 新测试覆盖新连接/新进程发现、读取待执行与已提交空/非空页、只读无写入、跨任务/租户/用户、旧 generation/plan、暂停/取消/FINALIZING、权限撤销/故障、末尾授权重查和存储损坏。
 - 数据库新增读取不自动执行任务，不持有 lease；多读者可见同一预约，不代表外部请求恰好一次。原始命中不能替代媒体授权。候选清单发布、媒体物化、HTTP/清洗装配、自动恢复执行器和事件 relay 均 NOT_RUN/未实现。
+# 多规则清洗本地批准账本（2026-10-22）
+
+- 角色 core；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`；分支 `codex/task-core`；执行基线 `18f036017efbbe1215c263bb537d93d8361b2976`，任务卡 `docs/dev/multi-rule-approval-task.md`。本节状态 READY_FOR_REVIEW，待 A 验收。
+- 改动：`src/dsh_retrieval/adapters/task_storage/multi_rule.py` 新建本地 SQLite 批准账本；`sqlite.py` 允许新表并注册不可变契约类型；`tests/core/test_multi_rule_approval.py` 覆盖正式确认规则/已授权候选清单绑定、显式确认、任务版本与事件同事务、并发幂等、跨连接恢复、撤权、旧版本、序列化失败回滚；本交接记录真实结果。
+- 接口：`prepare(actor, task_id, manifest_ref, recipe)` 仅保存待确认提案，不推进任务；`confirm(actor, task_id, proposal_digest, key, expected_task_version, action="confirm")` 返回 `CleaningApproval` 和 replay 标志；`get_current` 在任务、清单、权限和版本仍当前时读批准作业。新接口供受信业务服务调用，不是公开 HTTP 或模型工具。调用方必须由受信编译器构造配方、向发起人展示完整条件与摘要；账本再次比对正式 QuerySpec 硬规则，但尚未持久验证解释草稿本身的来源关系。
+- 语义边界：只记录待执行作业，不运行检测器或 DJ、不发布逐素材结果、不计算 accepted_count。`approval.job` 可供后续受控 Worker 使用；发布仍须另建原子 fencing 和结果完整性检查。SQLite 与本地授权夹具不是生产存储或公司内网验收；新表会使旧版二进制拒绝打开此账本，正式迁移另行处理。没有安装依赖、访问内网、推送或部署。
+- 2026-10-22（Asia/Shanghai）：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_multi_rule_approval.py -q` 退出码 0，6 项通过；`python3 tools/collab_gate.py check --role core --base 18f036017efbbe1215c263bb537d93d8361b2976` 退出码 0，SCOPE PASS / LOCAL GATE PASS，325 项完整回归通过（319+6）。首次定向命令以 `-s tests/core` 运行因导入路径不含 `tests` 报错，改为标准 `-s tests` 后通过；首次发现任务对象返回副本导致事务未推进，已修复并重跑。测试中的 LOCAL GATE FAIL 为负向夹具预期。
