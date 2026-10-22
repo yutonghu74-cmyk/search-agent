@@ -1,0 +1,12 @@
+{
+  "role": "core",
+  "branch": "codex/task-core",
+  "source_base": "145e9f0a61248146001e4dd687cf366fbae70719",
+  "files": [
+    "src/dsh_retrieval/adapters/task_storage/multi_rule.py",
+    "src/dsh_retrieval/adapters/task_storage/sqlite.py",
+    "tests/core/test_multi_rule_approval.py",
+    "docs/dev/handoffs/core.md"
+  ],
+  "acceptance": "受信业务层准备新的多规则清洗批准时必须显式提供格式正确的 detector_release_digest，并将其保存进 CleaningApprovalProposal；摘要进入提案身份、确认幂等、批准作业绑定和重启恢复，换发布摘要必须形成不同提案且不能重放原确认。SQLite 白名单解码只对 CleaningApprovalProposal/CleaningBinding 缺少该单一新增字段的既有记录填入 None，未知、多余或其他缺失字段继续失败关闭；旧批准只可读取审计，不能被静默补成当前发布或作为新执行许可。本任务不选择当前发布、不加载配置、不运行检测器，后续 integration 入口负责把账本摘要与当前受信 registry.release_digest 对比。仅运行相关 core 定向测试和交付必需的 core 门禁，不额外重复完整回归；不运行真实 DJ、不访问内网。"
+}
