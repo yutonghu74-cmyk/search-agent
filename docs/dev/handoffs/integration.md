@@ -205,3 +205,11 @@
 - 3 项新增契约测试验证摘要绑定、重复/未映射/非法规则、无证据不得声称检测成功。未修改现有宽度 DJ 桥接，未新增用户可调用的执行入口。
 - 2026-10-22（Asia/Shanghai）执行 `python3 tools/collab_gate.py check --role integration --base 5e1c1c0 --task docs/dev/tasks/generic-cleaning-contract.json`：范围 PASS，299 项完整测试通过（296 基线 + 3 契约），退出码 0；测试中的 LOCAL GATE FAIL 是负向门禁夹具预期。
 - 下游 cleaning 角色将实现合成检测器通用执行器并在独立 worktree 跑角色门禁；具体检测器发布、真实 DJ 多规则、正式任务装配、公司内网仍 NOT_RUN。
+
+## 审阅预览到不可变配方的桥接（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；分派基线 `c2f61e6b1635b2949c0b5448bdfe8208f220f6d4`，任务卡 `docs/dev/tasks/multi-rule-recipe-bridge.json`；状态 READY_FOR_REVIEW。
+- 新增 `src/dsh_retrieval/recipe_bridge.py`、`tests/test_recipe_bridge.py`，更新 `contracts/multi-rule-cleaning.md` 与本交接。共享输入输出仍用 `CleaningRecipe`，未改检测器或旧固定宽度 DJ 链路。
+- 只从受信 `IntentCompiler.preview` 重新读取当前创建人、草稿版本、审阅摘要和能力绑定；严格校验预览摘要、字段、步骤、规则及逻辑后端引用，保留硬规则、排除软偏好。不是业务执行批准：不创建 `ApprovedCleaningJob`、不保存正式任务、不读素材或运行检测器。真实任务批准、结果持久化、发布时原子 fencing 仍待 core/总控后续切片。
+- 验收：2026-10-22（Asia/Shanghai），`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_recipe_bridge.py -q` 退出码 0，5 项通过；`python3 tools/collab_gate.py check --role integration --base c2f61e6b1635b2949c0b5448bdfe8208f220f6d4 --task docs/dev/tasks/multi-rule-recipe-bridge.json` 退出码 0，313 项完整测试通过（308+5）。门禁输出中 LOCAL GATE FAIL 属负例夹具；本次结果为 LOCAL GATE PASS。
+- NOT_RUN：正式多规则批准、真实 DJ 多规则、生产算子评测、ClickHouse/Milvus/W3、内网数据。合成测试只证明结构与拒绝边界，不证明模型理解或检测准确率。
