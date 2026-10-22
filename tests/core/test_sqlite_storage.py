@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from dsh_retrieval.adapters.task_storage.sqlite import SQLiteTaskRepository
+from dsh_retrieval.adapters.task_storage.sqlite import SQLiteTaskRepository, decode, encode
 from dsh_retrieval.adapters.cleaning_catalog import LocalCleaningCatalog
 from dsh_retrieval.cleaning_service import CleaningService
 from dsh_retrieval.errors import ServiceError
@@ -110,6 +110,19 @@ print(json.dumps({'task':r.get(a,sys.argv[2]).to_summary(),'op':r.cleaning_resul
         new = SQLiteTaskRepository(self.db)
         with self.assertRaises(ServiceError):
             new.get(Actor("tenant-a", "other"), tid)
+
+    def test_pre_feedback_snapshot_adds_empty_feedback_state(self):
+        tid = self.create()
+        with closing(sqlite3.connect(self.db)) as db, db:
+            payload = db.execute("SELECT payload FROM local_ledger WHERE id=1").fetchone()[0]
+            state = decode(json.loads(payload))
+            for key in ("_feedback_drafts", "_feedback_requests", "_revisions"):
+                state.pop(key)
+            db.execute("UPDATE local_ledger SET payload=? WHERE id=1",
+                       (json.dumps(encode(state), ensure_ascii=False, separators=(",", ":")),))
+        reopened = SQLiteTaskRepository(self.db)
+        self.assertEqual(reopened.get(self.actor, tid).task_id, tid)
+        self.assertEqual(tuple(item["revision"] for item in reopened.list_revisions(self.actor, tid)), (1,))
 
     def test_incomplete_cleaning_reservation_recovers_same_operation(self):
         tid, service, oid = self.cleaning()

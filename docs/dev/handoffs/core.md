@@ -129,3 +129,11 @@
 - 接口：`prepare(actor, task_id, manifest_ref, recipe)` 仅保存待确认提案，不推进任务；`confirm(actor, task_id, proposal_digest, key, expected_task_version, action="confirm")` 返回 `CleaningApproval` 和 replay 标志；`get_current` 在任务、清单、权限和版本仍当前时读批准作业。新接口供受信业务服务调用，不是公开 HTTP 或模型工具。调用方必须由受信编译器构造配方、向发起人展示完整条件与摘要；账本再次比对正式 QuerySpec 硬规则，但尚未持久验证解释草稿本身的来源关系。
 - 语义边界：只记录待执行作业，不运行检测器或 DJ、不发布逐素材结果、不计算 accepted_count。`approval.job` 可供后续受控 Worker 使用；发布仍须另建原子 fencing 和结果完整性检查。SQLite 与本地授权夹具不是生产存储或公司内网验收；新表会使旧版二进制拒绝打开此账本，正式迁移另行处理。没有安装依赖、访问内网、推送或部署。
 - 2026-10-22（Asia/Shanghai）：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_multi_rule_approval.py -q` 退出码 0，6 项通过；`python3 tools/collab_gate.py check --role core --base 18f036017efbbe1215c263bb537d93d8361b2976` 退出码 0，SCOPE PASS / LOCAL GATE PASS，325 项完整回归通过（319+6）。首次定向命令以 `-s tests/core` 运行因导入路径不含 `tests` 报错，改为标准 `-s tests` 后通过；首次发现任务对象返回副本导致事务未推进，已修复并重跑。测试中的 LOCAL GATE FAIL 为负向夹具预期。
+# Chat 反馈草稿与版本事务（2026-10-22）
+
+- 角色：core；worktree `var/worktrees/core`；分支 `codex/task-core`；基线 `cd3b79f8e86a5db71e83b0e0ad8d7bb2b5470937`；任务卡 `docs/dev/tasks/chat-feedback-core.json`；22:49 开工。
+- 范围：`service.py`、内存/SQLite 任务账本、core 定向测试与本交接。目标是反馈保存不改变正式运行，确认才原子发布新 revision 并提升 generation，拒绝不影响当前版本。
+- 边界：首版只追加反馈文本到完整确认方案，未做自然语言规则编译；HTTP/UI、真实检索/DJ/W3/内网均不在本切片。
+- 22:57 里程碑：内存与 SQLite 事务、服务校验、pending task 视图及版本历史已实现；定向 `tests.core.test_feedback tests.core.test_sqlite_storage tests.test_service` 共 22 项通过。
+- 22:59 交付：`python3 tools/collab_gate.py check --role core --base cd3b79f8e86a5db71e83b0e0ad8d7bb2b5470937` 为 SCOPE PASS、完整 400 项通过、LOCAL GATE PASS；输出中的 `LOCAL GATE FAIL` 是既有负向门禁夹具。
+- 未验证：HTTP/UI 尚未接入；真实检索、DJ、W3、模型语义编译和内网均 NOT_RUN。本地 SQLite 仍不是生产存储。

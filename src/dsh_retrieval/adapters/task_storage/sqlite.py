@@ -104,6 +104,8 @@ def restore(payload):
         raise ValueError("invalid snapshot length")
     state = decode(json.loads(payload))
     expected = set(vars(memory)) - {"_lock"}
+    for key in {"_feedback_drafts", "_feedback_requests", "_revisions"} - set(state if isinstance(state, dict) else ()):
+        state[key] = {}
     if not isinstance(state, dict) or set(state) != expected:
         raise ValueError("incompatible ledger state")
     if any(type(state[k]) is not type(getattr(memory, k)) for k in expected):
@@ -173,6 +175,11 @@ class SQLiteTaskRepository:
     def get_draft(self, *args, **kwargs): return self._call("get_draft", False, *args, **kwargs)
     def save_draft(self, *args, **kwargs): return self._call("save_draft", True, *args, **kwargs)
     def confirm_draft(self, *args, **kwargs): return self._call("confirm_draft", True, *args, **kwargs)
+    def save_feedback_draft(self, *args, **kwargs): return self._call("save_feedback_draft", True, *args, **kwargs)
+    def get_feedback_draft(self, *args, **kwargs): return self._call("get_feedback_draft", False, *args, **kwargs)
+    def get_pending_feedback(self, *args, **kwargs): return self._call("get_pending_feedback", False, *args, **kwargs)
+    def confirm_feedback_draft(self, *args, **kwargs): return self._call("confirm_feedback_draft", True, *args, **kwargs)
+    def list_revisions(self, *args, **kwargs): return self._call("list_revisions", False, *args, **kwargs)
     def put_cleaning_proposal(self, *args, **kwargs): return self._call("put_cleaning_proposal", True, *args, **kwargs)
     def get_cleaning_proposal(self, *args, **kwargs): return self._call("get_cleaning_proposal", False, *args, **kwargs)
     def get_cleaning_operation(self, *args, **kwargs): return self._call("get_cleaning_operation", False, *args, **kwargs)

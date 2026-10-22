@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from copy import deepcopy
 from typing import Any
 
 from .errors import ServiceError, invalid
@@ -21,6 +22,11 @@ def require_key(key: str) -> None:
 def require_version(value: Any) -> None:
     if type(value) is not int or value < 1:
         raise invalid("expected_draft_version must be a positive integer", "$.expected_draft_version")
+
+
+def require_positive(value: Any, field: str) -> None:
+    if type(value) is not int or value < 1:
+        raise invalid(f"{field} must be a positive integer", f"$.{field}")
 
 
 class TaskService:
@@ -73,4 +79,79 @@ class TaskService:
     def get_task(self, actor: Actor, task_id: str) -> dict[str, Any]:
         task = self.repository.get(actor, task_id)
         self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
-        return task.to_summary()
+        result = task.to_summary()
+        result["pending_draft"] = self.repository.get_pending_feedback(actor, task_id)
+        return result
+
+    def save_feedback(self, actor: Actor, task_id: str, key: str, body: dict[str, Any],
+                      draft_id: str | None = None) -> tuple[dict[str, Any], bool]:
+        require_key(key)
+        fields = {"text", "scope", "expected_revision", "expected_task_version"}
+        update_fields = fields | {"expected_draft_version"}
+        if not isinstance(body, dict) or set(body) != (update_fields if draft_id else fields):
+            raise invalid("feedback requires text, scope, expected_revision and expected_task_version")
+        require_positive(body["expected_revision"], "expected_revision")
+        require_positive(body["expected_task_version"], "expected_task_version")
+        if draft_id:
+            require_positive(body["expected_draft_version"], "expected_draft_version")
+        text = body["text"]
+        if not isinstance(text, str) or not text.strip() or len(text.strip()) > 2_000:
+            raise invalid("feedback text must be 1-2000 characters", "$.text")
+        if body["scope"] != "all":
+            raise ServiceError("FEATURE_NOT_SUPPORTED", "the local preview supports only all scope", 422,
+                               field_path="$.scope")
+        task = self.repository.get(actor, task_id)
+        self.projects.require_access(actor, task.project_id, task.dimension_id, "create")
+        if task.confirmed_revision != body["expected_revision"] or task.task_version != body["expected_task_version"]:
+            raise ServiceError("REVISION_CONFLICT", "feedback base is stale", 409)
+        try:
+            proposal = json.loads(task.confirmed_proposal_json)
+        except (TypeError, json.JSONDecodeError):
+            raise ServiceError("STORAGE_CORRUPT", "confirmed proposal is unavailable", 500) from None
+        proposal = deepcopy(proposal)
+        current = proposal.get("query_spec", {}).get("raw_request")
+        if not isinstance(current, str) or not current:
+            raise ServiceError("STORAGE_CORRUPT", "confirmed proposal is invalid", 500)
+        proposal["query_spec"]["raw_request"] = current + "\n追加反馈：" + text.strip()
+        normalized = normalize_proposal(proposal)
+        proposal_json = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+        return self.repository.save_feedback_draft(
+            actor, key, task_id, expected_revision=body["expected_revision"],
+            expected_task_version=body["expected_task_version"], proposal_json=proposal_json,
+            feedback_text=text.strip(), scope="all", draft_id=draft_id,
+            expected_draft_version=body.get("expected_draft_version"),
+        )
+
+    def get_feedback(self, actor: Actor, task_id: str, draft_id: str) -> dict[str, Any]:
+        task = self.repository.get(actor, task_id)
+        self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
+        return self.repository.get_feedback_draft(actor, task_id, draft_id)
+
+    def confirm_feedback(self, actor: Actor, task_id: str, key: str,
+                         body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        require_key(key)
+        fields = {"draft_id", "expected_draft_version", "proposal_digest",
+                  "expected_task_version", "action"}
+        if not isinstance(body, dict) or set(body) != fields:
+            raise invalid("confirmation requires draft/version/digest/task version/action")
+        require_positive(body["expected_draft_version"], "expected_draft_version")
+        require_positive(body["expected_task_version"], "expected_task_version")
+        if body["action"] not in {"confirm", "reject"}:
+            raise invalid("action must be confirm or reject", "$.action")
+        if not isinstance(body["draft_id"], str) or not body["draft_id"]:
+            raise invalid("draft_id is required", "$.draft_id")
+        if not isinstance(body["proposal_digest"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", body["proposal_digest"]):
+            raise invalid("proposal_digest must be a SHA-256 digest", "$.proposal_digest")
+        task = self.repository.get(actor, task_id)
+        self.projects.require_access(actor, task.project_id, task.dimension_id, "approve")
+        return self.repository.confirm_feedback_draft(
+            actor, key, task_id, draft_id=body["draft_id"],
+            expected_draft_version=body["expected_draft_version"],
+            proposal_digest=body["proposal_digest"],
+            expected_task_version=body["expected_task_version"], action=body["action"],
+        )
+
+    def list_revisions(self, actor: Actor, task_id: str) -> tuple[dict[str, Any], ...]:
+        task = self.repository.get(actor, task_id)
+        self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
+        return self.repository.list_revisions(actor, task_id)

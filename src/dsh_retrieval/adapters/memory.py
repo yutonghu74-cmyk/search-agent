@@ -3,6 +3,7 @@
 import threading
 import json
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime
 from dataclasses import replace
 
@@ -21,7 +22,23 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
         self._drafts: dict[str, Draft] = {}
         self._draft_requests: dict[tuple, tuple[str, Draft]] = {}
         self._batches: dict[str, tuple[str, str, str]] = {}
+        self._feedback_drafts: dict[str, dict] = {}
+        self._feedback_requests: dict[tuple, tuple[str, dict]] = {}
+        self._revisions: dict[str, dict[int, str]] = {}
         self._init_cleaning()
+
+    @staticmethod
+    def _feedback_view(draft: dict) -> dict:
+        return {
+            "draft_id": draft["draft_id"], "draft_version": draft["draft_version"],
+            "task_id": draft["task_id"], "base_revision": draft["base_revision"],
+            "base_task_version": draft["base_task_version"],
+            "proposal": json.loads(draft["proposal_json"]),
+            "proposal_digest": draft["proposal_digest"], "feedback_text": draft["feedback_text"],
+            "scope": draft["scope"], "status": draft["status"],
+            "confirmed_revision": draft.get("confirmed_revision"),
+            "execution_note": "反馈文本尚未编译为新的可执行清洗规则",
+        }
 
     def get_draft(self, actor: Actor, draft_id: str) -> Draft:
         with self._lock:
@@ -82,10 +99,143 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 batch_id="batch_" + uuid.uuid4().hex, confirmed_proposal_json=draft.proposal_json,
             )
             self._tasks[task.task_id] = task
+            self._revisions[task.task_id] = {1: draft.proposal_json}
             self._batches[task.batch_id] = (actor.tenant_id, draft.project_id, task.task_id)
             self._drafts[draft_id] = replace(draft, confirmed_task_id=task.task_id)
             self._idempotency[scope] = (fingerprint, task.task_id)
             return replace(task), False
+
+    def save_feedback_draft(self, actor, key, task_id, *, expected_revision,
+                            expected_task_version, proposal_json, feedback_text, scope,
+                            draft_id=None, expected_draft_version=None):
+        route = ("update", draft_id) if draft_id else ("create", task_id)
+        request = {"task_id": task_id, "revision": expected_revision,
+                   "task_version": expected_task_version, "proposal_json": proposal_json,
+                   "feedback_text": feedback_text, "scope": scope,
+                   "draft_id": draft_id, "draft_version": expected_draft_version}
+        fingerprint = digest(request)
+        request_scope = (actor.tenant_id, actor.user_id, "feedback", route, key)
+        with self._lock:
+            task = self.get(actor, task_id)
+            old = self._feedback_requests.get(request_scope)
+            if old is not None:
+                if old[0] != fingerprint:
+                    raise ServiceError("IDEMPOTENCY_CONFLICT", "key was used with another feedback body", 409)
+                return deepcopy(old[1]), True
+            if (task.confirmed_revision != expected_revision
+                    or task.task_version != expected_task_version):
+                raise ServiceError("REVISION_CONFLICT", "feedback base is stale", 409)
+            if scope != "all":
+                raise ServiceError("FEATURE_NOT_SUPPORTED", "unsupported feedback scope", 422)
+            try:
+                proposal = json.loads(proposal_json)
+            except (TypeError, json.JSONDecodeError):
+                raise ServiceError("INVALID_SPEC", "feedback proposal is invalid", 422) from None
+            proposal_digest = digest({"project_id": task.project_id, "proposal": proposal})
+            if draft_id:
+                stored = self._feedback_drafts.get(draft_id)
+                if stored is None or stored["task_id"] != task_id or stored["owner_user_id"] != actor.user_id:
+                    raise ServiceError("NOT_FOUND", "feedback draft was not found", 404)
+                if stored["status"] != "ready" or stored["draft_version"] != expected_draft_version:
+                    raise ServiceError("DRAFT_VERSION_CONFLICT", "feedback draft is stale", 409)
+                version = expected_draft_version + 1
+            else:
+                if any(d["task_id"] == task_id and d["status"] == "ready"
+                       for d in self._feedback_drafts.values()):
+                    raise ServiceError("PENDING_DRAFT_EXISTS", "confirm or edit the pending feedback draft", 409)
+                draft_id, version = "feedback_" + uuid.uuid4().hex, 1
+            stored = {
+                "draft_id": draft_id, "draft_version": version, "task_id": task_id,
+                "tenant_id": actor.tenant_id, "owner_user_id": actor.user_id,
+                "base_revision": expected_revision, "base_task_version": expected_task_version,
+                "proposal_json": proposal_json, "proposal_digest": proposal_digest,
+                "feedback_text": feedback_text, "scope": scope, "status": "ready",
+                "confirmed_revision": None,
+            }
+            self._feedback_drafts[draft_id] = stored
+            view = self._feedback_view(stored)
+            self._feedback_requests[request_scope] = (fingerprint, view)
+            return deepcopy(view), False
+
+    def get_feedback_draft(self, actor, task_id, draft_id):
+        with self._lock:
+            self.get(actor, task_id)
+            stored = self._feedback_drafts.get(draft_id)
+            if (stored is None or stored["task_id"] != task_id
+                    or (stored["tenant_id"], stored["owner_user_id"]) != (actor.tenant_id, actor.user_id)):
+                raise ServiceError("NOT_FOUND", "feedback draft was not found", 404)
+            return self._feedback_view(stored)
+
+    def get_pending_feedback(self, actor, task_id):
+        with self._lock:
+            self.get(actor, task_id)
+            pending = [d for d in self._feedback_drafts.values()
+                       if d["task_id"] == task_id and d["status"] == "ready"]
+            if len(pending) > 1:
+                raise ServiceError("STORAGE_CORRUPT", "multiple pending feedback drafts", 500)
+            return None if not pending else self._feedback_view(pending[0])
+
+    def confirm_feedback_draft(self, actor, key, task_id, *, draft_id,
+                               expected_draft_version, proposal_digest,
+                               expected_task_version, action):
+        request = {"task_id": task_id, "draft_id": draft_id,
+                   "draft_version": expected_draft_version, "proposal_digest": proposal_digest,
+                   "task_version": expected_task_version, "action": action}
+        fingerprint = digest(request)
+        request_scope = (actor.tenant_id, actor.user_id, "POST:/feedback-confirmations", task_id, key)
+        with self._lock:
+            self.get(actor, task_id)
+            task = self._tasks[task_id]
+            old = self._feedback_requests.get(request_scope)
+            if old is not None:
+                if old[0] != fingerprint:
+                    raise ServiceError("IDEMPOTENCY_CONFLICT", "key was used with another confirmation", 409)
+                return deepcopy(old[1]), True
+            stored = self._feedback_drafts.get(draft_id)
+            if stored is None or stored["task_id"] != task_id:
+                raise ServiceError("NOT_FOUND", "feedback draft was not found", 404)
+            if (stored["status"] != "ready" or stored["draft_version"] != expected_draft_version
+                    or stored["proposal_digest"] != proposal_digest):
+                raise ServiceError("DRAFT_VERSION_CONFLICT", "feedback draft or digest is stale", 409)
+            if (task.task_version != expected_task_version
+                    or stored["base_task_version"] != expected_task_version
+                    or task.confirmed_revision != stored["base_revision"]):
+                raise ServiceError("REVISION_CONFLICT", "feedback base is stale", 409)
+            if action == "reject":
+                stored["status"] = "rejected"
+                result = {"task": task.to_summary(), "draft": self._feedback_view(stored)}
+            elif action == "confirm":
+                self._revisions.setdefault(task_id, {}).setdefault(
+                    task.confirmed_revision, task.confirmed_proposal_json)
+                task.confirmed_revision += 1
+                task.task_version += 1
+                task.run_generation += 1
+                task.run_status = RunStatus.PLANNING
+                task.stage = None
+                task.confirmed_proposal_json = stored["proposal_json"]
+                task.request_digest = stored["proposal_digest"]
+                task.raw_request = json.loads(stored["proposal_json"])["query_spec"]["raw_request"]
+                task.active_cleaning_operation_id = None
+                task.active_plan_digest = None
+                self._revisions.setdefault(task_id, {})[task.confirmed_revision] = stored["proposal_json"]
+                stored["status"] = "confirmed"
+                stored["confirmed_revision"] = task.confirmed_revision
+                result = {"task": task.to_summary(), "draft": self._feedback_view(stored)}
+            else:
+                raise ServiceError("INVALID_SPEC", "action must be confirm or reject", 422)
+            self._feedback_requests[request_scope] = (fingerprint, result)
+            return deepcopy(result), False
+
+    def list_revisions(self, actor, task_id):
+        with self._lock:
+            task = self.get(actor, task_id)
+            revisions = dict(self._revisions.get(task_id, {}))
+            if task.confirmed_revision and task.confirmed_proposal_json:
+                revisions.setdefault(task.confirmed_revision, task.confirmed_proposal_json)
+            return tuple({"revision": revision, "proposal": json.loads(payload),
+                          "proposal_digest": digest({"project_id": task.project_id,
+                                                     "proposal": json.loads(payload)})}
+                         for revision, payload in sorted(revisions.items()))
 
     def create(self, actor: Actor, key: str, request_digest: str, task: Task) -> tuple[Task, bool]:
         if (task.tenant_id, task.owner_user_id) != (actor.tenant_id, actor.user_id):
