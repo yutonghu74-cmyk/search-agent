@@ -23,6 +23,8 @@ FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$
 CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
 REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
 PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
+PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
+CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -125,9 +127,12 @@ class Handler(BaseHTTPRequestHandler):
         feedback_match = FEEDBACK_PATH.fullmatch(self.path)
         revisions_match = REVISIONS_PATH.fullmatch(self.path)
         project_tasks_match = PROJECT_TASKS_PATH.fullmatch(self.path)
+        project_conversations_match = PROJECT_CONVERSATIONS_PATH.fullmatch(self.path)
+        conversation_match = CONVERSATION_PATH.fullmatch(self.path)
         if (match is None and not (draft_match and draft_match.group(2))
                 and not (feedback_match and feedback_match.group(2))
-                and revisions_match is None and project_tasks_match is None):
+                and revisions_match is None and project_tasks_match is None
+                and project_conversations_match is None and conversation_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
@@ -143,6 +148,12 @@ class Handler(BaseHTTPRequestHandler):
             if project_tasks_match:
                 return HTTPStatus.OK, {"items": list(self.service.list_tasks(
                     self._actor(), project_tasks_match.group(1)))}, False
+            if project_conversations_match:
+                return HTTPStatus.OK, {"items": list(self.service.list_conversations(
+                    self._actor(), project_conversations_match.group(1)))}, False
+            if conversation_match:
+                return HTTPStatus.OK, self.service.get_conversation(
+                    self._actor(), conversation_match.group(1)), False
             return HTTPStatus.OK, self.service.get_task(self._actor(), match.group(1)), False
 
         self._run(action)

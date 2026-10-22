@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 草稿会话历史 HTTP/UI（2026-10-23）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/conversation-history-ui.json`，可信任务基线 `8805aff4ae7bb73d84dd629d926b210604d92941`，任务起点 `b3b13c6b98964402df9ed4e43eebf7a1259c8557`；状态 READY_FOR_REVIEW。
+- 新增当前项目会话列表和单会话读取 GET 路由，均要求可信身份并通过服务层创建人/项目权限复验。历史侧栏分为“草稿会话”和“正式需求”；会话详情按序展示需求/反馈及独立“方案已确认”关联，可跳转正式 revision，且明确会话不是业务执行时间线。
+- 旧 SQLite 账本通过 core 迁移保持可读；功能上线前未记录的消息不会伪造补齐，因此旧任务仍只出现在“正式需求”。公开消息不含 tenant/owner，消息本身不携带 task/revision。
+- `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_api tests.test_chat_ui tests.core.test_conversation_storage -q`：11 项通过、退出码 0；`PYTHONPATH=src python3 ... | node --check`：退出码 0。首次 JS 管道提取遗漏 `PYTHONPATH` 产生 `ModuleNotFoundError`，已修正后真实通过。`python3 tools/collab_gate.py check --role integration --base 8805aff4ae7bb73d84dd629d926b210604d92941 --task docs/dev/tasks/conversation-history-ui.json`：SCOPE PASS、420 项通过、LOCAL GATE PASS、退出码 0；其中 `LOCAL GATE FAIL` 是既有负向夹具输出。按用户要求不额外重复完整回归。
+- 边界：本地模拟身份/SQLite 体验；没有附件、assistant 消息、保留清理、全文搜索、W3/内网/真实数据或 DJ。服务重启和浏览器验证待门禁后执行。
+
 ## 独立草稿会话记录公共契约（2026-10-23）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/conversation-message-contract.json`，可信任务基线 `89b733e6abcc2f463e1d5be62537d02547157489`，任务起点 `50c067ac39b608cbb1ce63118eabfdd1d006289f`；状态 READY_FOR_REVIEW。
