@@ -1,0 +1,12 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "1589495d63586ea7c99b695e6ac488fea2c3f56c",
+  "files": [
+    "src/dsh_retrieval/multi_rule_contracts.py",
+    "tests/test_multi_rule_contracts.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "冻结仅供受信业务层使用的多规则清洗批准提案与已批准作业记录：任务/版本/代次、已确认需求摘要、候选清单引用及摘要、配方摘要、幂等确认后版本和 operation 身份不可变绑定；拒绝重复候选、非法值及摘要不匹配。契约本身不批准、不派发、不存储、不计数。角色门禁及完整回归通过。"
+}
