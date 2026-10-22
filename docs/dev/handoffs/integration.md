@@ -1,5 +1,14 @@
 # A 总控集成交接
 
+## 开放需求理解审阅层（2026-10-22）
+
+- A / codex/integration / var/worktrees/integration；基线 49d2f9c20420cca4f8ee8a256ec3b11a77628f61；任务卡 docs/dev/intent-review-task.md，契约 contracts/intent-review.md。范围不涉及角色私有目录或旧草稿 schema 变更。
+- 新增 intent_review.py 与显式 CLI：原文/摘要/字符片段绑定、遗漏补 unresolved、硬软区分、同谓词 eq 直接冲突提示、受信注册能力检查、审阅摘要；始终不可执行、无业务任务副作用。未知新规则保留而非丢弃。
+- 能力目录默认空；未接 LLM，不使用固定关键词冒充泛化理解。验证器/证据引用检查是配置完整性，不代表自动核实检测质量。现有 task creation 未接本模块，不能宣称第一阶段全完成或已经实现持久澄清循环。
+- 实际完整回归 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：249 项通过（232+17），退出码 0；核心用例包括否定原文保留、遗漏片段、来源/风格分离、未知/人工/未发布能力、参数类型、原文篡改、模型注入执行字段、无模型 CLI。
+- `python3 tools/collab_gate.py check --role core --base 49d2f9c20420cca4f8ee8a256ec3b11a77628f61` 退出码 1，A 分支不匹配；无 A 专属角色门禁，不绕过/不称通过。未联网、运行 DJ、安装依赖或推送。
+- 下一步：选择受控需求解析模型（已向用户询问部署方向），新增适配与真实语义评测；先保留所有未解析条件，不能因模型未配置让旧链路把复杂需求当成宽度通过。存储/确认门禁衔接仍需后续任务卡。
+
 ## 持久清单去重预览装配（2026-10-22）
 
 - 14:10（Asia/Shanghai）真实合成联测 PASS：运行既有 `tools/manifest_cleaning_smoke.py --run-real`（DJ Python/source 参数同下方 M19 记录），4 个候选、3 pass/1 fail，unique_pass_count=2、duplicate_count=1、target=10、preview_gap=8；accepted_count=null、refill_dispatched=false，任务 RUNNING。清单四来源保留，重建仓库后预览一致。
