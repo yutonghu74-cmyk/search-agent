@@ -1,0 +1,13 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "2b44d44e5c4b5b69333560028a5f2bd6401573b1",
+  "files": [
+    "src/dsh_retrieval/multi_rule_pipeline.py",
+    "tests/test_multi_rule_pipeline.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "新增服务端受信的多规则清洗批准准备入口，只接受 ReleasedDetectorRegistry 对象，不接受 detector_release_digest、配置路径或业务请求覆盖；在写入 core 提案前调用当前 registry 的完整配方/能力/检测器元数据及制品复核，并只从 registry.release_digest 取得发布身份。无效 registry、配方能力不匹配、检测器缺失或制品漂移均不得调用账本 prepare；成功提案的发布摘要必须等于当前 registry 且进入 proposal_digest。现有运行时发布漂移、权限、task/revision/generation、候选清单及确认幂等栅栏保持不变。更新契约、进度和交接；运行定向测试、规范要求的完整回归及 integration 门禁。不运行真实 DJ、不注册真实模型、不访问内网。"
+}
