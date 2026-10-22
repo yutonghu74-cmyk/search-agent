@@ -1,0 +1,14 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "c1cb598ab70446c106e5f18f460790ebaa642d08",
+  "files": [
+    "src/dsh_retrieval/detector_artifacts.py",
+    "src/dsh_retrieval/released_detectors.py",
+    "tests/test_detector_artifacts.py",
+    "tests/test_detector_release_config.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "为受信检测器发布生成确定性的 artifact_manifest_digest 和 release_digest，覆盖后端元数据、实现/模型制品角色、相对路径及 SHA-256，并与能力目录摘要组合；配置顺序不得改变摘要，制品或绑定变化必须改变摘要，部署绝对根目录不进入可移植发布身份。启动预检成功后提供有限、脱敏、不可伪造的证据视图，只含 schema、组合发布摘要、组成摘要和检测器/制品数量，不返回文件路径、单文件摘要或运行时对象。每次生成证据前重新执行完整启动预检；缺失、篡改、绑定/目录漂移不得产生成功证据。保持现有执行前复核、权限、代次和幂等栅栏；不把摘要当授权或模型质量评测。仅运行定向测试和交付必需的 integration 门禁，不额外重复完整回归；不注册真实模型、不运行真实 DJ、不访问内网。"
+}
