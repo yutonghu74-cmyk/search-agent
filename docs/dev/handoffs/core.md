@@ -137,3 +137,10 @@
 - 22:57 里程碑：内存与 SQLite 事务、服务校验、pending task 视图及版本历史已实现；定向 `tests.core.test_feedback tests.core.test_sqlite_storage tests.test_service` 共 22 项通过。
 - 22:59 交付：`python3 tools/collab_gate.py check --role core --base cd3b79f8e86a5db71e83b0e0ad8d7bb2b5470937` 为 SCOPE PASS、完整 400 项通过、LOCAL GATE PASS；输出中的 `LOCAL GATE FAIL` 是既有负向门禁夹具。
 - 未验证：HTTP/UI 尚未接入；真实检索、DJ、W3、模型语义编译和内网均 NOT_RUN。本地 SQLite 仍不是生产存储。
+# Chat 历史需求读取（2026-10-22）
+
+- 角色：core；worktree `var/worktrees/core`；分支 `codex/task-core`；基线 `3304adf7ef1885e50a0dfbd70c86aafb63043b9f`；任务卡 `docs/dev/tasks/chat-history-core.json`；23:26 开工。
+- 范围：当前创建人在指定项目内的已确认任务列表、权限重验、稳定有界排序、SQLite 读取及 core 测试。它是正式需求/版本入口，不是确认前逐句 conversation_message 历史。
+- 23:29 里程碑：owner/project 过滤、当前权限重验、100 条上限、稳定排序、pending 摘要和 SQLite 重启读取已实现；定向 12 项通过。
+- 23:31 交付：`python3 tools/collab_gate.py check --role core --base 3304adf7ef1885e50a0dfbd70c86aafb63043b9f` 为 SCOPE PASS、完整 409 项通过、LOCAL GATE PASS；输出中的 `LOCAL GATE FAIL` 是既有负向门禁夹具。
+- 未验证：HTTP/UI、完整 `conversation_message` 草稿历史、真实 W3/内网不在本切片。

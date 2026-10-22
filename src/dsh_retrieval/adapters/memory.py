@@ -237,6 +237,15 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                                                      "proposal": json.loads(payload)})}
                          for revision, payload in sorted(revisions.items()))
 
+    def list_tasks(self, actor, project_id):
+        with self._lock:
+            rows = [replace(task) for task in self._tasks.values()
+                    if (task.tenant_id, task.owner_user_id, task.project_id)
+                    == (actor.tenant_id, actor.user_id, project_id)]
+            rows.sort(key=lambda task: task.task_id)
+            rows.sort(key=lambda task: task.created_at, reverse=True)
+            return tuple(rows[:100])
+
     def create(self, actor: Actor, key: str, request_digest: str, task: Task) -> tuple[Task, bool]:
         if (task.tenant_id, task.owner_user_id) != (actor.tenant_id, actor.user_id):
             raise ServiceError("ACCESS_DENIED", "task identity does not match caller", 403)

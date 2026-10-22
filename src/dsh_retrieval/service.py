@@ -155,3 +155,25 @@ class TaskService:
         task = self.repository.get(actor, task_id)
         self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
         return self.repository.list_revisions(actor, task_id)
+
+    def list_tasks(self, actor: Actor, project_id: str) -> tuple[dict[str, Any], ...]:
+        if not isinstance(project_id, str) or not project_id.strip():
+            raise invalid("project_id is required", "$.project_id")
+        result = []
+        for task in self.repository.list_tasks(actor, project_id):
+            try:
+                self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
+            except ServiceError as error:
+                if error.code == "PROJECT_ACCESS_DENIED":
+                    continue
+                raise
+            try:
+                proposal = json.loads(task.confirmed_proposal_json)
+                raw_request = proposal["query_spec"]["raw_request"]
+            except (TypeError, KeyError, json.JSONDecodeError):
+                raise ServiceError("STORAGE_CORRUPT", "confirmed proposal is invalid", 500) from None
+            view = task.to_summary()
+            view.update(raw_request=raw_request, created_at=task.created_at.isoformat(),
+                        pending_draft=self.repository.get_pending_feedback(actor, task.task_id))
+            result.append(view)
+        return tuple(result)

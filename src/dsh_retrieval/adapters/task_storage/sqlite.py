@@ -180,6 +180,7 @@ class SQLiteTaskRepository:
     def get_pending_feedback(self, *args, **kwargs): return self._call("get_pending_feedback", False, *args, **kwargs)
     def confirm_feedback_draft(self, *args, **kwargs): return self._call("confirm_feedback_draft", True, *args, **kwargs)
     def list_revisions(self, *args, **kwargs): return self._call("list_revisions", False, *args, **kwargs)
+    def list_tasks(self, *args, **kwargs): return self._call("list_tasks", False, *args, **kwargs)
     def put_cleaning_proposal(self, *args, **kwargs): return self._call("put_cleaning_proposal", True, *args, **kwargs)
     def get_cleaning_proposal(self, *args, **kwargs): return self._call("get_cleaning_proposal", False, *args, **kwargs)
     def get_cleaning_operation(self, *args, **kwargs): return self._call("get_cleaning_operation", False, *args, **kwargs)
