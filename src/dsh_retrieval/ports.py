@@ -10,6 +10,22 @@ from .integration_models import (
     QueryVector, SearchHit, SearchPage, SearchRequest,
 )
 from .retrieval_contracts import RetrievalOperation, RetrievalPlan
+from .materialization_models import MaterializedPage
+
+
+class CandidateMaterializer(Protocol):
+    def materialize(self, actor: Actor, task_id: str, operation_id: str) -> ContextManager[MaterializedPage]:
+        """Read a committed current retrieval page, map and authorize its media.
+
+        Bounded temporary bytes, verified against authoritative SHA-256 digests;
+        no public paths/URLs accepted. Incomplete/conflicting mappings or changed
+        authority/content/scope fail closed. Empty committed pages yield no files.
+        Same versioned media identity shares a candidate but keeps every hit;
+        different source identities remain separate even with identical bytes.
+        Files expire on context exit (success or failure). Does NOT publish a
+        manifest, approve candidates, dispatch cleaning or certify business rules.
+        """
+        ...
 
 
 class RetrievalPlanRepository(Protocol):

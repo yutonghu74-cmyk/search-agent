@@ -89,3 +89,11 @@
 - ACCEPTED（本地授权读取切片）：无旧幂等键也可按任务列举待执行预约；可读取当前计划的已提交页，空页明确为 committed；读不改任务/事件、不自动执行；跨任务、旧 scope/plan、暂停/取消/撤权和故障失败关闭。
 - 证据：tests/core/test_retrieval_reads.py、tests/test_retrieval_contracts.py、docs/dev/handoffs/core.md。数据库 schema 不变，未修改用户运行库、未访问内网或真实 DJ。
 - 下一步候选发布/媒体物化仍缺契约与装配。作业读取不是历史结果浏览/媒体下载授权，也不是自动恢复调度或租约。当前没有承诺多个恢复进程不会重复发起外部请求。
+
+## 授权媒体物化预览契约（2026-10-22）
+
+- A / codex/integration / var/worktrees/integration；基线 4740d998e54961752dd062b796c9e5f8f0f538c9；范围与验收见 docs/dev/materialization-task.md。
+- 新增内部 MaterializedPage/MaterializedCandidate 与 CandidateMaterializer 端口。公开 view 隐藏路径/媒体引用；摘要不依赖临时路径；不发布正式候选、不派发清洗，不计算有效素材数。
+- 完整回归命令 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：160 项通过、退出码 0（原 158 + 2 模型测试）。
+- `python3 tools/collab_gate.py check --role retrieval --base 4740d998e54961752dd062b796c9e5f8f0f538c9` 退出码 1：A 分支不是 retrieval 分支；没有 A 专用检查器，不冒充门禁通过。实现方需在本契约提交基线上通过角色门禁。
+- 真实媒体、内网、跨系统原子性和持久候选发布均未验证。
