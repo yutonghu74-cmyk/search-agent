@@ -66,6 +66,7 @@ class Draft:
     proposal_json: str
     draft_version: int = 1
     confirmed_task_id: str | None = None
+    conversation_id: str | None = None
 
     @property
     def proposal_digest(self) -> str:
@@ -74,6 +75,7 @@ class Draft:
     def to_summary(self) -> dict:
         return {"draft_id": self.draft_id, "draft_version": self.draft_version,
                 "project_id": self.project_id, "dimension_id": self.dimension_id,
+                "conversation_id": self.conversation_id,
                 "proposal": json.loads(self.proposal_json), "proposal_digest": self.proposal_digest,
                 "status": "confirmed" if self.confirmed_task_id else "draft",
                 "confirmed_task_id": self.confirmed_task_id}

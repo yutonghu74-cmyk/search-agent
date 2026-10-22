@@ -57,6 +57,7 @@ class Task:
     confirmed_proposal_json: str | None = None
     active_cleaning_operation_id: str | None = None
     active_plan_digest: str | None = None
+    conversation_id: str | None = None
 
     def to_summary(self) -> dict[str, Any]:
         return {
@@ -69,6 +70,7 @@ class Task:
             "project_id": self.project_id,
             "dimension_id": self.dimension_id,
             "batch_id": self.batch_id,
+            "conversation_id": self.conversation_id,
             "active_cleaning_operation_id": self.active_cleaning_operation_id,
             "run_generation": self.run_generation,
             "run_status": self.run_status.value,

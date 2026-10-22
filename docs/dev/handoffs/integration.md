@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 独立草稿会话记录公共契约（2026-10-23）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/conversation-message-contract.json`，可信任务基线 `89b733e6abcc2f463e1d5be62537d02547157489`，任务起点 `50c067ac39b608cbb1ce63118eabfdd1d006289f`；状态 READY_FOR_REVIEW。
+- 新增 `ConversationMessage`、`ConversationConfirmation`、`ConversationSnapshot`：消息只绑定会话草稿，正式 task/revision 只出现在独立确认关联；公开消息视图不返回 tenant/owner，也不携带正式执行身份。消息序号、类型、正文长度、时区时间和跨会话/项目绑定严格校验。
+- `Draft`、`Task` 增加末尾可选 `conversation_id`，旧构造保持兼容；`TaskRepository` 冻结草稿/反馈消息同事务保存和会话读取端口。执行仍只读取已确认不可变方案，消息缺失或删除不改变正式方案。
+- 定向命令 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_conversation_contracts -q`：5 项通过、退出码 0。`python3 tools/collab_gate.py check --role integration --base 89b733e6abcc2f463e1d5be62537d02547157489 --task docs/dev/tasks/conversation-message-contract.json`：SCOPE PASS、415 项通过、LOCAL GATE PASS、退出码 0；其中 `LOCAL GATE FAIL` 是既有负向夹具输出。按用户要求不在门禁外重复完整回归。
+- 边界：本切片不实现持久化、服务/API/UI、assistant 消息、附件或保留清理；未访问内网、真实业务数据、W3 或 DJ。下一步发布契约基线后，由 core 在独立任务中实现 SQLite 原子持久化与旧账本迁移。
+
 ## 检测器发布身份与脱敏启动证据（2026-10-22）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/detector-release-evidence.json`，可信发布基线 `6f1cf6e60a1fa933713fb927c82b709558687d51`，任务起点 `c1cb598ab70446c106e5f18f460790ebaa642d08`；状态 READY_FOR_REVIEW。

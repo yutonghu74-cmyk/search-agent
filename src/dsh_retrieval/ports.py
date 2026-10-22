@@ -12,6 +12,7 @@ from .integration_models import (
 from .retrieval_contracts import RetrievalOperation, RetrievalPlan
 from .materialization_models import MaterializedPage
 from .candidate_contracts import CandidateManifest, CandidateManifestProposal
+from .conversation_models import ConversationMessage, ConversationSnapshot
 
 
 class CandidateManifestRepository(Protocol):
@@ -130,7 +131,11 @@ class TaskRepository(Protocol):
 
     def get(self, actor: Actor, task_id: str) -> Task: ...
 
-    def save_draft(self, actor: Actor, key: str, draft: Draft, expected_version: int | None = None) -> tuple[Draft, bool]: ...
+    def save_draft(self, actor: Actor, key: str, draft: Draft,
+                   expected_version: int | None = None, *,
+                   conversation_message: ConversationMessage | None = None) -> tuple[Draft, bool]:
+        """Atomically save the draft and optional independent conversation message."""
+        ...
 
     def get_draft(self, actor: Actor, draft_id: str) -> Draft: ...
 
@@ -147,7 +152,8 @@ class TaskRepository(Protocol):
                             expected_revision: int, expected_task_version: int,
                             proposal_json: str, feedback_text: str, scope: str,
                             draft_id: str | None = None,
-                            expected_draft_version: int | None = None) -> tuple[dict[str, Any], bool]:
+                            expected_draft_version: int | None = None,
+                            conversation_message: ConversationMessage | None = None) -> tuple[dict[str, Any], bool]:
         """Save an owner-only proposed revision without changing the active task.
 
         The proposal is a complete normalized snapshot prepared by the business
@@ -179,6 +185,14 @@ class TaskRepository(Protocol):
 
     def list_tasks(self, actor: Actor, project_id: str) -> tuple[Task, ...]:
         """List at most 100 caller-owned confirmed tasks for one project."""
+        ...
+
+    def get_conversation(self, actor: Actor, conversation_id: str) -> ConversationSnapshot:
+        """Read one owner-only conversation after current project authorization."""
+        ...
+
+    def list_conversations(self, actor: Actor, project_id: str) -> tuple[ConversationSnapshot, ...]:
+        """List at most 100 owner-only conversations, newest activity first."""
         ...
 
 
