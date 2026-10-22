@@ -4,15 +4,16 @@
 
 ## 当前快照
 
-- 更新时间：2026-10-23 01:16 CST（Asia/Shanghai）
+- 更新时间：2026-10-23 01:26 CST（Asia/Shanghai）
 - 总控角色 / 分支：A integration / `codex/integration`
-- 当前发布基线：`3967615`（草稿会话历史本地体验已验收）
+- 当前发布基线：`8c4024e`（五节点只读进度本地体验已验收）
 - 当前规范任务：`docs/dev/tasks/task-progress-ui.json`
-- 总体状态：READY_FOR_REVIEW（只读五节点进度快照与页面）；不代表 v1.9 完整产品验收。
+- 总体状态：ACCEPTED（只读五节点进度快照与页面）；不代表 v1.9 完整产品验收。
 - 已完成：受信检测器发布配置加载、启动预检、制品与模型摘要、脱敏证据；清洗批准已绑定 `detector_release_digest`，core 账本持久化并兼容旧记录；运行时发布漂移会在素材读取前失败关闭。
-- 正在进行：五节点模型、进度 GET 路由与正式任务页面已完成；11 项定向测试、JavaScript 语法检查和 integration 门禁 425 项均通过，待本地浏览器验收。
+- 正在进行：本切片已收口，准备按计划进入结果统计/预览的下一最小切片。
 - 当前阻塞：无。
-- 下一步：发布并重启 8080 服务做浏览器验证。
+- 下一步：冻结权威结果统计与分页预览边界；继续坚持未知数量不推算、旧 generation 不覆盖新结果。
+- 本地验收：8080 服务已从发布基线重启；浏览器确认正式任务显示 revision 1 / generation 1、阶段 PLANNING、目标 3、五个节点、有效数量与缺口“未知”，并显示“不展示估算百分比”。
 - 本轮验证：进度 HTTP/UI/model 定向 11 项 PASS，JavaScript 语法 PASS；integration 门禁 SCOPE PASS、425 项 PASS、LOCAL GATE PASS。按用户要求未在门禁外重复完整回归。
 - 本轮验证：HTTP/UI/core 定向 11 项 PASS，JavaScript 语法 PASS；integration 门禁 SCOPE PASS、420 项 PASS、LOCAL GATE PASS；浏览器本地合成会话/确认关联 PASS。未在门禁外重复完整回归。
 - 本轮验证：`tests.test_conversation_contracts` 5 项 PASS；integration 门禁 SCOPE PASS、415 项 PASS、LOCAL GATE PASS。未在门禁外重复完整回归。
