@@ -1,0 +1,12 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "17e7d8e491f49372e350b0982a3eca013fb7a404",
+  "files": [
+    "src/dsh_retrieval/ports.py",
+    "contracts/chat-feedback.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "冻结最小可体验 Chat 反馈领域端口：反馈先保存为绑定 task、base revision、task version 的独立草稿，不改变 confirmed revision、generation 或当前运行；确认必须绑定草稿版本、完整方案摘要、expected_task_version 和幂等键，原子发布新 confirmed revision、提升 generation 并切换到新规划运行；拒绝不改变当前正式版本。端口返回 pending_draft、confirmed_revision 和 task_version，支持版本历史读取；只允许创建人且每次重验项目权限。本文档明确第一版仅把反馈文本纳入完整确认方案，不宣称自然语言已经编译为可执行清洗规则。运行完整回归及 integration 门禁；不实现 UI、不运行真实检索/DJ、不访问内网。"
+}
