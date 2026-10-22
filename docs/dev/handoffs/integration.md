@@ -2,11 +2,12 @@
 
 ## 权威结果统计与稳定分页预览（2026-10-23）
 
-- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/result-preview-ui.json`，可信任务基线 `9c9ddb8105b2fc2f8e11b122145526a64f3d9bc4`，任务起点 `4aa8ba9f3b3a7286e474d4fca301773d61e1fb2d`；状态 READY_FOR_REVIEW（本地页面验收待执行）。
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/result-preview-ui.json`，可信任务基线 `9c9ddb8105b2fc2f8e11b122145526a64f3d9bc4`，任务起点 `4aa8ba9f3b3a7286e474d4fca301773d61e1fb2d`；状态 ACCEPTED（本地体验切片）。
 - 新增当前结果只读视图与 `GET /v1/retrieval/tasks/{task_id}/results`。无权威发布时明确返回 `available=false`、结果统计 null 和空 items；只把结果仓库的 NOT_FOUND 转为空态，撤权、旧版本和存储错误不吞掉。
 - 已发布结果必须绑定当前 generation/task_version/目标数量，accepted/reserve 独立分页；游标绑定结果摘要、视图和偏移。条目仅返回逻辑素材标识、版本及 `preview_status=unavailable`，不暴露摘要、路径、私有地址或图片数据。
 - Chat 正式任务页增加“结果尚未发布”空态；存在权威结果时才展示真实统计和分页入口。本地 CLI 尚未装配执行链结果仓库，测试读取器只验证契约形状，不代表真实检索/DJ 联测。
 - 验证状态：`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_result_views tests.test_api tests.test_chat_ui -q` 12 项 PASS；JavaScript `node --check` PASS；integration 门禁 SCOPE PASS、431 项 PASS、LOCAL GATE PASS。首次定向运行因测试夹具把值写到 reader 对象而非其 items 映射而失败，修正后真实通过；未在门禁外额外运行完整回归。
+- 发布提交 `7f45be0` 已快进到主体验目录，8080 服务已使用既有 SQLite 账本重启。浏览器确认当前正式任务显示“结果尚未发布”及“不展示模拟素材或推算数量”，旧历史、五节点和反馈入口保持可用。
 - 边界：本切片不启动检索/清洗/补数，不发布结果集，不实现媒体预览、SSE、逐步骤结果或人工复核，不访问内网/真实数据。
 
 ## 五节点只读进度快照与页面（2026-10-23）
