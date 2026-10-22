@@ -1,0 +1,12 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "0f4861cdbd02abae7fb8255733265616ced78afa",
+  "files": [
+    "src/dsh_retrieval/recipe_bridge.py",
+    "tests/test_recipe_bridge.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "只把受信、当前已审阅编译预览转换成不可变多规则配方；逐字段及摘要校验、检测步骤/规则对应和软偏好隔离，篡改/缺失/路径型后端拒绝。转换不是正式任务批准，不创建作业、不读取素材、不调用检测器、不发布结果。角色门禁和完整本地回归通过。"
+}
