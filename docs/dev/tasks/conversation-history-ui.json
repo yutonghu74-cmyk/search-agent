@@ -1,0 +1,15 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "b3b13c6b98964402df9ed4e43eebf7a1259c8557",
+  "files": [
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "tests/test_api.py",
+    "tests/test_chat_ui.py",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "新增当前项目会话列表和单会话读取 GET 路由，要求可信身份并复用服务层创建人/项目权限复验。Chat 历史侧栏同时呈现草稿会话与正式需求；打开会话显示按序用户输入/反馈及独立确认关联，明确它不是业务执行时间线；可从已关联 task 继续查看正式版本和反馈。旧账本无 conversation_message 时仍显示正式历史并说明无法补回旧聊天。API/UI 定向测试、JavaScript 语法检查和 integration 门禁通过；重启本地 8080 服务并做浏览器体验验证，不访问内网或真实业务数据。"
+}
