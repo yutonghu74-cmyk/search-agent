@@ -1,6 +1,6 @@
 # 多窗口协作实施方案
 
-状态：协作规则与本地门禁已建立；未创建工作分支/worktree，未启动并行开发，未配置远端必需检查。
+状态：已有独立角色 worktree 和本地开发记录；远端必需检查未配置。A 总控门禁补齐实现待审查发布，不能用候选代码自认证为可信基线。
 
 ## 阶段与停止条件
 
@@ -48,9 +48,15 @@ python3 tools/collab_gate.py baseline
 python3 tools/collab_gate.py check --role core --base <BASE_SHA>
 python3 tools/collab_gate.py check --role retrieval --base <BASE_SHA>
 python3 tools/collab_gate.py check --role cleaning --base <BASE_SHA>
+# A：基线中必须已经存在审核发布的 JSON 任务卡
+python3 tools/collab_gate.py check --role integration --base <BASE_SHA> --task docs/dev/tasks/intent-model.json
 ```
 
 `check` 会验证基线为 HEAD 祖先、角色分支、基线责任表、已提交/暂存/未暂存/未跟踪文件的修改范围、交接文件存在，并执行基础测试。重命名按删除旧路径和添加新路径一起检查。失败返回非零退出码；没有提交或漏传基线直接失败，不假装通过。
+
+A 附加约束：必须为独立 linked worktree、codex/integration 分支；JSON 任务卡与责任表均从 `--base` 读取，当前任务不能修改自身任务卡。文件范围是 A 允许范围与任务卡精确清单的交集，并排除 core/retrieval/cleaning 所有负责路径；不允许目录通配、路径穿越、符号链接或子模块。任务卡 source_base 为任务起始提交，须为发布基线的祖先；acceptance 为非空验收说明，files 必须包含 integration 交接文件。这些字段检查不替代人工审查验收证据。
+
+发布顺序：人工审查门禁变更与隔离 Git 测试 → 授权发布门禁/任务卡可信基线 → 候选工作区同步该基线 → 由受信检查器执行角色门禁与全部回归。旧基线缺少 integration 配置时必须失败，不回退到 baseline 模式，不把新门禁认证自身当作信任来源。角色、基线、任务卡都应由受信总控/CI 指定；本地通过不自动授权提交、合并或推送。根 AGENTS.md 原三角色命令继续有效，A 使用本节新增命令。
 
 测试会执行仓库 Python 代码，首次接收不可信代码时先审查；本地脚本不是沙箱。检查不扫描 Git 忽略文件，不是凭据扫描器，不自动确认网络安全或业务完备性。
 

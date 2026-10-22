@@ -1,0 +1,14 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "22c62143dd20d49f0426f1fccd2232fd13de6699",
+  "files": [
+    "src/dsh_retrieval/intent_model.py",
+    "tools/intent_model.py",
+    "tests/test_intent_model.py",
+    "docs/dev/intent-model-task.md",
+    "contracts/intent-review.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "复用私有配置与凭据，不记录密钥；默认模型合成调用证据；引用原文校验、否定/软偏好保留、未知能力不执行、异常脱敏；完整本地回归与 integration 范围门禁。不得标为全规格或内网验收。"
+}

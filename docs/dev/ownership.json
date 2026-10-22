@@ -1,6 +1,13 @@
 {
   "spec": "规格书/DSH检索Agent_设计方案与落地规格书_v1.9.md",
   "roles": {
+    "integration": {
+      "branch": "codex/integration",
+      "allow": [
+        "src/dsh_retrieval/", "tests/", "contracts/", "docs/dev/",
+        "tools/", "config/", "db/", "规格书/", "pyproject.toml", "README.md"
+      ]
+    },
     "core": {
       "branch": "codex/task-core",
       "allow": [

@@ -165,3 +165,14 @@
 - 主分支执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：退出码 0，178 项通过（原 158 + 2 模型 + 18 物化）。
 - ACCEPTED 仅本地临时候选预览开发切片：合成字节、模拟媒体网关与 SQLite；不是图片规则通过、真实召回、持久候选、清洗装配或内网验收。P01 仍未完成。
 - 未新增依赖、未运行 DJ/DSH、未访问内网、未推送。下一步持久候选快照与独立确认契约，解决检索原 scope 和清洗递增 task_version 的生命周期衔接；强杀清理/跨系统 ACL 原子性未验证。
+
+## A 总控门禁补齐（2026-10-22 15:54，Asia/Shanghai）
+
+- 状态：实现与本地测试完成，待人工审查/可信基线发布；未提交、合并或推送。本记录不覆盖另一个 integration 工作区尚未提交的真实模型接入记录。
+- 用户授权“补齐”严格门禁；角色 A，分支 codex/integration-gate，独立 worktree `/Users/hw-edit/.codex/worktrees/integration-gate/search-agent`，基线 22c62143dd20d49f0426f1fccd2232fd13de6699。范围见 docs/dev/integration-gate-task.md。
+- 修改 tools/collab_gate.py、tests/test_collab_gate.py、docs/dev/ownership.json、docs/dev/parallel-plan.md、docs/dev/window-prompts.md；新增任务卡与 docs/dev/tasks/intent-model.json；更新本交接。未改模型代码、业务代码、依赖或旧测试发现规则。
+- 新增 integration 角色：精确文件任务卡和责任表从可信基线读取；固定 codex/integration 分支、独立 linked worktree、起始提交祖先、验收说明、交接文件；文件范围取双重约束并排除原三个角色负责的路径。候选任务卡自改、未授权文件、路径穿越、目录通配、符号链接/子模块（含暂存链接被工作区普通文件掩盖）拒绝。
+- 原 core/retrieval/cleaning 配置逐项与原基线相等，新增回归测试验证；它们不使用 --task 替代角色约束。
+- 执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：269 项通过、退出码 0（249 基线 + 20 新增门禁测试）。其中 30 项门禁测试含原有 10 项；测试中的预期 LOCAL GATE FAIL 是拒绝断言，不是全套测试失败。隔离 Git 仓库验证允许/拒绝路径；未访问内网、未调用真实模型/DJ。
+- 执行 `python3 tools/collab_gate.py check --role core --base 22c62143dd20d49f0426f1fccd2232fd13de6699`：退出码 1，分支不匹配。执行新命令 `check --role integration --base 22c62143dd20d49f0426f1fccd2232fd13de6699 --task docs/dev/tasks/intent-model.json`：退出码 1，旧基线无 integration 配置。保持失败，不用 baseline 模式替代角色检查。git diff --check 通过。
+- 待人工确认：审查并授权发布本次门禁和模型任务卡为新的可信基线。之后模型工作区同步基线，保留其未提交代码/交接（本交接可能需手工合并两个新增段落），用受信版本执行 integration 门禁；通过后再申请/执行获授权的本地集成。此处的测试通过不是首次门禁自认证，更不是 v1.9 全业务验收。
