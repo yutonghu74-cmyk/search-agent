@@ -1,0 +1,14 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "38b225ce0fbaabf9b0c1ca05446bff8a9072425b",
+  "files": [
+    "src/dsh_retrieval/released_detectors.py",
+    "src/dsh_retrieval/multi_rule_pipeline.py",
+    "tests/test_released_detectors.py",
+    "tests/test_multi_rule_pipeline.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "执行前重查配方绑定的能力目录摘要、每条硬规则的已验证能力、谓词/媒体/操作符/值类型、检测步骤与后端绑定和实际检测器元数据。缺项、版本变化、未发布/人工能力或伪装后端在读取媒体前拒绝；任务仍通过当前批准账本与授权校验。现有合成串联改用受信发布目录，重复预览或已落账结果不重跑检测；不注册真实模型、不运行 DJ 或内网。integration 角色门禁和完整回归通过。"
+}
