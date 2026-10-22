@@ -1,0 +1,19 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "56882a763d2ae72af4a28505f21e677f7d7e639b",
+  "files": [
+    "src/dsh_retrieval/expansion_models.py",
+    "src/dsh_retrieval/proposals.py",
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "tests/test_grouped_expansion.py",
+    "tests/test_api.py",
+    "tests/test_chat_ui.py",
+    "contracts/grouped-expansion.md",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "新增 grouped-expansion@1 预览：从明确的‘主标签扩N个词’输入生成主标签分组，N 为 1-30；辅助词仅用于召回，不成为独立交付包。每组保存可选上级标签、主标签、辅助词、独立 package_name/package_mode=separate 和 delivery_target=null；计划固定 overlap_policy=single_primary_per_aggregate，允许额外聚合清单但不重复累计总数。POST /v1/retrieval/projects/{project_id}/expansions 要求可信身份和项目权限，只生成待确认预览，不启动检索。Chat 在正式提单前展示分组及完整辅助词，确认后将不可变分组计划写入 query-spec@2 revision；无明确分组语法时不猜测标签。定向测试、JavaScript 语法检查及 integration 门禁通过；不调用模型、不执行检索/清洗/打包、不访问内网或真实数据。"
+}
