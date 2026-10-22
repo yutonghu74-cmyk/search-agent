@@ -66,3 +66,12 @@
 - 验收状态：ACCEPTED，仅公共契约/模拟适配开发切片。正式业务确认与检索计划持久化、候选发布/清洗装配、真实 ClickHouse/Milvus 全部未验收；P01 仍未完成。上文“待本地提交/基线未发布”记录已由此更新。
 - 证据路径：tests/test_retrieval_contracts.py、tests/retrieval/test_simulated.py、docs/dev/handoffs/retrieval.md；本节记录实际执行结果，非真实 DJ 或内网联测。未推送、部署、安装依赖或接内网。
 - 下一步：core 在本次集成基线上实现与任务共事务的检索计划账本，验收幂等确认、页预约/回传栅栏和重启恢复；A 再装配到业务流程。需要新任务卡及独立 core worktree，不能把模拟夹具当作已批准业务计划。
+
+## 检索计划本地账本集成（2026-10-22 10:28，Asia/Shanghai）
+
+- core 任务基线 7e9e33832352b22e2d68fcb82bdb86cca44973c1；任务卡/交接在 docs/dev/handoffs/core.md。实现提交 4db8db0，经 A 审查代码、角色范围及测试后快进合入 master。
+- core 角色门禁通过；新增 21 项存储测试。合入后在主工作区执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：退出码 0，144 项通过。无真实 DJ/内网执行。
+- ACCEPTED 仅指本地存储切片：批准计划与任务版本同事务、同页预约/回传幂等、游标及版本栅栏、页与待发事件原子保存；新连接/新进程恢复原批准和预约。另以模拟网关验证两页预约→搜索→提交；没有自动候选发布或派发清洗。
+- 旧任务/清洗 payload 不变；同库新增 retrieval_ledger 表，未触碰用户已有运行库。旧二进制不能直接读取新增表的账本。生产数据库选型未变，PostgreSQL 非必装。
+- A 本轮只更新本记录及契约说明，无共享运行时代码变更；角色门禁证据采用本次 core 的实际通过结果，不宣称存在 A 专属检查器。
+- 尚缺公共的待执行作业/已提交页读取接口、候选发布、HTTP/清洗装配和事件 relay；当前支持已知幂等键恢复，不宣称后台自动接管。下一步先冻结这些接口后分派实现。

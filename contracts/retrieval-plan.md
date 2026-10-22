@@ -1,6 +1,6 @@
-# 检索计划账本契约（待集成）
+# 检索计划账本契约
 
-状态：A 侧契约与纯校验代码，本提交作为后续开发基线；未实现仓库/HTTP，不是已上线能力。旧接口未变，真实适配器能力仍须另行冻结。
+状态：公共契约及本地 SQLite 账本切片已实现；HTTP/业务清洗装配未实现，不是已上线能力。旧接口未变，真实适配器能力仍须另行冻结。
 
 ## 范围与依赖
 
@@ -42,5 +42,6 @@ snapshot exhausted 也仅指批准查询及连接器可访问集合，不证明�
 - PLAN_DIGEST_MISMATCH / CONFIRMATION_REQUIRED：摘要失配或未明确确认。
 - PLAN_NOT_CURRENT / PLAN_REQUEST_MISMATCH：未批准/旧 epoch 或改变批准请求。
 - INVALID_SEARCH_PAGE：连接器输出不可信；不是业务内容 fail。
-- 原接口未改签名，新增账本端口没有默认实现。现有 SQLite 快照、HTTP 和 CandidateIntake 不会自动支持该契约。正式接入前必须补原子确认/回传/恢复测试，发布新基线后才能由其他角色实现。
-- 下一切片：core 实现与任务共事务的计划账本（先本地 SQLite），retrieval 从已批准记录执行，A 装配空召回与非空候选确认。真实 ClickHouse/Milvus 和清洗联测另验收。
+- 原接口未改签名；SQLiteRetrievalPlanRepository 为显式装配的本地实现，路径 src/dsh_retrieval/adapters/task_storage/retrieval.py，构造时必须注入项目/库权限服务。HTTP 和 CandidateIntake 不会自动接入。
+- 原子确认/回传/恢复的本地证据见 tests/core/test_retrieval_storage.py 与 docs/dev/handoffs/core.md。任务表和检索表共库同事务；本地事件尚无发送器，不代表生产 outbox 完成。
+- 下一切片：冻结待执行作业/已提交页的授权读取及候选清单发布接口，再装配空召回与非空候选确认。真实 ClickHouse/Milvus 和清洗联测另验收。
