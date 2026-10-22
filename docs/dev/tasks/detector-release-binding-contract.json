@@ -1,0 +1,12 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "bf429f15dc1376e6628b11054f92c91d290b726d",
+  "files": [
+    "src/dsh_retrieval/multi_rule_contracts.py",
+    "tests/test_multi_rule_contracts.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "为清洗批准提案、已批准作业绑定及逐素材结果增加检测器发布摘要，使摘要进入 proposal_digest、CleaningBinding 相等性和 result_digest；同一 backend_ref 下更换实现、模型制品或能力目录后不能复用原批准或回传。为分阶段迁移保留仅供读取旧账本的缺省空值，但新增统一执行前严格校验，缺少或格式错误的 detector_release_digest 必须失败关闭；本任务不修改 core 持久化或实际流水线，后续任务再让新批准强制写入并在执行时对比当前受信发布。更新契约说明与定向测试，保持现有版本、generation、operation、清单、配方和结果完整性栅栏。仅运行定向测试和交付必需的 integration 门禁，不额外重复完整回归；不运行真实 DJ、不注册真实模型、不访问内网。"
+}
