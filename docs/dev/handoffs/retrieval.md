@@ -1,5 +1,14 @@
 # Retrieval 检索适配切片
 
+## 当前任务：授权媒体物化预览
+
+- 角色 retrieval；独立 var/worktrees/retrieval；分支 codex/retrieval-adapters；基线 10228c0ed84c45c49133e4f83868bd20af52a4f8。
+- 范围 adapters/retrieval/、tests/retrieval/、本交接；验收与边界见 docs/dev/materialization-task.md。只做临时预览，不发布持久候选或启动清洗。
+- 2026-10-22 11:16（Asia/Shanghai）：实现 materialization.py，新增 test_materialization.py 的 18 项用例。独立限制单素材/整页字节、流式校验 SHA-256、完整映射及同身份冲突检查、前后权限/任务/映射重查；上下文成功或异常退出删除本次临时目录。相同版本身份保留多命中，不按内容合并跨来源素材。
+- `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：178 项通过；`python3 tools/collab_gate.py check --role retrieval --base 10228c0ed84c45c49133e4f83868bd20af52a4f8`：退出码 0，角色范围与 178 项测试通过。git diff --check 通过。
+- 验证仅合成字节 + 模拟媒体/授权网关 + 本地 SQLite。未运行真实 DJ、内网或真实媒体下载；无图片解码、持久候选发布、业务清洗确认装配。跨系统授权不是原子事务，返回后撤权、进程强杀遗留临时目录仍需后续生命周期方案。
+- 接口变更：无，消费 A 已发布契约；下一步由 A 定义持久候选快照、批准和清洗任务版本衔接，不能让临时目录充当正式素材仓库。
+
 - 角色：retrieval；分支 codex/retrieval-adapters。
 - 独立 worktree：/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/retrieval。
 - 分派基线：b2cdedd7b966ad7e4756c127525f81dafd9400fc；当前代码未提交、未合并。
