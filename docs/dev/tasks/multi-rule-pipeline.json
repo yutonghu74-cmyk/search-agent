@@ -1,0 +1,11 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "ad3bc7e71c2ad0a731c665b9541541f9e21f8841",
+  "files": [
+    "src/dsh_retrieval/multi_rule_pipeline.py",
+    "tests/test_multi_rule_pipeline.py",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "串联当前批准作业、授权候选读取、已登记合成检测器、逐素材结果原子落账和 input_only 精确预览发布；读取与写入各层保留现有授权/版本栅栏。已落账结果或已发布预览的重试不得重跑检测或生成第二个结果集；执行中撤权/换代失败关闭，结果落账后预览前中断可恢复。只做本地合成装配，不登记真实检测器、不运行真实 DJ、不派发补数或交付。integration 角色门禁和完整回归通过。"
+}
