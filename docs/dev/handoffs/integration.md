@@ -333,3 +333,4 @@
 - 23:10 里程碑：本地页面完成提单确认、反馈草稿、确认/拒绝和刷新恢复；HTTP 主流程、身份/幂等错误及页面安全头定向测试共 13 项通过。
 - 23:13 交付验证：完整回归 405 项通过；`python3 tools/collab_gate.py check --role integration --base e3ad25881bd7b464dfb7aaa019139c6cdf023019 --task docs/dev/tasks/chat-feedback-local-ui.json` 为 SCOPE PASS、内部 405 项通过、LOCAL GATE PASS。输出中的 `LOCAL GATE FAIL` 为既有负向门禁夹具。
 - 未验证：浏览器人工冒烟将在合并并启动后执行；真实检索、DJ、W3、模型语义编译和内网均 NOT_RUN。本地 SQLite 不是生产存储。
+- 23:20 浏览器冒烟：确认卡创建 task revision 1；反馈确认发布 revision 2 / generation 2；刷新后从 SQLite 恢复同一任务。发现恢复页缺少新建入口并补充“新建另一单”；补充后 UI/API 定向 5 项通过。最终 integration 门禁 SCOPE PASS、内部 405 项通过、LOCAL GATE PASS。

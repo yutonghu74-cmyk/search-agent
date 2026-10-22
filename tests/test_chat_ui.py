@@ -12,6 +12,8 @@ class ChatUiTest(unittest.TestCase):
         self.assertIn("尚未编译为真实清洗规则", CHAT_JS)
         self.assertIn("restoreTask", CHAT_JS)
         self.assertIn("pending_draft", CHAT_JS)
+        self.assertIn("new-task", CHAT_HTML)
+        self.assertIn("localStorage.removeItem", CHAT_JS)
 
     def test_assets_do_not_embed_remote_dependencies_or_dynamic_html(self):
         combined = CHAT_HTML + CHAT_CSS + CHAT_JS
