@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 检测器发布身份与脱敏启动证据（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/detector-release-evidence.json`，可信发布基线 `6f1cf6e60a1fa933713fb927c82b709558687d51`，任务起点 `c1cb598ab70446c106e5f18f460790ebaa642d08`；状态 READY_FOR_REVIEW。
+- 扩展 `detector_artifacts.py`、`released_detectors.py` 及两组既有测试，更新契约和本交接。`manifest_digest` 规范化覆盖后端元数据与实现/模型制品角色、相对路径、SHA-256；配置顺序和部署绝对根目录不影响身份。`release_digest` 组合能力目录摘要与制品清单摘要，任一能力或制品绑定变化均产生新身份。
+- `preflight_evidence()` 每次重新执行全量启动预检，成功时只返回 schema、组合/组成摘要及检测器/制品数量，不返回部署路径、单文件摘要或运行时对象；文件篡改、缺失、绑定或目录漂移不产生成功证据。证据/摘要不是授权、签名或模型质量结论，批准账本尚未持久绑定它。
+- 定向命令 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_detector_artifacts tests.test_detector_release_config tests.test_released_detectors tests.test_multi_rule_pipeline -q`：30 项通过、退出码 0。按用户要求未单独重复完整回归。`python3 tools/collab_gate.py check --role integration --base 6f1cf6e60a1fa933713fb927c82b709558687d51 --task docs/dev/tasks/detector-release-evidence.json`：SCOPE PASS、门禁内 380 项回归通过、LOCAL GATE PASS、退出码 0；输出中的 LOCAL GATE FAIL 来自既有负例夹具。此后只更新本条证据并执行 `git diff --check`，未为纯交接文本再次重复回归。
+- 边界：仅本地合成配置/制品/检测器；未注册真实模型、运行真实 DJ、访问内网、安装依赖或推送。下一步如将 release_digest 纳入正式批准/作业绑定，将涉及公共契约和 core 持久化，必须单独任务卡与迁移验收。
+
 ## 受信检测器发布配置加载与启动预检（2026-10-22）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/detector-release-config.json`，可信发布基线 `285e36d1e0900702f509675769f9b69130ad6148`，任务起点 `4963dd7cea4b466193eb4afe239186bd60854fec`；状态 READY_FOR_REVIEW。

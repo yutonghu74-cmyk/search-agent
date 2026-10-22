@@ -1,6 +1,7 @@
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from tests import test_multi_rule_pipeline as pipeline_fixture
@@ -26,6 +27,30 @@ class DetectorArtifactTests(unittest.TestCase):
 
     def test_implementation_and_model_artifacts_verify(self):
         self.assertEqual(self.verify(), {self.f.detector.backend_ref: self.f.detector})
+
+    def test_manifest_identity_is_ordered_canonical_and_root_independent(self):
+        binding = replace(self.f.artifact_binding,
+                          artifacts=tuple(reversed(self.f.artifact_binding.artifacts)))
+        reordered = DetectorArtifactManifest(self.f.artifact_root, (binding,))
+        self.assertEqual(reordered.manifest_digest,
+                         self.f.artifact_manifest.manifest_digest)
+        self.assertEqual(binding.binding_digest, self.f.artifact_binding.binding_digest)
+        self.assertEqual((reordered.detector_count, reordered.artifact_count), (1, 2))
+
+        other_temp = TemporaryDirectory()
+        self.addCleanup(other_temp.cleanup)
+        other_root = Path(other_temp.name)
+        for source in (self.f.artifact_path, self.f.model_path):
+            (other_root / source.name).write_bytes(source.read_bytes())
+        moved = DetectorArtifactManifest(other_root, (binding,))
+        self.assertEqual(moved.manifest_digest, reordered.manifest_digest)
+
+        alternate = other_root / "alternate-model.bin"
+        alternate.write_bytes(self.f.model_path.read_bytes())
+        changed_artifact = replace(binding.artifacts[0], relative_path=alternate.name)
+        changed = replace(binding, artifacts=(changed_artifact, binding.artifacts[1]))
+        self.assertNotEqual(DetectorArtifactManifest(other_root, (changed,)).manifest_digest,
+                            reordered.manifest_digest)
 
     def test_missing_or_changed_artifact_fails_before_media_read(self):
         for mutate in (lambda: self.f.model_path.unlink(),

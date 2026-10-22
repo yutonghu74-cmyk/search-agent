@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -60,6 +61,27 @@ class DetectorReleaseConfigTests(unittest.TestCase):
         registry = self.load()
         self.assertEqual(registry.require_recipe(self.f.approval.job.recipe),
                          {self.f.detector.backend_ref: self.f.detector})
+
+    def test_release_digest_and_evidence_are_stable_and_path_free(self):
+        self.write_config()
+        registry = self.load()
+        evidence = registry.preflight_evidence()
+        self.assertEqual(set(evidence), {"schema_version", "release_digest",
+            "capability_registry_digest", "artifact_manifest_digest",
+            "detector_count", "artifact_count"})
+        self.assertEqual((evidence["detector_count"], evidence["artifact_count"]), (1, 2))
+        self.assertNotIn(str(self.f.artifact_root), str(evidence))
+        self.assertNotIn(self.f.model_path.name, str(evidence))
+
+        reordered = deepcopy(self.config)
+        reordered["detectors"][0]["artifacts"].reverse()
+        self.write_config(reordered)
+        self.assertEqual(self.load().release_digest, registry.release_digest)
+
+        changed_capabilities = (replace(self.f.capabilities[0], operators=("eq", "in")),
+                                self.f.capabilities[1])
+        changed = self.load(capabilities=changed_capabilities)
+        self.assertNotEqual(changed.release_digest, registry.release_digest)
 
     def test_schema_unknown_fields_and_untrusted_root_are_rejected(self):
         cases = []
@@ -138,6 +160,12 @@ class DetectorReleaseConfigTests(unittest.TestCase):
         self.f.model_path.write_bytes(b"changed after startup")
         self.assert_unreleased(self.f.run_pipeline)
         self.assertEqual(self.f.gateway.reads, 0)
+
+    def test_preflight_evidence_rechecks_artifacts(self):
+        self.write_config()
+        registry = self.load()
+        self.f.model_path.write_bytes(b"changed before evidence")
+        self.assert_unreleased(registry.preflight_evidence)
 
 
 if __name__ == "__main__":

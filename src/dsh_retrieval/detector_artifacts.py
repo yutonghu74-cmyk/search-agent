@@ -64,7 +64,10 @@ class DetectorArtifactBinding:
                        "artifacts": [{"role": item.role,
                                       "relative_path": item.relative_path,
                                       "content_digest": item.content_digest}
-                                     for item in self.artifacts]})
+                                     for item in sorted(self.artifacts,
+                                         key=lambda value: (value.relative_path,
+                                                            value.role,
+                                                            value.content_digest))]})
 
 
 class DetectorArtifactManifest:
@@ -91,6 +94,32 @@ class DetectorArtifactManifest:
         self._root = resolved
         self._root_identity = (root_stat.st_dev, root_stat.st_ino)
         self._bindings = {item.backend_ref: item for item in bindings}
+        self._manifest_digest = digest({
+            "schema_version": "detector-artifact-manifest@1",
+            "detectors": [{
+                "backend_ref": binding.backend_ref,
+                "validator_ref": binding.validator_ref,
+                "evidence_ref": binding.evidence_ref,
+                "artifacts": [{
+                    "role": artifact.role,
+                    "relative_path": artifact.relative_path,
+                    "content_digest": artifact.content_digest,
+                } for artifact in sorted(binding.artifacts,
+                    key=lambda value: (value.relative_path, value.role, value.content_digest))],
+            } for binding in sorted(bindings, key=lambda value: value.backend_ref)],
+        })
+
+    @property
+    def manifest_digest(self):
+        return self._manifest_digest
+
+    @property
+    def detector_count(self):
+        return len(self._bindings)
+
+    @property
+    def artifact_count(self):
+        return sum(len(binding.artifacts) for binding in self._bindings.values())
 
     def _require_stable_root(self):
         try:

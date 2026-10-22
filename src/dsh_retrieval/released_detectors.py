@@ -9,6 +9,7 @@ from .detector_artifacts import DetectorArtifactManifest
 from .intent_compiler import DetectorBinding
 from .intent_review import Capability, IntentReviewService
 from .multi_rule_contracts import CleaningRecipe
+from .query_spec import digest
 
 
 _VALUE_TYPES = {"boolean": bool, "integer": int, "number": (int, float), "string": str}
@@ -30,6 +31,11 @@ class ReleasedDetectorRegistry:
             raise ValueError("duplicate detector binding")
         self.detectors = dict(detectors)
         self.artifact_manifest = artifact_manifest
+        self.release_digest = digest({
+            "schema_version": "released-detector-registry@1",
+            "capability_registry_digest": self.registry_digest,
+            "artifact_manifest_digest": self.artifact_manifest.manifest_digest,
+        })
 
     def require_recipe(self, recipe: CleaningRecipe):
         def unavailable():
@@ -81,3 +87,16 @@ class ReleasedDetectorRegistry:
             raise ServiceError("DETECTOR_NOT_RELEASED", "Approved detector release unavailable", 409)
         self.artifact_manifest.preflight(self.detectors)
         return self
+
+    def preflight_evidence(self):
+        """Revalidate and return a path-free deployment evidence view."""
+
+        self.preflight()
+        return {
+            "schema_version": "detector-release-preflight@1",
+            "release_digest": self.release_digest,
+            "capability_registry_digest": self.registry_digest,
+            "artifact_manifest_digest": self.artifact_manifest.manifest_digest,
+            "detector_count": self.artifact_manifest.detector_count,
+            "artifact_count": self.artifact_manifest.artifact_count,
+        }
