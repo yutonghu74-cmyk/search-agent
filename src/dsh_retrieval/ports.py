@@ -11,6 +11,27 @@ from .integration_models import (
 )
 from .retrieval_contracts import RetrievalOperation, RetrievalPlan
 from .materialization_models import MaterializedPage
+from .candidate_contracts import CandidateManifest, CandidateManifestProposal
+
+
+class CandidateManifestRepository(Protocol):
+    """Trusted backend only; proposals contain verified refs, never client paths.
+
+    put/confirm validate current committed operation in the task transaction and
+    reauthorize project/library/media. confirm accepts a freshly rematerialized
+    proposal matching a stored preview. Owner-only, strict version CAS, same body
+    replay and same-proposal multi-key dedup; manifest/key/outbox commit together.
+    Publication does not advance task state/version or start cleaning. get keeps
+    stable scope/plan fences but permits later task_version in that same scope;
+    still denies inactive tasks and current access failures. No media bytes are
+    stored; later consumers must authorize and verify content again.
+    """
+    def put_proposal(self, actor: Actor, proposal: CandidateManifestProposal) -> None: ...
+
+    def confirm(self, actor: Actor, proposal: CandidateManifestProposal, *, key: str,
+                expected_task_version: int, action: str) -> tuple[CandidateManifest, bool]: ...
+
+    def get(self, actor: Actor, task_id: str, manifest_ref: str) -> CandidateManifest: ...
 
 
 class CandidateMaterializer(Protocol):

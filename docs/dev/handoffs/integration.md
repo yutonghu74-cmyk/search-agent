@@ -1,5 +1,14 @@
 # A 总控集成交接
 
+## 2026-10-22 候选清单持久化契约
+
+- A / codex/integration / var/worktrees/integration，基线 83b3607a96603e7e6ba18adbd62e1d57f24ed9f8；范围/验收见 candidate-ledger-task.md。
+- 接口变更原因：临时路径不能充当清洗持久输入；新 ManifestItem/Proposal/Manifest 和 CandidateManifestRepository 保存引用与完整命中，CandidatePublicationService 在确认前重物化。影响 core 存储和未来 cleaning 装配；旧 CandidateIntake/清洗契约不变。
+- 请求示例：preview(actor, task_id, operation_id) 返回 proposal_digest/expected_task_version/candidate_count；confirm 使用相同作业、显示的摘要与版本、key、action=confirm，返回 manifest_ref 与 replayed。身份全部后端绑定，不支持客户端传文件路径。
+- 清单读取允许同稳定 scope/current plan 下 task_version 递增；新发布依旧严格版本核对。不改变检索读取栅栏；确认工件不增加 task_version、不代表批准清洗或通过规则。
+- 本轮完整回归 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：184 项通过（178+6），退出码 0。`python3 tools/collab_gate.py check --role core --base 83b3607a96603e7e6ba18adbd62e1d57f24ed9f8` 因 A 分支不符退出码 1；无 A 专属门禁，不绕过。实现方需在本提交基线上单独通过 core 检查。
+- 此处仅发布契约与服务编排；持久化实现与真实媒体/内网未验收。未安装依赖、未访问内网或运行 DJ。
+
 - 角色：A；master；主工作区 /Users/hw-edit/Documents/ChatGPT/search-agent；未启动并行 worktree。
 - 基线：cf17b1c5fd5e4218b9801bb82535c0b5555c6dfd；当前改动未提交。
 - 状态：READY_FOR_REVIEW（本地切片），非全规格验收通过。
