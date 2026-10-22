@@ -197,3 +197,11 @@
 - 首轮回归：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，295 项通过、退出码 0（284 基线 + 11 新增）。随后补充篡改预览拒绝用例；最终结果见下方门禁记录。覆盖重启恢复、幂等冲突、旧版本、越权、能力目录变化、绑定不匹配、共用步骤、软偏好和三态结果。
 - NOT_RUN：真实 DJ 多规则执行、真实模型理解质量评测、内网 ClickHouse/Milvus、生产账本、正式确认/清洗任务装配、业务去重计数。下一步由 cleaning 角色在新契约上实现受信算子与事实协议，再做合成素材端到端验收；不能将本预览直接当作正式 CleaningRecipe。
 - 角色门禁：`python3 tools/collab_gate.py check --role integration --base 92c1d0387477a990daa8bef76a53a91f04e09da0 --task docs/dev/tasks/intent-draft-plan.json`，范围 PASS、296 项测试 PASS、整体退出码 0（284 基线 + 12 新增）。测试输出中的 LOCAL GATE FAIL 是负向夹具预期，不是本命令失败。证据日期 2026-10-22 16:25（Asia/Shanghai）。
+
+## 通用多规则清洗执行契约（2026-10-22）
+
+- A / codex/integration / var/worktrees/integration；基线 5e1c1c0，任务卡 docs/dev/tasks/generic-cleaning-contract.json。用户选择先完成通用框架，暂无具体文字/水印检测模型或阈值决策。
+- 新增 src/dsh_retrieval/multi_rule_contracts.py、tests/test_multi_rule_contracts.py、contracts/multi-rule-cleaning.md、docs/dev/generic-cleaning-task.md；仅冻结任务/版本/代次/清单/配方绑定、受信步骤/规则和事实结果结构。
+- 3 项新增契约测试验证摘要绑定、重复/未映射/非法规则、无证据不得声称检测成功。未修改现有宽度 DJ 桥接，未新增用户可调用的执行入口。
+- 2026-10-22（Asia/Shanghai）执行 `python3 tools/collab_gate.py check --role integration --base 5e1c1c0 --task docs/dev/tasks/generic-cleaning-contract.json`：范围 PASS，299 项完整测试通过（296 基线 + 3 契约），退出码 0；测试中的 LOCAL GATE FAIL 是负向门禁夹具预期。
+- 下游 cleaning 角色将实现合成检测器通用执行器并在独立 worktree 跑角色门禁；具体检测器发布、真实 DJ 多规则、正式任务装配、公司内网仍 NOT_RUN。
