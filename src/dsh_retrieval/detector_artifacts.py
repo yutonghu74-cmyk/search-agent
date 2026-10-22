@@ -32,7 +32,8 @@ class DetectorArtifact:
 
     def __post_init__(self):
         path = PurePosixPath(self.relative_path) if isinstance(self.relative_path, str) else None
-        if (self.role not in _ROLES or path is None or path.is_absolute()
+        if (self.role not in _ROLES or path is None or not 1 <= len(self.relative_path) <= 1024
+                or "\x00" in self.relative_path or path.is_absolute()
                 or not path.parts or any(part in {"", ".", ".."} for part in path.parts)
                 or not _HASH.fullmatch(self.content_digest)):
             raise ValueError("invalid trusted detector artifact")
@@ -70,7 +71,8 @@ class DetectorArtifactManifest:
     """Verify trusted detector files against one fixed deployment directory."""
 
     def __init__(self, root, bindings):
-        if not isinstance(root, Path) or not isinstance(bindings, tuple) or not bindings:
+        if (not isinstance(root, Path) or not root.is_absolute()
+                or not isinstance(bindings, tuple) or not bindings):
             raise ValueError("trusted detector artifact manifest required")
         if not all(type(item) is DetectorArtifactBinding for item in bindings):
             raise ValueError("trusted detector artifact bindings required")
@@ -134,7 +136,14 @@ class DetectorArtifactManifest:
                     or getattr(detector, "backend_ref", None) != binding.backend_ref
                     or getattr(detector, "validator_ref", None) != binding.validator_ref
                     or getattr(detector, "evidence_ref", None) != binding.evidence_ref
-                    or getattr(detector, "artifact_binding_digest", None) != binding.binding_digest):
+                    or getattr(detector, "artifact_binding_digest", None) != binding.binding_digest
+                    or not callable(getattr(detector, "detect", None))):
                 _unavailable()
             for artifact in binding.artifacts:
                 self._require_file(artifact)
+
+    def preflight(self, detectors):
+        if type(detectors) is not dict or set(detectors) != set(self._bindings):
+            _unavailable()
+        self.require_detectors(detectors, tuple(self._bindings))
+        return self

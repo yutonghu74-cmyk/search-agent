@@ -72,3 +72,12 @@ class ReleasedDetectorRegistry:
         self.artifact_manifest.require_detectors(
             self.detectors, tuple(step.backend_ref for step in recipe.steps))
         return dict(self.detectors)
+
+    def preflight(self):
+        """Validate the complete trusted release before serving any work."""
+
+        released_backends = {binding.backend_ref for binding in self.bindings}
+        if set(self.detectors) != released_backends:
+            raise ServiceError("DETECTOR_NOT_RELEASED", "Approved detector release unavailable", 409)
+        self.artifact_manifest.preflight(self.detectors)
+        return self

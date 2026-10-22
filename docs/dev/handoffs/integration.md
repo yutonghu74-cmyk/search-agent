@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 受信检测器发布配置加载与启动预检（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/detector-release-config.json`，可信发布基线 `285e36d1e0900702f509675769f9b69130ad6148`，任务起点 `4963dd7cea4b466193eb4afe239186bd60854fec`；状态 READY_FOR_REVIEW。
+- 新增 `src/dsh_retrieval/detector_release_config.py`、`tests/test_detector_release_config.py`，扩展 `detector_artifacts.py`、`released_detectors.py`、契约和本交接。服务端以显式配置路径和独立部署根目录构造 registry；JSON 不得携带根目录，不接受请求覆盖，不动态导入、安装或下载。
+- 严格加载拒绝未知/重复字段、错误 schema、空/超限目录、重复后端/制品、绝对/越界/超长路径、非法摘要、非普通/符号链接配置及超过 1 MiB 的文件。启动预检要求配置后端、运行时检测器和已发布 DetectorBinding 的 backend 全集一致，并校验 callable、元数据、绑定摘要及全部实现/模型文件；启动后每次未完成执行仍沿用原制品复核。
+- 定向命令 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_detector_release_config tests.test_detector_artifacts tests.test_released_detectors tests.test_multi_rule_pipeline -q`：27 项通过、退出码 0。完整命令 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：377 项通过、退出码 0（370 基线 + 7 新增）。`python3 tools/collab_gate.py check --role integration --base 285e36d1e0900702f509675769f9b69130ad6148 --task docs/dev/tasks/detector-release-config.json`：SCOPE PASS、377 项通过、LOCAL GATE PASS、退出码 0；输出中的 LOCAL GATE FAIL 来自既有负例夹具，不是本次门禁失败。
+- 边界：仅本地合成 JSON、实现字节、模型字节和检测器；没有真实模型注册/推理、真实 DJ、内网、安装、下载或推送。启动预检证明配置和本地制品一致，不证明模型质量、许可证、性能、资源策略或生产可用性；未新增 HTTP/CLI 入口。
+
 ## 检测器实现与模型制品 SHA-256 绑定（2026-10-22）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/detector-artifact-binding.json`，可信发布基线 `3ca43f8754ecf718c978706c652f12466c5d4ca1`，任务起点 `aa950bc2cd5022637c3beda03066ff5c02c0c907`；状态 READY_FOR_REVIEW。
