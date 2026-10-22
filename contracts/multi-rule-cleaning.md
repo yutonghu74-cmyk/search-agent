@@ -17,3 +17,5 @@
 `CleaningApprovalProposal` 冻结正式任务的 tenant/owner/project/task、revision/generation、批准前 `expected_task_version`、确认需求摘要、已发布候选清单引用与其素材身份/内容哈希、不可变配方。`proposal_digest` 覆盖这些字段；用户确认必须回传此摘要与期望任务版本，换清单、换规则、换版本都不得复用原批准。业务账本原子批准后生成 `CleaningApproval`，其 `task_version` 必须恰为批准前版本 +1；`approval.job` 才可构造执行器输入。数据类本身不代表授权或持久批准，不能接受普通用户/模型自行构造的对象作为凭据。
 
 `src/dsh_retrieval/adapters/cleaning/` 已有受控通用调度：每项候选一次授权读取/哈希校验，相同步骤只执行一次，结果绑定原作业的 operation/revision/generation/recipe/input 哈希；返回前再次检查当前授权和版本，发布时仍需业务账本原子栅栏。当前配方仅支持独立步骤、`eq` 硬规则；规格书要求的显式步骤依赖/资源上限/失败处理版本化仍待补齐，不能静默运行依赖链。测试检测器仅提供合成事实，标 SIMULATED。真实 DJ 仍只有旧的宽度规则独立桥接，不能将本框架标作多规则真实 DJ 联测。
+
+`CleaningJobResult` 是唯一共享的逐素材多规则输出契约。它保留完整 `CleaningBinding`、候选身份、整体三态及每条硬规则的三态/原因/证据引用。`require_complete_cleaning_result` 要求绑定与已批准作业完全相同，候选和规则的数量、身份及顺序完全匹配；缺失、多余、换序、伪造绑定或错误总结均拒绝。`result_digest` 是稳定内容摘要，不是授权凭据。该数据类不做当前权限检查、不持久化、不计算有效数量；受信业务账本必须在同一发布事务中重新校验 task/revision/generation/operation/权限及输入清单。

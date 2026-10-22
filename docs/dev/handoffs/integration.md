@@ -1,5 +1,12 @@
 # A 总控集成交接
 
+## 逐素材多规则清洗结果契约（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/cleaning-result-contract.json`，受信执行基线 `e7ca2224a00ed4b32416677ce3ae70b3fd72d667`；状态 READY_FOR_REVIEW。
+- 修改 `multi_rule_contracts.py`、`test_multi_rule_contracts.py`、`contracts/multi-rule-cleaning.md` 及本交接。新增共享 `CleaningRuleVerdict`/`CleaningCandidateVerdict`/`CleaningJobResult` 和 `require_complete_cleaning_result`，绑定已批准 operation/task version/revision/generation/清单/配方，要求候选与规则完整、唯一、顺序一致，三态汇总及证据语义一致。
+- 定向契约测试 8 项通过（原 5 + 新增 3）；完整回归 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 退出码 0，333 项通过。`python3 tools/collab_gate.py check --role integration --base e7ca2224a00ed4b32416677ce3ae70b3fd72d667 --task docs/dev/tasks/cleaning-result-contract.json` 退出码 0，SCOPE PASS / LOCAL GATE PASS / 333 项回归通过。输出中 `LOCAL GATE FAIL` 来自已有门禁负例夹具，不是本次回归失败。
+- 契约本身不代表当前授权、不持久化、不计算 accepted_count 或触发补数。NOT_RUN：真实 DJ 多规则、生产账本、ClickHouse/Milvus/W3、质量与性能评测。下游 cleaning 需迁移执行器输出，core 需做发布时原子 fencing 与幂等持久化。
+
 ## 开放需求理解审阅层（2026-10-22）
 
 - A / codex/integration / var/worktrees/integration；基线 49d2f9c20420cca4f8ee8a256ec3b11a77628f61；任务卡 docs/dev/intent-review-task.md，契约 contracts/intent-review.md。范围不涉及角色私有目录或旧草稿 schema 变更。

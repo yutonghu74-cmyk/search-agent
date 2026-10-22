@@ -230,6 +230,99 @@ class DetectionResult:
             raise ValueError("invalid detector result")
 
 
+@dataclass(frozen=True, slots=True)
+class CleaningRuleVerdict:
+    rule_id: str
+    verdict: str
+    reason_code: str
+    evidence_ref: str | None
+
+    def __post_init__(self):
+        if (not _name(self.rule_id) or self.verdict not in {"pass", "fail", "unknown"}
+                or not _name(self.reason_code)
+                or (self.verdict == "unknown" and self.evidence_ref is not None)
+                or (self.verdict != "unknown" and not _name(self.evidence_ref))):
+            raise ValueError("invalid cleaning rule verdict")
+
+
+@dataclass(frozen=True, slots=True)
+class CleaningCandidateVerdict:
+    candidate_id: str
+    asset_version: str
+    verdict: str
+    rules: tuple[CleaningRuleVerdict, ...]
+
+    def __post_init__(self):
+        if (not _name(self.candidate_id) or not _name(self.asset_version)
+                or self.verdict not in {"pass", "fail", "unknown"}
+                or not isinstance(self.rules, tuple) or not self.rules
+                or not all(type(rule) is CleaningRuleVerdict for rule in self.rules)
+                or len({rule.rule_id for rule in self.rules}) != len(self.rules)):
+            raise ValueError("invalid cleaning candidate verdict")
+        expected = ("fail" if any(rule.verdict == "fail" for rule in self.rules)
+                    else "unknown" if any(rule.verdict == "unknown" for rule in self.rules)
+                    else "pass")
+        if self.verdict != expected:
+            raise ValueError("candidate verdict does not match rule verdicts")
+
+
+@dataclass(frozen=True, slots=True)
+class CleaningJobResult:
+    binding: CleaningBinding
+    candidates: tuple[CleaningCandidateVerdict, ...]
+
+    def __post_init__(self):
+        if (type(self.binding) is not CleaningBinding
+                or not isinstance(self.candidates, tuple) or not self.candidates
+                or not all(type(candidate) is CleaningCandidateVerdict for candidate in self.candidates)
+                or len({candidate.candidate_id for candidate in self.candidates}) != len(self.candidates)):
+            raise ValueError("invalid cleaning job result")
+
+    @property
+    def result_digest(self):
+        binding = self.binding
+        return digest({"schema_version": "multi-rule-cleaning-result@1",
+                       "binding": {"tenant_id": binding.tenant_id,
+                                   "owner_user_id": binding.owner_user_id,
+                                   "project_id": binding.project_id,
+                                   "task_id": binding.task_id,
+                                   "revision": binding.revision,
+                                   "generation": binding.generation,
+                                   "task_version": binding.task_version,
+                                   "operation_id": binding.operation_id,
+                                   "input_manifest_digest": binding.input_manifest_digest,
+                                   "recipe_digest": binding.recipe_digest},
+                       "candidates": [{"candidate_id": candidate.candidate_id,
+                                       "asset_version": candidate.asset_version,
+                                       "verdict": candidate.verdict,
+                                       "rules": [{"rule_id": rule.rule_id,
+                                                  "verdict": rule.verdict,
+                                                  "reason_code": rule.reason_code,
+                                                  "evidence_ref": rule.evidence_ref}
+                                                 for rule in candidate.rules]}
+                                      for candidate in self.candidates]})
+
+
+def require_complete_cleaning_result(job, result):
+    """Reject any worker output that is not an exact result for ``job``."""
+
+    if type(job) is not ApprovedCleaningJob or type(result) is not CleaningJobResult:
+        raise TypeError("approved job and cleaning result required")
+    if result.binding != job.binding:
+        raise ValueError("cleaning result binding mismatch")
+    expected_rules = tuple(rule.rule_id for rule in job.recipe.rules)
+    expected_candidates = tuple((candidate.candidate_id, candidate.asset_version)
+                                for candidate in job.candidates)
+    actual_candidates = tuple((candidate.candidate_id, candidate.asset_version)
+                              for candidate in result.candidates)
+    if actual_candidates != expected_candidates:
+        raise ValueError("cleaning result candidates are incomplete or reordered")
+    if any(tuple(rule.rule_id for rule in candidate.rules) != expected_rules
+           for candidate in result.candidates):
+        raise ValueError("cleaning result rules are incomplete or reordered")
+    return result
+
+
 def bytes_digest(content):
     if not isinstance(content, bytes):
         raise TypeError("detector input must be bytes")

@@ -3,8 +3,9 @@ import unittest
 
 from dsh_retrieval.multi_rule_contracts import (
     ApprovedCleaningJob, CleaningApproval, CleaningApprovalProposal, CleaningBinding,
-    CleaningCandidateRef, CleaningRecipe,
-    CleaningRule, DetectionResult, DetectionStep, bytes_digest,
+    CleaningCandidateRef, CleaningCandidateVerdict, CleaningJobResult, CleaningRecipe,
+    CleaningRule, CleaningRuleVerdict, DetectionResult, DetectionStep, bytes_digest,
+    require_complete_cleaning_result,
 )
 from dsh_retrieval.query_spec import digest
 
@@ -82,6 +83,47 @@ class MultiRuleContractTest(unittest.TestCase):
             replace(proposal, manifest_ref="../../media")
         with self.assertRaises(ValueError):
             CleaningApproval(proposal, "operation_1", 3)
+
+    def result(self):
+        return CleaningJobResult(self.binding, (
+            CleaningCandidateVerdict("c1", "v1", "pass", (
+                CleaningRuleVerdict("r1", "pass", "MATCH", "evidence.1"),
+                CleaningRuleVerdict("r2", "pass", "MATCH", "evidence.1"))),
+            CleaningCandidateVerdict("c2", "v1", "unknown", (
+                CleaningRuleVerdict("r1", "pass", "MATCH", "evidence.2"),
+                CleaningRuleVerdict("r2", "unknown", "FACT_UNAVAILABLE", None))),
+        ))
+
+    def test_complete_result_is_bound_and_digest_is_stable(self):
+        job = ApprovedCleaningJob(self.binding, self.recipe, self.candidates)
+        result = self.result()
+        self.assertIs(require_complete_cleaning_result(job, result), result)
+        self.assertEqual(result.result_digest, self.result().result_digest)
+        self.assertTrue(result.result_digest.startswith("sha256:"))
+
+    def test_result_rejects_wrong_summary_evidence_and_duplicates(self):
+        result = self.result()
+        with self.assertRaises(ValueError):
+            replace(result.candidates[1], verdict="pass")
+        with self.assertRaises(ValueError):
+            replace(result.candidates[0].rules[0], verdict="unknown")
+        with self.assertRaises(ValueError):
+            replace(result.candidates[0].rules[0], evidence_ref=None)
+        with self.assertRaises(ValueError):
+            replace(result, candidates=(result.candidates[0], result.candidates[0]))
+
+    def test_complete_result_rejects_binding_candidates_and_rules(self):
+        job = ApprovedCleaningJob(self.binding, self.recipe, self.candidates)
+        result = self.result()
+        for changed in (
+            replace(result, binding=replace(self.binding, generation=2)),
+            replace(result, candidates=result.candidates[:1]),
+            replace(result, candidates=tuple(reversed(result.candidates))),
+            replace(result, candidates=(replace(result.candidates[0],
+                rules=tuple(reversed(result.candidates[0].rules))), result.candidates[1])),
+        ):
+            with self.assertRaises(ValueError):
+                require_complete_cleaning_result(job, changed)
 
 
 if __name__ == "__main__":
