@@ -1,0 +1,12 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "6cc72f3278a76b1245084b5b6368b9dd4adfdde9",
+  "files": [
+    "src/dsh_retrieval/multi_rule_pipeline.py",
+    "tests/test_multi_rule_pipeline.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "正式多规则流水线取得当前批准后，在读取素材、调用检测器、复用已保存但尚未形成预览的结果之前，必须要求作业含 detector_release_digest 且与服务端注入的 ReleasedDetectorRegistry.release_digest 完全一致；旧批准、换能力目录、换实现或模型制品清单均以 DETECTOR_NOT_RELEASED 失败关闭且不读取素材、不运行检测器、不发布预览。摘要相等后仍执行既有配方能力核对和制品逐文件复核，不能用摘要比较替代完整预检；已原子发布的历史预览仍按既有当前权限/任务栅栏读取，不因服务当前发布变化改写历史。覆盖正常执行、发布漂移、旧批准、已保存结果续发及完整已发布预览重放。仅运行定向测试和交付必需的 integration 门禁，不额外重复完整回归；不运行真实 DJ、不注册真实模型、不访问内网。"
+}
