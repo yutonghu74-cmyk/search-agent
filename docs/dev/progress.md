@@ -4,15 +4,15 @@
 
 ## 当前快照
 
-- 更新时间：2026-10-23 00:43 CST（Asia/Shanghai）
+- 更新时间：2026-10-23 00:50 CST（Asia/Shanghai）
 - 总控角色 / 分支：A integration / `codex/integration`
-- 当前发布基线：`b3b13c6`（独立草稿会话 core 持久事务）
-- 当前规范任务：`docs/dev/tasks/conversation-history-ui.json`
-- 总体状态：ACCEPTED（独立草稿会话账本：契约、持久事务、HTTP/UI 本地体验）；不代表 v1.9 完整产品验收。
+- 当前发布基线：`3967615`（草稿会话历史本地体验已验收）
+- 当前规范任务：`docs/dev/tasks/task-progress-ui.json`
+- 总体状态：IN_PROGRESS（只读五节点进度快照与页面）；不代表 v1.9 完整产品验收。
 - 已完成：受信检测器发布配置加载、启动预检、制品与模型摘要、脱敏证据；清洗批准已绑定 `detector_release_digest`，core 账本持久化并兼容旧记录；运行时发布漂移会在素材读取前失败关闭。
-- 正在进行：本地 8080 服务已更新；浏览器已验证旧正式历史保留、新草稿会话出现、确认后关联 revision 1、打开会话显示原始输入与正式任务跳转。
+- 正在进行：冻结只读五节点进度投影，只展示当前 task/revision/generation 能证明的状态；未知业务计数保持 null。
 - 当前阻塞：无。
-- 下一步：继续按计划完善结果/进度体验；会话附件、assistant 消息和保留/删除策略仍需后续任务。
+- 下一步：完成进度模型、HTTP/UI 与定向测试，再运行 integration 门禁和本地浏览器验证。
 - 本轮验证：HTTP/UI/core 定向 11 项 PASS，JavaScript 语法 PASS；integration 门禁 SCOPE PASS、420 项 PASS、LOCAL GATE PASS；浏览器本地合成会话/确认关联 PASS。未在门禁外重复完整回归。
 - 本轮验证：`tests.test_conversation_contracts` 5 项 PASS；integration 门禁 SCOPE PASS、415 项 PASS、LOCAL GATE PASS。未在门禁外重复完整回归。
 - 最近验证：历史 HTTP/UI/core 定向 10 项和 JavaScript 语法检查通过；integration 门禁 SCOPE PASS、完整 410 项通过、LOCAL GATE PASS；浏览器显示 2 条 SQLite 历史任务并成功打开 revision 1 任务继续反馈。完整 `conversation_message` 草稿历史、真实 W3/内网 NOT_RUN。

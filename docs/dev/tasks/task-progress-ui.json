@@ -1,0 +1,18 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "3967615f90e884edebda3512733e1d5a4aaf31dc",
+  "files": [
+    "src/dsh_retrieval/progress_models.py",
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "tests/test_progress_models.py",
+    "tests/test_api.py",
+    "tests/test_chat_ui.py",
+    "contracts/task-progress.md",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "新增只读五节点进度快照及 GET /v1/retrieval/tasks/{task_id}/progress。快照绑定 task/revision/generation/task_version，固定 expansion/retrieval/cleaning/refill/packaging 五节点，区分 node_status 与 gate_status，并从已确认 node_modes 显示 manual/auto。只投影现有权威 run_status/stage 能证明的状态；目标数量可显示，accepted/pending_review/gap 无权威结果时必须为 null，不计算虚假百分比。Chat 正式任务详情展示五节点、当前阶段和明确的未知计数说明。定向测试、JavaScript 语法检查及 integration 门禁通过；不修改任务、不派发作业、不访问内网或真实数据。"
+}
