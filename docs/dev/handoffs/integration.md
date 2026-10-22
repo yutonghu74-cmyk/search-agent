@@ -57,3 +57,12 @@
 - 用户已确认本地提交与审查后合并；不推送、不部署、不访问内网。上述“未获提交授权”为历史状态。
 - A 重新审查公共契约、调用边界和测试，并在独立 integration 工作区重跑完整 103 项测试，退出码 0。只读审查 retrieval 适配切片，其原基线角色检查通过、104 项测试通过；下一步同步本契约基线后再验证组合。
 - 本提交发布契约级开发基线。纯校验器、协议定义可用于后续开发；原子确认/任务事务/真实连接器尚未实现。A 无专属角色检查器的限制保持，不把完整回归冒充角色门禁。
+
+## 检索模拟适配合入主分支（2026-10-22 10:14，Asia/Shanghai）
+
+- 公共契约提交 4d666cd57907cc0e4abfa4e914e575469208b5b4 已快进合入 master，主工作区随后 103 项回归 PASS。
+- retrieval 同步该契约基线，新增两项实际适配输出与公共校验器的组合用例。`python3 tools/collab_gate.py check --role retrieval --base 4d666cd57907cc0e4abfa4e914e575469208b5b4`：退出码 0，角色范围及 123 项测试 PASS。
+- A 审查模拟适配代码及其验证边界后，提交 734efc3 已快进合入 master。合并后在主工作区执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，退出码 0，123 项通过（86 基线 + 17 契约 + 18 适配 + 2 组合）。git 暂存 diff 空白检查通过，未改检查器或测试发现规则。
+- 验收状态：ACCEPTED，仅公共契约/模拟适配开发切片。正式业务确认与检索计划持久化、候选发布/清洗装配、真实 ClickHouse/Milvus 全部未验收；P01 仍未完成。上文“待本地提交/基线未发布”记录已由此更新。
+- 证据路径：tests/test_retrieval_contracts.py、tests/retrieval/test_simulated.py、docs/dev/handoffs/retrieval.md；本节记录实际执行结果，非真实 DJ 或内网联测。未推送、部署、安装依赖或接内网。
+- 下一步：core 在本次集成基线上实现与任务共事务的检索计划账本，验收幂等确认、页预约/回传栅栏和重启恢复；A 再装配到业务流程。需要新任务卡及独立 core worktree，不能把模拟夹具当作已批准业务计划。
