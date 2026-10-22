@@ -309,3 +309,13 @@
 - 规则：活跃开发最长 30 分钟更新；开工、里程碑、阻塞/恢复、交付立即更新；短任务至少开工和交付。记录真实命令/结果和 NOT_RUN，无变化写原因，不把计划或模拟写成完成。
 - 22:16 CST 里程碑：`python3 -m json.tool docs/dev/tasks/development-progress-reporting.json`、引用路径存在性检查及 `git diff --check` 均通过；integration 角色门禁待运行。纯文档规范变更，按 AGENTS 文档豁免不单独运行代码测试或完整回归。
 - 22:17 CST 交付：`python3 tools/collab_gate.py check --role integration --base 89ee3dc777fac183badd2bf9234d9e80a3298959 --task docs/dev/tasks/development-progress-reporting-v2.json` 退出码 0，SCOPE PASS、内部 387 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。状态 READY_FOR_REVIEW；没有额外重复完整回归。
+
+## 受信检测器发布到清洗批准的唯一准备入口（2026-10-22）
+
+- 22:32 CST 开工；A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；发布基线 `1606e5812910a3b19d9b8f17e4b95556f86f5031`，任务卡 `docs/dev/tasks/released-cleaning-approval-entry.json`；状态 IN_PROGRESS。
+- 缺口：core 底层端口已要求 `detector_release_digest`，但尚无统一装配入口阻止受信层误传任意格式正确的摘要。本轮在 `multi_rule_pipeline.py` 增加入口，只从预检后的 registry 取摘要，再调用 core。
+- 当前修改：入口先执行完整 registry 预检与配方复核；无效 registry、制品漂移、能力不匹配不得触达账本。测试、完整回归和门禁尚未运行，状态 NOT_RUN。
+- 22:33 CST 里程碑：`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_rule_pipeline -q` 退出码 0，15 项通过；`git diff --check` 通过。覆盖 registry 摘要写入、调用方摘要参数拒绝、不受信对象、制品漂移和能力缺失均不触达账本；完整回归与门禁待运行。
+- 完整回归：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 退出码 0，391 项通过；输出中的 LOCAL GATE FAIL 是既有负例夹具。integration 门禁待运行。
+- 22:33 CST 交付：`python3 tools/collab_gate.py check --role integration --base 1606e5812910a3b19d9b8f17e4b95556f86f5031 --task docs/dev/tasks/released-cleaning-approval-entry.json` 退出码 0，SCOPE PASS、内部 391 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。状态 READY_FOR_REVIEW。
+- NOT_RUN：真实 DJ、真实检测器/模型、生产配置发布与回滚、ClickHouse/Milvus/W3、内网数据；入口只证明受信身份来源和失败关闭，不证明检测效果或完整产品装配。

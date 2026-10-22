@@ -17,7 +17,7 @@ from dsh_retrieval.intent_review import Capability
 from dsh_retrieval.multi_rule_contracts import (
     CleaningCandidateVerdict, CleaningJobResult, CleaningRuleVerdict, DetectionResult,
 )
-from dsh_retrieval.multi_rule_pipeline import run_approved_multi_rule
+from dsh_retrieval.multi_rule_pipeline import prepare_released_multi_rule, run_approved_multi_rule
 from dsh_retrieval.released_detectors import ReleasedDetectorRegistry
 
 
@@ -92,8 +92,9 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.registry = ReleasedDetectorRegistry(self.capabilities, self.bindings,
             {self.detector.backend_ref: self.detector}, self.artifact_manifest)
         self.f.recipe = replace(self.f.recipe, registry_digest=self.registry.registry_digest)
-        self.f.release_digest = self.registry.release_digest
-        self.f.proposal = self.f.prepare()
+        self.f.proposal = prepare_released_multi_rule(
+            self.f.repo, self.actor, self.task_id, self.f.manifest.manifest_ref,
+            self.f.recipe, registry=self.registry)
         self.approval, _ = self.f.confirm()
         self.repo = self.f.reopen()
         self.operation_id = self.approval.operation_id
@@ -124,6 +125,40 @@ class MultiRulePipelineTests(unittest.TestCase):
         with self.assertRaises(ServiceError) as caught:
             action()
         self.assertEqual(caught.exception.code, code)
+
+    def test_prepare_entry_uses_only_registry_release_identity(self):
+        self.assertEqual(self.approval.proposal.detector_release_digest,
+                         self.registry.release_digest)
+        with self.assertRaises(TypeError):
+            prepare_released_multi_rule(
+                self.f.repo, self.actor, self.task_id, self.f.manifest.manifest_ref,
+                self.f.recipe, registry=self.registry,
+                detector_release_digest="sha256:" + "0" * 64)
+
+    def test_prepare_entry_rejects_untrusted_registry_before_ledger(self):
+        with patch.object(self.f.repo, "prepare") as prepare:
+            with self.assertRaisesRegex(ValueError, "trusted released"):
+                prepare_released_multi_rule(
+                    self.f.repo, self.actor, self.task_id, self.f.manifest.manifest_ref,
+                    self.f.recipe, registry=object())
+            prepare.assert_not_called()
+
+    def test_prepare_entry_revalidates_release_before_ledger(self):
+        self.model_path.write_bytes(b"changed model weights")
+        with patch.object(self.f.repo, "prepare") as prepare:
+            self.assert_code("DETECTOR_NOT_RELEASED", lambda: prepare_released_multi_rule(
+                self.f.repo, self.actor, self.task_id, self.f.manifest.manifest_ref,
+                self.f.recipe, registry=self.registry))
+            prepare.assert_not_called()
+
+    def test_prepare_entry_rejects_recipe_capability_mismatch_before_ledger(self):
+        registry = ReleasedDetectorRegistry(self.capabilities[:1], self.bindings,
+            {self.detector.backend_ref: self.detector}, self.artifact_manifest)
+        with patch.object(self.f.repo, "prepare") as prepare:
+            self.assert_code("DETECTOR_NOT_RELEASED", lambda: prepare_released_multi_rule(
+                self.f.repo, self.actor, self.task_id, self.f.manifest.manifest_ref,
+                self.f.recipe, registry=registry))
+            prepare.assert_not_called()
 
     def test_approved_job_executes_persists_and_replays_without_rerun(self):
         view, replayed = self.run_pipeline()

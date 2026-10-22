@@ -10,6 +10,17 @@ from .multi_rule_contracts import require_released_cleaning_job
 from .released_detectors import ReleasedDetectorRegistry
 
 
+def prepare_released_multi_rule(repo, actor, task_id, manifest_ref, recipe, *, registry):
+    """Prepare an approval proposal from one server-owned detector release."""
+
+    if type(registry) is not ReleasedDetectorRegistry:
+        raise ValueError("trusted released detector registry required")
+    registry.preflight()
+    registry.require_recipe(recipe)
+    return repo.prepare(actor, task_id, manifest_ref, recipe,
+                        detector_release_digest=registry.release_digest)
+
+
 def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, registry):
     """Return (current preview view, replayed) for an approved operation.
 
