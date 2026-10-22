@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 已批准多规则作业的本地串联（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/multi-rule-pipeline.json`，发布基线 `8bb0f576d0676ed26d35e6e403ef25e5fbb59e81`；状态 READY_FOR_REVIEW。
+- 新增 `src/dsh_retrieval/multi_rule_pipeline.py`、`tests/test_multi_rule_pipeline.py` 与本交接。入口只按 operation_id 从受信账本读取当前批准作业，使用现有 `ApprovedManifestAccess`、`GenericCleaningExecutor`、`publish_result` 与 `publish_preview`；不接受客户端自建作业或媒体路径。
+- 幂等恢复：完整预览已发布时重新鉴权返回当前预览；逐素材结果已落账但预览尚未发布时直接续发，不再读取媒体或重跑检测。执行中撤权、旧 generation、缺登记检测器均失败关闭；结果/预览的原子性分别由 core 账本保证，跨两次事务的中断通过重试恢复。
+- 验收：`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_rule_pipeline -q` 7 项通过；完整 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 357 项通过。`python3 tools/collab_gate.py check --role integration --base 8bb0f576d0676ed26d35e6e403ef25e5fbb59e81 --task docs/dev/tasks/multi-rule-pipeline.json` 退出码 0，SCOPE PASS / LOCAL GATE PASS，357 项通过；输出中的 LOCAL GATE FAIL 是已有门禁负例。仅合成字节和合成检测器，SIMULATED。
+- 边界：同步本地装配示例，尚无队列派发、租约/超时/重试预算或真实检测器注册；不运行真实 DJ、多规则质量评测、内网服务、补数或最终 delivery。任务预览不等于 v1.9 完整交付。
+
 ## input_only 精确结果预览契约（2026-10-22）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/exact-result-set-contract.json`，发布基线 `990cb523e93ce7500c604554d405d92003203d25`；状态 READY_FOR_REVIEW。
