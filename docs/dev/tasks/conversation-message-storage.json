@@ -1,0 +1,13 @@
+{
+  "role": "core",
+  "branch": "codex/task-core",
+  "source_base": "341908240c9b5a883646947cd221ac84dae2e0b0",
+  "files": [
+    "src/dsh_retrieval/service.py",
+    "src/dsh_retrieval/adapters/memory.py",
+    "src/dsh_retrieval/adapters/task_storage/sqlite.py",
+    "tests/core/test_conversation_storage.py",
+    "docs/dev/handoffs/core.md"
+  ],
+  "acceptance": "TaskService 为新需求草稿创建稳定 conversation_id，并把初始需求/后续反馈作为 ConversationMessage 传给仓库。内存与 SQLite 仓库在同一事务保存 draft+message、确认时保存独立 ConversationConfirmation，幂等重放不重复消息或确认关联；按创建人、租户和当前项目授权读取/列举会话。SQLite 新进程恢复消息与关联，旧快照缺少 conversation 容器及 Task/Draft conversation_id 时兼容迁移且不改旧正式任务语义。定向 core 测试与 core 门禁通过；不新增 HTTP/UI、不访问内网或真实业务数据。"
+}
