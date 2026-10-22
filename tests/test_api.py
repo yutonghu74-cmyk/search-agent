@@ -73,6 +73,9 @@ class ApiTest(unittest.TestCase):
             "proposal_digest": feedback["proposal_digest"],
             "expected_task_version": feedback["base_task_version"], "action": "confirm"})
         self.assertEqual((status, result["task"]["confirmed_revision"]), (202, 2))
+        status, history, _ = self.request("/v1/retrieval/projects/demo/tasks")
+        self.assertEqual(history["items"][0]["task_id"], task["task_id"])
+        self.assertIn("再去掉文字", history["items"][0]["raw_request"])
         status, revisions, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/revisions")
         self.assertEqual([item["revision"] for item in revisions["items"]], [1, 2])
 
@@ -81,6 +84,10 @@ class ApiTest(unittest.TestCase):
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
         status, body, _ = self.request("/v1/retrieval/tasks/missing/feedback", body={})
         self.assertEqual((status, body["code"]), (400, "IDEMPOTENCY_KEY_REQUIRED"))
+
+    def test_project_history_requires_identity(self):
+        status, body, _ = self.request("/v1/retrieval/projects/demo/tasks", identity=False)
+        self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
 
 
 if __name__ == "__main__":

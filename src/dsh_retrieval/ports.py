@@ -177,6 +177,10 @@ class TaskRepository(Protocol):
 
     def list_revisions(self, actor: Actor, task_id: str) -> tuple[dict[str, Any], ...]: ...
 
+    def list_tasks(self, actor: Actor, project_id: str) -> tuple[Task, ...]:
+        """List at most 100 caller-owned confirmed tasks for one project."""
+        ...
+
 
 class ProjectContextProvider(Protocol):
     def require_access(self, actor: Actor, project_id: str, dimension_id: str, action: str) -> None: ...

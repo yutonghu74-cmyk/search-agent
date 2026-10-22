@@ -32,6 +32,8 @@
 
 `GET /v1/retrieval/tasks/{task_id}` 同时返回当前 `confirmed_revision`、`pending_draft` 和 `task_version`；`GET /v1/retrieval/tasks/{task_id}/revisions` 返回创建人可读的不可变版本历史。所有读写都重新校验任务所有权和项目权限。
 
+本地体验使用 `GET /v1/retrieval/projects/{project_id}/tasks` 列出当前创建人在该项目内、当前仍有权读取的最多 100 个正式任务。它用于“历史需求”入口，并通过 revisions 展示从方案确认开始的正式历史；确认前逐句草稿属于独立 conversation_message 范畴，当前切片不返回，页面不得把正式版本列表称为完整聊天记录。
+
 ## 本地体验边界
 
 - 身份头和 demo 项目授权只供 loopback 本地开发，不可暴露到网络。

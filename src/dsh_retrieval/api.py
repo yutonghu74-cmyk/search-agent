@@ -22,6 +22,7 @@ DRAFT_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/drafts(?:/([^/]+))?$")
 FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$")
 CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
 REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
+PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -123,9 +124,10 @@ class Handler(BaseHTTPRequestHandler):
         draft_match = DRAFT_PATH.fullmatch(self.path)
         feedback_match = FEEDBACK_PATH.fullmatch(self.path)
         revisions_match = REVISIONS_PATH.fullmatch(self.path)
+        project_tasks_match = PROJECT_TASKS_PATH.fullmatch(self.path)
         if (match is None and not (draft_match and draft_match.group(2))
                 and not (feedback_match and feedback_match.group(2))
-                and revisions_match is None):
+                and revisions_match is None and project_tasks_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
@@ -138,6 +140,9 @@ class Handler(BaseHTTPRequestHandler):
             if revisions_match:
                 return HTTPStatus.OK, {"items": list(self.service.list_revisions(
                     self._actor(), revisions_match.group(1)))}, False
+            if project_tasks_match:
+                return HTTPStatus.OK, {"items": list(self.service.list_tasks(
+                    self._actor(), project_tasks_match.group(1)))}, False
             return HTTPStatus.OK, self.service.get_task(self._actor(), match.group(1)), False
 
         self._run(action)

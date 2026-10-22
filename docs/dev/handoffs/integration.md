@@ -334,3 +334,10 @@
 - 23:13 交付验证：完整回归 405 项通过；`python3 tools/collab_gate.py check --role integration --base e3ad25881bd7b464dfb7aaa019139c6cdf023019 --task docs/dev/tasks/chat-feedback-local-ui.json` 为 SCOPE PASS、内部 405 项通过、LOCAL GATE PASS。输出中的 `LOCAL GATE FAIL` 为既有负向门禁夹具。
 - 未验证：浏览器人工冒烟将在合并并启动后执行；真实检索、DJ、W3、模型语义编译和内网均 NOT_RUN。本地 SQLite 不是生产存储。
 - 23:20 浏览器冒烟：确认卡创建 task revision 1；反馈确认发布 revision 2 / generation 2；刷新后从 SQLite 恢复同一任务。发现恢复页缺少新建入口并补充“新建另一单”；补充后 UI/API 定向 5 项通过。最终 integration 门禁 SCOPE PASS、内部 405 项通过、LOCAL GATE PASS。
+# Chat 历史需求侧栏（2026-10-22）
+
+- 角色：A integration；分支 `codex/integration`；基线 `43b07f7`；任务卡 `docs/dev/tasks/chat-history-local-ui.json`；23:35 开工。
+- 范围：项目历史任务 GET、Chat 侧栏、正式 revision 展示与任务切换；明确不包含确认前逐句 conversation_message 草稿历史。
+- 23:42 里程碑：项目任务列表路由、历史侧栏、正式 revision 展示、任务切换/恢复和空/失败状态已完成；HTTP/UI/core 定向 10 项及 JavaScript 语法检查通过。
+- 23:45 交付：`python3 tools/collab_gate.py check --role integration --base 43b07f7ba3254b3f2cb4a7e1a2df2d9781d787cd --task docs/dev/tasks/chat-history-local-ui.json` 为 SCOPE PASS、完整 410 项通过、LOCAL GATE PASS；输出中的 `LOCAL GATE FAIL` 是既有负向门禁夹具。
+- 未验证：浏览器侧栏冒烟待合并重启后执行；真实 W3/内网、真实检索/DJ 和完整 conversation_message 草稿历史 NOT_RUN。
