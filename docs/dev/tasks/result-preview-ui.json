@@ -1,0 +1,18 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "4aa8ba9f3b3a7286e474d4fca301773d61e1fb2d",
+  "files": [
+    "src/dsh_retrieval/result_views.py",
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "tests/test_result_views.py",
+    "tests/test_api.py",
+    "tests/test_chat_ui.py",
+    "contracts/result-view.md",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "新增只读 GET /v1/retrieval/tasks/{task_id}/results，绑定当前 task/revision/generation/task_version 和不可变 result_set_id/result_set_digest。无已发布权威结果集时返回 available=false、统计为 null、空 items，不将 PLANNING 或原始召回冒充结果。存在当前结果集时支持 accepted/reserve 独立稳定分页；游标绑定结果摘要、视图和偏移，变更或跨视图游标拒绝。输出仅含逻辑素材标识、版本及 preview_status=unavailable，不暴露路径或私有地址；页面展示真实统计、结果状态和空态说明。旧 generation、旧 task_version、撤权和存储错误不得降级为空结果。定向测试、JavaScript 语法检查及 integration 门禁通过；不修改任务、不派发作业、不访问内网或真实数据。"
+}
