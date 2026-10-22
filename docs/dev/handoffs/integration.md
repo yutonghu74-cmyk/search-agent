@@ -2,6 +2,8 @@
 
 ## 持久清单真实 DJ 合成联测（2026-10-22 12:32，Asia/Shanghai）
 
+- 集成结果：4f8e732a18de34d963c5b9fb73823e9173ed34b6 已快进合入主分支；主工作区完整 unittest 回归 224 项通过、退出码 0。本节的真实运行在独立 integration workspace 执行；主分支没有重复启动 DJ。
+
 - A / codex/integration / var/worktrees/integration；基线 084c65b80d8cae52fc096604b4adf3bfb3724a36；范围/验收见 docs/dev/manifest-real-smoke-task.md。新增可重复真实 smoke 入口和两项安全入口测试；DJ 子进程显式独立 DSH_HOME。
 - 实际命令：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 tools/manifest_cleaning_smoke.py --run-real --dj-python /Users/hw-edit/Documents/ChatGPT/search-agent/var/dj-runtime/bin/python --dj-source /Users/hw-edit/Documents/ChatGPT/search-agent/data-juicer-codex-dj-plan-explorer`。只读使用已有解释器/源码，无安装；运行、缓存、DSH_HOME 独立，不共享 DJ 可变 workspace。
 - 首次失败：macOS 默认临时路径导致 DJ multiprocessing `OSError: AF_UNIX path too long`；证据 `/var/folders/sn/hl5d_x_d6f951djxc0rdlx800000gn/T/dsm-r9kzt618/manifest-cleaning-report.json`，stderr 位于该目录 `.dj/tasks/task_07a909a575f3/runs/run_r001/logs/stderr.log`。改 smoke 使用唯一 /tmp 短路径，未改 vendored DJ。
