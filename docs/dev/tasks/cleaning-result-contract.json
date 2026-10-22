@@ -1,0 +1,12 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "84d407bebd9e46c14f411c13a86c097bbf887c50",
+  "files": [
+    "src/dsh_retrieval/multi_rule_contracts.py",
+    "tests/test_multi_rule_contracts.py",
+    "contracts/multi-rule-cleaning.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "冻结逐素材多规则清洗结果契约：结果不可变绑定已批准 operation、任务版本、revision、generation、候选清单与配方；逐素材和逐规则必须完整、唯一、顺序一致，pass/fail/unknown 与证据语义一致，摘要稳定。契约校验拒绝缺失、多余、换序、伪造身份、错误汇总和旧绑定；不负责持久化、授权、计数或补数。integration 角色门禁及完整回归通过。"
+}
