@@ -21,8 +21,9 @@ from ...models import Task, TaskLifecycle, RunStatus
 from ...proposals import Draft
 from ...integration_models import IndexBinding, QueryVector, SearchRequest, SearchHit, SearchPage, MediaRecord
 from ...candidate_contracts import CandidateManifest, CandidateManifestProposal, ManifestItem
-from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal, CleaningCandidateRef,
-                                     CleaningRecipe, CleaningRule, DetectionStep)
+from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal, CleaningBinding,
+                                     CleaningCandidateRef, CleaningCandidateVerdict, CleaningJobResult, CleaningRecipe,
+                                     CleaningRule, CleaningRuleVerdict, DetectionStep)
 from ...retrieval_contracts import RetrievalPlan, RetrievalScope
 
 
@@ -30,8 +31,9 @@ TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal,
                               IndexBinding, QueryVector, SearchRequest, SearchHit, SearchPage,
                               RetrievalPlan, RetrievalScope, MediaRecord, CandidateManifest,
                               CandidateManifestProposal, ManifestItem, CleaningApproval,
-                              CleaningApprovalProposal, CleaningCandidateRef, CleaningRecipe,
-                              CleaningRule, DetectionStep)}
+                              CleaningApprovalProposal, CleaningBinding, CleaningCandidateRef, CleaningRecipe,
+                              CleaningRule, DetectionStep, CleaningRuleVerdict,
+                              CleaningCandidateVerdict, CleaningJobResult)}
 ENUMS = {t.__name__: t for t in (TaskLifecycle, RunStatus)}
 FORMAT = 1
 MAX_BYTES = 16 * 1024 * 1024

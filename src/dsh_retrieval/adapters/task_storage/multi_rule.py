@@ -15,14 +15,18 @@ from .sqlite import MAX_BYTES, decode, dump, encode
 from ...errors import ServiceError
 from ...models import RunStatus
 from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal,
-                                     CleaningCandidateRef, CleaningRecipe)
+                                     CleaningCandidateRef, CleaningJobResult, CleaningRecipe,
+                                     require_complete_cleaning_result)
 from ...query_spec import digest
 from ...recipe_bridge import require_confirmed_rules
 from ...service import require_key, require_version
 
 
+FORMAT = 2
+
+
 def empty_state():
-    return {"proposals": {}, "approvals": {}, "keys": {}, "events": []}
+    return {"proposals": {}, "approvals": {}, "results": {}, "keys": {}, "events": []}
 
 
 def dump_state(state):
@@ -35,7 +39,7 @@ def dump_state(state):
 def load_state(row):
     if row is None:
         raise ServiceError("STORAGE_CORRUPT", "Multi-rule approval ledger missing", 500)
-    if row[0] != 1:
+    if row[0] != FORMAT:
         raise ServiceError("STORAGE_FORMAT_UNSUPPORTED", "Unsupported multi-rule ledger format", 500)
     try:
         if type(row[1]) is not str or len(row[1].encode()) > MAX_BYTES:
@@ -51,6 +55,11 @@ def load_state(row):
             if (type(approval) is not CleaningApproval or opid != approval.operation_id
                     or state["proposals"].get(approval.proposal.proposal_digest) != approval.proposal):
                 raise ValueError("approval")
+        for opid, result in state["results"].items():
+            approval = state["approvals"].get(opid)
+            if type(result) is not CleaningJobResult or approval is None:
+                raise ValueError("result")
+            require_complete_cleaning_result(approval.job, result)
         for key, value in state["keys"].items():
             if (type(key) is not tuple or len(key) != 4 or type(value) is not tuple
                     or len(value) != 2 or type(value[0]) is not str
@@ -59,10 +68,20 @@ def load_state(row):
             p = state["approvals"][value[1]].proposal
             if key[:3] != (p.tenant_id, p.owner_user_id, p.task_id):
                 raise ValueError("key scope")
-        expected = [{"event_id": "multi-rule-approved:" + opid,
+        expected = {"multi-rule-approved:" + opid:
+                    {"event_id": "multi-rule-approved:" + opid,
                      "kind": "multi_rule_cleaning_approved", "operation_id": opid}
-                    for opid in state["approvals"]]
-        if state["events"] != expected:
+                    for opid in state["approvals"]}
+        expected.update({"multi-rule-result:" + opid:
+                         {"event_id": "multi-rule-result:" + opid,
+                          "kind": "multi_rule_cleaning_result_published",
+                          "operation_id": opid,
+                          "task_id": result.binding.task_id,
+                          "result_digest": result.result_digest}
+                         for opid, result in state["results"].items()})
+        actual = {event.get("event_id"): event for event in state["events"]
+                  if type(event) is dict and type(event.get("event_id")) is str}
+        if len(actual) != len(state["events"]) or actual != expected:
             raise ValueError("events")
         return state
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
@@ -82,7 +101,8 @@ class SQLiteMultiRuleApprovalRepository:
                     load_state(db.execute("SELECT format,payload FROM multi_rule_cleaning_ledger WHERE id=1").fetchone())
                 else:
                     db.execute("CREATE TABLE multi_rule_cleaning_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)")
-                    db.execute("INSERT INTO multi_rule_cleaning_ledger VALUES (1,1,?)", (dump_state(empty_state()),))
+                    db.execute("INSERT INTO multi_rule_cleaning_ledger VALUES (1,?,?)",
+                               (FORMAT, dump_state(empty_state())))
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "Multi-rule approval ledger unavailable", 503,
                                retryable=True) from exc
@@ -228,4 +248,63 @@ class SQLiteMultiRuleApprovalRepository:
             require_confirmed_rules(task, approval.proposal.recipe)
             self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
             return approval
+        return self._transaction(False, get)
+
+    def publish_result(self, actor, task_id, operation_id, result):
+        if type(result) is not CleaningJobResult:
+            raise ServiceError("RESULT_INVALID", "Complete cleaning result required", 422)
+
+        def publish(memory, retrieval, candidates, state):
+            approval = state["approvals"].get(operation_id)
+            if approval is None or approval.proposal.task_id != task_id:
+                raise ServiceError("NOT_FOUND", "Cleaning approval not found", 404)
+            task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
+                                            approval.proposal.manifest_ref, "write")
+            self._same_inputs(task, manifest, approval.proposal)
+            self._current(task, approval)
+            require_confirmed_rules(task, approval.proposal.recipe)
+            self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
+            try:
+                require_complete_cleaning_result(approval.job, result)
+            except (TypeError, ValueError) as exc:
+                raise ServiceError("RESULT_INVALID", "Cleaning result does not match approved job", 422) from exc
+            previous = state["results"].get(operation_id)
+            if previous is not None:
+                if previous.result_digest != result.result_digest or previous != result:
+                    raise ServiceError("RESULT_CONFLICT", "Cleaning operation already has another result", 409)
+                return previous, True
+            # Recheck all external authority and task fences immediately before
+            # the local atomic result/event write.
+            task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
+                                            approval.proposal.manifest_ref, "write")
+            self._same_inputs(task, manifest, approval.proposal)
+            self._current(task, approval)
+            require_confirmed_rules(task, approval.proposal.recipe)
+            self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
+            state["results"][operation_id] = result
+            state["events"].append({"event_id": "multi-rule-result:" + operation_id,
+                                    "kind": "multi_rule_cleaning_result_published",
+                                    "operation_id": operation_id,
+                                    "task_id": task_id,
+                                    "result_digest": result.result_digest})
+            return result, False
+
+        return self._transaction(True, publish)
+
+    def get_result(self, actor, task_id, operation_id):
+        def get(memory, retrieval, candidates, state):
+            approval = state["approvals"].get(operation_id)
+            result = state["results"].get(operation_id)
+            if approval is None or result is None or approval.proposal.task_id != task_id:
+                raise ServiceError("NOT_FOUND", "Cleaning result not found", 404)
+            task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
+                                            approval.proposal.manifest_ref, "read")
+            self._same_inputs(task, manifest, approval.proposal)
+            self._current(task, approval)
+            require_confirmed_rules(task, approval.proposal.recipe)
+            self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
+            require_complete_cleaning_result(approval.job, result)
+            self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
+            return result
+
         return self._transaction(False, get)

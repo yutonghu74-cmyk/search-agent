@@ -1,5 +1,13 @@
 # core 精确内容计数预览交接
 
+## 当前任务：多规则清洗结果本地发布（2026-10-22）
+
+- core / `codex/task-core` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`；执行基线 `1c09d1fd69e1cfc844dc7ed74ae24e7a42cb3c03`，任务卡 `docs/dev/cleaning-result-storage-task.md`；状态 READY_FOR_REVIEW。
+- 修改 `adapters/task_storage/multi_rule.py`、`sqlite.py`，新增 `tests/core/test_cleaning_result_storage.py`及本交接。多规则账本 format 升为 2，新增不可变 `CleaningJobResult` 与待发事件；旧 format 显式拒绝，本地开发账本不自动迁移或重置。
+- `publish_result` 在单个 `BEGIN IMMEDIATE` 事务中重新校验创建人、项目/素材授权、task/revision/generation/task_version/operation、确认规则、清单/配方及结果完整性；同结果重放无第二次效果，同 operation 异结果冲突。`get_result` 每次读取仍重验当前权限和版本。
+- 定向新测试 6 项通过：重启读回/幂等、12 次多连接并发仅一次发布、异结果/伪造候选拒绝、跨用户/撤权/旧 generation 拒绝、发布后撤权/版本变更阻断读与重放、序列化失败结果/事件全回滚。`python3 tools/collab_gate.py check --role core --base 1c09d1fd69e1cfc844dc7ed74ae24e7a42cb3c03` 退出码 0，SCOPE PASS / LOCAL GATE PASS / 339 项完整回归通过；输出中 `LOCAL GATE FAIL` 是已有门禁负例夹具。
+- 发布不修改 task_version/run 状态，不计算 accepted_count，不派发补数。NOT_RUN：生产数据库与 outbox relay、真实 DJ 多规则、ClickHouse/Milvus/W3、断电/网络文件系统、性能与业务质量。下一切片由业务计数层消费已发布结果，实现去重有效数与补数决策。
+
 ## 当前任务：持久候选清单去重预览
 
 - core / codex/task-core / var/worktrees/core；基线 1c89f59f00707d739e1731c4bf7334fc0bed25d1；范围 core/counting.py、tests/core/test_manifest_counting.py、本交接。没有新增共享字段/接口，复用 CleaningCatalog 已发布契约。
