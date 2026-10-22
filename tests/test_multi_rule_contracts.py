@@ -5,7 +5,7 @@ from dsh_retrieval.multi_rule_contracts import (
     ApprovedCleaningJob, CleaningApproval, CleaningApprovalProposal, CleaningBinding,
     CleaningCandidateRef, CleaningCandidateVerdict, CleaningJobResult, CleaningRecipe,
     CleaningRule, CleaningRuleVerdict, DetectionResult, DetectionStep, bytes_digest,
-    require_complete_cleaning_result,
+    require_complete_cleaning_result, require_released_cleaning_job,
 )
 from dsh_retrieval.query_spec import digest
 
@@ -72,6 +72,32 @@ class MultiRuleContractTest(unittest.TestCase):
                             proposal.proposal_digest)
         self.assertNotEqual(replace(proposal, recipe=replace(self.recipe,
                             rules=self.recipe.rules[:1])).proposal_digest, proposal.proposal_digest)
+
+    def test_release_digest_is_bound_to_proposal_job_and_result(self):
+        release_digest = digest({"release": "fixture-v1"})
+        proposal = CleaningApprovalProposal("tenant", "owner", "project", "task", 1, 2, 3,
+                                            digest({"confirmed": "query"}), "manifest_1",
+                                            self.recipe, self.candidates, release_digest)
+        legacy = replace(proposal, detector_release_digest=None)
+        self.assertNotEqual(proposal.proposal_digest, legacy.proposal_digest)
+        job = CleaningApproval(proposal, "operation_1", 4).job
+        self.assertEqual(job.binding.detector_release_digest, release_digest)
+        self.assertIs(require_released_cleaning_job(job), job)
+
+        result = replace(self.result(), binding=replace(
+            self.binding, detector_release_digest=release_digest))
+        self.assertNotEqual(result.result_digest, self.result().result_digest)
+
+    def test_release_binding_rejects_missing_or_invalid_digest(self):
+        legacy_job = ApprovedCleaningJob(self.binding, self.recipe, self.candidates)
+        with self.assertRaisesRegex(ValueError, "no detector release binding"):
+            require_released_cleaning_job(legacy_job)
+        with self.assertRaises(ValueError):
+            replace(self.binding, detector_release_digest="release-v1")
+        with self.assertRaises(ValueError):
+            replace(CleaningApprovalProposal("tenant", "owner", "project", "task", 1, 2, 3,
+                    digest({"confirmed": "query"}), "manifest_1", self.recipe, self.candidates),
+                    detector_release_digest="release-v1")
 
     def test_approval_rejects_duplicate_candidate_and_wrong_version(self):
         proposal = CleaningApprovalProposal("tenant", "owner", "project", "task", 1, 2, 3,

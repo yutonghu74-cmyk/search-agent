@@ -283,3 +283,11 @@
 - 契约测试验证换清单/需求/配方摘要不同，重复素材、路径型引用、错误批准版本拒绝。数据类可在内存构造，不是授权或审批凭据；只允许 core 在受信事务中持久确认后返回作业。
 - 2026-10-22（Asia/Shanghai），`python3 tools/collab_gate.py check --role integration --base 38f1ce37496689d66f6fe68c4a1b5893bd4b6c77 --task docs/dev/tasks/multi-rule-approval-contract.json`：退出码 0，SCOPE PASS、319 项回归通过（317+2），LOCAL GATE PASS。负例夹具中的 LOCAL GATE FAIL 不代表本次门禁失败。
 - 待执行：core 独立 worktree 以 A 发布基线实现本地 SQLite 同事务确认和幂等记录，检查当前任务、确认规则、授权清单；撤权/旧版本不得批准。执行结果发布和真实 DJ 多规则另行验收。
+
+## 检测器发布摘要批准绑定契约（2026-10-22）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；发布基线 `1c7c4c88bd07d4532087bfcf7c9bae19eafe3b1c`，任务卡 `docs/dev/tasks/detector-release-binding-contract.json`；状态 READY_FOR_REVIEW。
+- 修改 `src/dsh_retrieval/multi_rule_contracts.py`、`tests/test_multi_rule_contracts.py`、`contracts/multi-rule-cleaning.md` 与本交接。`CleaningApprovalProposal` 和 `CleaningBinding` 新增可选 `detector_release_digest`；存在时进入 v2 提案/结果摘要并由 `approval.job` 原样传递。`require_released_cleaning_job` 统一拒绝缺少发布绑定的旧作业。
+- 兼容边界：缺省值仅用于旧对象/账本分阶段迁移，保持原 v1 内容摘要，不能执行，也不能用当前发布静默补齐。下一步由 core 强制所有新批准保存发布摘要，再由 integration 在运行前与当前 `ReleasedDetectorRegistry.release_digest` 比对。
+- 定向验证：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_rule_contracts -q`，10 项通过；`git diff --check` 通过。`python3 tools/collab_gate.py check --role integration --base 1c7c4c88bd07d4532087bfcf7c9bae19eafe3b1c --task docs/dev/tasks/detector-release-binding-contract.json` 退出码 0，SCOPE PASS、门禁内部 382 项通过、LOCAL GATE PASS；输出中的 LOCAL GATE FAIL 是既有负例夹具。未额外重复完整回归。
+- NOT_RUN：真实 DJ、真实模型/制品、生产账本迁移、ClickHouse/Milvus/W3、内网数据；本轮只冻结共享身份与失败关闭边界，不宣称已完成持久化或运行时发布漂移拦截。

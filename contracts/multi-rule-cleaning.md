@@ -14,7 +14,9 @@
 
 `recipe_bridge.require_confirmed_rules` 要求受信业务层先以当前授权读取正式任务，再核对任务保存的确认方案摘要、媒体类型和完整硬规则序列与配方逐项一致。例如确认方案包含 `text.present@1 == false` 与 `watermark.present@1 == false`，配方少一条、增加一条、改值或改类型均拒绝；确认方案中的软规则不转成硬过滤。纯校验不签发执行许可，也不证明该解释草稿就是任务确认时使用的来源；正式批准记录仍须保存来源审阅、任务需求版本与配方关联，在同一事务检查当前任务版本/generation 和候选清单。
 
-`CleaningApprovalProposal` 冻结正式任务的 tenant/owner/project/task、revision/generation、批准前 `expected_task_version`、确认需求摘要、已发布候选清单引用与其素材身份/内容哈希、不可变配方。`proposal_digest` 覆盖这些字段；用户确认必须回传此摘要与期望任务版本，换清单、换规则、换版本都不得复用原批准。业务账本原子批准后生成 `CleaningApproval`，其 `task_version` 必须恰为批准前版本 +1；`approval.job` 才可构造执行器输入。数据类本身不代表授权或持久批准，不能接受普通用户/模型自行构造的对象作为凭据。
+`CleaningApprovalProposal` 冻结正式任务的 tenant/owner/project/task、revision/generation、批准前 `expected_task_version`、确认需求摘要、已发布候选清单引用与其素材身份/内容哈希、不可变配方，以及批准时的 `detector_release_digest`。发布摘要存在时使用 v2 提案摘要并覆盖该字段；用户确认必须回传此摘要与期望任务版本，换清单、换规则、换版本或换检测器实现/模型制品都不得复用原批准。业务账本原子批准后生成 `CleaningApproval`，其 `task_version` 必须恰为批准前版本 +1；`approval.job` 将发布摘要带入 `CleaningBinding`。数据类本身不代表授权或持久批准，不能接受普通用户/模型自行构造的对象作为凭据。
+
+为允许 core 账本按独立任务迁移，`detector_release_digest=None` 暂时只表示旧数据/旧调用，沿用 v1 提案和结果摘要；它不是可执行发布。所有新的执行入口必须先调用 `require_released_cleaning_job` 并失败关闭，后续 core 任务负责让新提案强制保存当前受信发布摘要，integration 任务再把该摘要与执行时 `ReleasedDetectorRegistry.release_digest` 比对。旧账本迁移完成前不得因为字段缺省而补猜当前发布，也不得把当前发布静默写进已有批准。
 
 `src/dsh_retrieval/adapters/cleaning/` 已有受控通用调度：每项候选一次授权读取/哈希校验，相同步骤只执行一次，结果绑定原作业的 operation/revision/generation/recipe/input 哈希；返回前再次检查当前授权和版本，发布时仍需业务账本原子栅栏。当前配方仅支持独立步骤、`eq` 硬规则；规格书要求的显式步骤依赖/资源上限/失败处理版本化仍待补齐，不能静默运行依赖链。测试检测器仅提供合成事实，标 SIMULATED。真实 DJ 仍只有旧的宽度规则独立桥接，不能将本框架标作多规则真实 DJ 联测。
 
@@ -30,4 +32,4 @@
 
 `preflight_evidence()` 每次先重新执行完整启动预检，再返回固定的小型视图：schema、组合发布摘要、两个组成摘要及检测器/制品数量。视图不返回部署路径、单文件摘要或运行时对象；缺失、篡改、绑定或目录漂移时不产生成功证据。该视图用于启动记录和后续审计衔接，不是授权凭据、签名、模型质量报告或健康状态的长期保证。
 
-`CleaningJobResult` 是唯一共享的逐素材多规则输出契约。它保留完整 `CleaningBinding`、候选身份、整体三态及每条硬规则的三态/原因/证据引用。`require_complete_cleaning_result` 要求绑定与已批准作业完全相同，候选和规则的数量、身份及顺序完全匹配；缺失、多余、换序、伪造绑定或错误总结均拒绝。`result_digest` 是稳定内容摘要，不是授权凭据。该数据类不做当前权限检查、不持久化、不计算有效数量；受信业务账本必须在同一发布事务中重新校验 task/revision/generation/operation/权限及输入清单。
+`CleaningJobResult` 是唯一共享的逐素材多规则输出契约。它保留完整 `CleaningBinding`（含已批准的检测器发布摘要）、候选身份、整体三态及每条硬规则的三态/原因/证据引用。`require_complete_cleaning_result` 要求绑定与已批准作业完全相同，候选和规则的数量、身份及顺序完全匹配；缺失、多余、换序、伪造绑定、换发布或错误总结均拒绝。带发布摘要的结果使用 v2 `result_digest`，因此同一事实输出在不同检测器发布下具有不同身份。摘要不是授权凭据；该数据类不做当前权限检查、不持久化、不计算有效数量，受信业务账本必须在同一发布事务中重新校验 task/revision/generation/operation/权限及输入清单。

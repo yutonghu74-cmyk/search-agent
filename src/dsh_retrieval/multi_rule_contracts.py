@@ -35,13 +35,16 @@ class CleaningBinding:
     operation_id: str
     input_manifest_digest: str
     recipe_digest: str
+    detector_release_digest: str | None = None
 
     def __post_init__(self):
         if (not all(_name(value) for value in (self.tenant_id, self.owner_user_id, self.project_id,
                 self.task_id, self.operation_id))
                 or any(type(value) is not int or value < 1 for value in
                        (self.revision, self.generation, self.task_version))
-                or not _hash(self.input_manifest_digest) or not _hash(self.recipe_digest)):
+                or not _hash(self.input_manifest_digest) or not _hash(self.recipe_digest)
+                or self.detector_release_digest is not None
+                and not _hash(self.detector_release_digest)):
             raise ValueError("invalid approved cleaning binding")
 
 
@@ -141,6 +144,7 @@ class CleaningApprovalProposal:
     manifest_ref: str
     recipe: CleaningRecipe
     candidates: tuple[CleaningCandidateRef, ...]
+    detector_release_digest: str | None = None
 
     def __post_init__(self):
         if (not all(_name(value) for value in (self.tenant_id, self.owner_user_id,
@@ -148,6 +152,8 @@ class CleaningApprovalProposal:
                 or any(type(value) is not int or value < 1 for value in
                        (self.revision, self.generation, self.expected_task_version))
                 or not _hash(self.confirmed_request_digest)
+                or self.detector_release_digest is not None
+                and not _hash(self.detector_release_digest)
                 or type(self.recipe) is not CleaningRecipe
                 or not isinstance(self.candidates, tuple)
                 or not 1 <= len(self.candidates) <= 100
@@ -161,15 +167,19 @@ class CleaningApprovalProposal:
 
     @property
     def proposal_digest(self):
-        return digest({"schema_version": "cleaning-approval-proposal@1",
-                       "tenant_id": self.tenant_id, "owner_user_id": self.owner_user_id,
-                       "project_id": self.project_id, "task_id": self.task_id,
-                       "revision": self.revision, "generation": self.generation,
-                       "expected_task_version": self.expected_task_version,
-                       "confirmed_request_digest": self.confirmed_request_digest,
-                       "manifest_ref": self.manifest_ref,
-                       "input_manifest_digest": self.input_manifest_digest,
-                       "recipe_digest": self.recipe.recipe_digest})
+        value = {"schema_version": "cleaning-approval-proposal@1",
+                 "tenant_id": self.tenant_id, "owner_user_id": self.owner_user_id,
+                 "project_id": self.project_id, "task_id": self.task_id,
+                 "revision": self.revision, "generation": self.generation,
+                 "expected_task_version": self.expected_task_version,
+                 "confirmed_request_digest": self.confirmed_request_digest,
+                 "manifest_ref": self.manifest_ref,
+                 "input_manifest_digest": self.input_manifest_digest,
+                 "recipe_digest": self.recipe.recipe_digest}
+        if self.detector_release_digest is not None:
+            value["schema_version"] = "cleaning-approval-proposal@2"
+            value["detector_release_digest"] = self.detector_release_digest
+        return digest(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,7 +201,8 @@ class CleaningApproval:
         return ApprovedCleaningJob(CleaningBinding(
             p.tenant_id, p.owner_user_id, p.project_id, p.task_id,
             p.revision, p.generation, self.task_version, self.operation_id,
-            p.input_manifest_digest, p.recipe.recipe_digest), p.recipe, p.candidates)
+            p.input_manifest_digest, p.recipe.recipe_digest,
+            p.detector_release_digest), p.recipe, p.candidates)
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,26 +292,40 @@ class CleaningJobResult:
     @property
     def result_digest(self):
         binding = self.binding
-        return digest({"schema_version": "multi-rule-cleaning-result@1",
-                       "binding": {"tenant_id": binding.tenant_id,
-                                   "owner_user_id": binding.owner_user_id,
-                                   "project_id": binding.project_id,
-                                   "task_id": binding.task_id,
-                                   "revision": binding.revision,
-                                   "generation": binding.generation,
-                                   "task_version": binding.task_version,
-                                   "operation_id": binding.operation_id,
-                                   "input_manifest_digest": binding.input_manifest_digest,
-                                   "recipe_digest": binding.recipe_digest},
-                       "candidates": [{"candidate_id": candidate.candidate_id,
-                                       "asset_version": candidate.asset_version,
-                                       "verdict": candidate.verdict,
-                                       "rules": [{"rule_id": rule.rule_id,
-                                                  "verdict": rule.verdict,
-                                                  "reason_code": rule.reason_code,
-                                                  "evidence_ref": rule.evidence_ref}
-                                                 for rule in candidate.rules]}
-                                      for candidate in self.candidates]})
+        value = {"schema_version": "multi-rule-cleaning-result@1",
+                 "binding": {"tenant_id": binding.tenant_id,
+                             "owner_user_id": binding.owner_user_id,
+                             "project_id": binding.project_id,
+                             "task_id": binding.task_id,
+                             "revision": binding.revision,
+                             "generation": binding.generation,
+                             "task_version": binding.task_version,
+                             "operation_id": binding.operation_id,
+                             "input_manifest_digest": binding.input_manifest_digest,
+                             "recipe_digest": binding.recipe_digest},
+                 "candidates": [{"candidate_id": candidate.candidate_id,
+                                 "asset_version": candidate.asset_version,
+                                 "verdict": candidate.verdict,
+                                 "rules": [{"rule_id": rule.rule_id,
+                                            "verdict": rule.verdict,
+                                            "reason_code": rule.reason_code,
+                                            "evidence_ref": rule.evidence_ref}
+                                           for rule in candidate.rules]}
+                                for candidate in self.candidates]}
+        if binding.detector_release_digest is not None:
+            value["schema_version"] = "multi-rule-cleaning-result@2"
+            value["binding"]["detector_release_digest"] = binding.detector_release_digest
+        return digest(value)
+
+
+def require_released_cleaning_job(job):
+    """Reject legacy approved jobs that are not bound to a detector release."""
+
+    if type(job) is not ApprovedCleaningJob:
+        raise TypeError("approved cleaning job required")
+    if job.binding.detector_release_digest is None:
+        raise ValueError("approved cleaning job has no detector release binding")
+    return job
 
 
 def require_complete_cleaning_result(job, result):
