@@ -17,6 +17,7 @@ from dsh_retrieval.adapters.retrieval.materialization import LocalCandidateMater
 from dsh_retrieval.adapters.dj_cleaning import DJCleaningExecutor
 from dsh_retrieval.candidate_publication import CandidatePublicationService
 from dsh_retrieval.cleaning_service import CleaningService
+from dsh_retrieval.core.counting import CountingPreviewService
 from dsh_retrieval.integration_models import IndexBinding, QueryVector, SearchRequest, SearchHit, SearchPage, MediaRecord, MediaResolution
 from dsh_retrieval.manifest_cleaning import PublishedManifestCatalog, ManifestCleaningExecutor
 from dsh_retrieval.models import Actor
@@ -99,6 +100,12 @@ def run(workspace, dj_python, dj_source):
     result = cleaning.results(actor, tid)
     assert result["counts"] == {"pass": 3, "fail": 1, "unknown": 0}, result
     assert result["accepted_count"] is None
+    counter = CountingPreviewService(tasks, projects, catalog)
+    dedup = counter.preview(actor, tid)
+    assert dedup["unique_pass_count"] == 2 and dedup["duplicate_count"] == 1, dedup
+    assert dedup["accepted_count"] is None and not dedup["refill_dispatched"]
+    assert len(manifests.get(actor, tid, selected["manifest_ref"]).proposal.items) == 4
+    assert tasks.get(actor, tid).run_status.value == "RUNNING"
     persisted = tasks.get_cleaning_operation(actor, operation["operation_id"])
     assert all(c.source_path == "" for c in persisted.proposal.candidates)
     # Bypass only the service's replay shortcut to exercise the real bridge's
@@ -111,11 +118,12 @@ def run(workspace, dj_python, dj_source):
     replay, reused = start()
     assert reused and replay == operation
     assert cleaning.poll(actor, operation["operation_id"]) == operation
+    assert CountingPreviewService(cleaning.repository, projects, catalog).preview(actor, tid) == dedup
     return {"status": "PASS", "mode": "REAL_DJ_SYNTHETIC_MEDIA", "retrieval_mode": "SIMULATED",
-            "counts": result["counts"], "accepted_count": None, "operation": operation,
+            "counts": result["counts"], "dedup_preview": dedup, "accepted_count": None, "operation": operation,
             "manifest": selected, "workspace": str(workspace), "fresh_path_replay_same_backend": True,
             "temporary_downloads_cleaned": True, "task_status": tasks.get(actor, tid).run_status.value,
-            "not_verified": ["internal_network", "semantic_retrieval", "full_business_rules", "dedup_delivery"]}
+            "not_verified": ["internal_network", "semantic_retrieval", "full_business_rules", "published_delivery"]}
 
 
 def main():

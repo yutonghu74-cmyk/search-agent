@@ -1,5 +1,16 @@
 # A 总控集成交接
 
+## 持久清单去重预览装配（2026-10-22）
+
+- 14:10（Asia/Shanghai）真实合成联测 PASS：运行既有 `tools/manifest_cleaning_smoke.py --run-real`（DJ Python/source 参数同下方 M19 记录），4 个候选、3 pass/1 fail，unique_pass_count=2、duplicate_count=1、target=10、preview_gap=8；accepted_count=null、refill_dispatched=false，任务 RUNNING。清单四来源保留，重建仓库后预览一致。
+- 证据原件 `/tmp/dsm-nn0ldlna/manifest-cleaning-report.json`，本地副本 `var/status/evidence/2026-10-22-manifest-dedup.json`；operation clean_1b5d125e8241484b87591dee63c10aca，DJ task_e40513180b69/run_r001。仅真实 DJ 固定宽度规则；检索/权限是模拟，不是内网或全规则合格集。
+- 主分支合入 core 后 232 项回归通过，integration smoke 扩展后完整 unittest 同样 232 项通过、git diff --check 通过。A 本轮执行 core 门禁（base=eac0b97f1eb939686a776d7d749105445cbc7c53）因 A 分支不匹配退出码 1；core 实现的角色检查真实通过，不混淆二者。
+- 下一步正式结果版本/原子发布契约：当前 preview_only=true，不将宽度单规则预览发布为“满足全部需求”的交付；需要明确支持规则与 unknown 边界。
+
+- A / codex/integration / var/worktrees/integration；起点 eac0b97f1eb939686a776d7d749105445cbc7c53。范围 tools/manifest_cleaning_smoke.py、本交接、生成报告；验收 v1.9 13.5/13.5.1、A20/A36/A50 的固定宽度/单清洗作业子集。
+- core 以 1c89f59f00707d739e1731c4bf7334fc0bed25d1 为基线，角色门禁与 232 项测试通过；A 审查二次授权和不写任务状态路径后集成 eac0b97。无需新增接口：原计数器可消费逻辑候选，前轮“必须调整路径契约”的假设由本轮代码检查/测试修正。
+- 本轮 smoke 扩展验收：4 张合成 PNG，经真实 DJ 3 pass/1 fail，再得 2 个唯一 pass 代表、1 个重复；清单四个来源仍保留，accepted_count=null、refill_dispatched=false、任务 RUNNING。允许受控既有真实 DJ 环境，使用唯一短路径 workspace；不安装、改上游、推送或接内网。
+
 ## 持久清单真实 DJ 合成联测（2026-10-22 12:32，Asia/Shanghai）
 
 - 集成结果：4f8e732a18de34d963c5b9fb73823e9173ed34b6 已快进合入主分支；主工作区完整 unittest 回归 224 项通过、退出码 0。本节的真实运行在独立 integration workspace 执行；主分支没有重复启动 DJ。
