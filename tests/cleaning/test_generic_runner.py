@@ -4,8 +4,8 @@ from dsh_retrieval.adapters.cleaning import GenericCleaningExecutor
 from dsh_retrieval.adapters.cleaning.runner import MAX_CANDIDATE_BYTES
 from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.multi_rule_contracts import (
-    ApprovedCleaningJob, CleaningBinding, CleaningCandidateRef, CleaningRecipe,
-    CleaningRule, DetectionResult, DetectionStep, bytes_digest,
+    ApprovedCleaningJob, CleaningBinding, CleaningCandidateRef, CleaningJobResult,
+    CleaningRecipe, CleaningRule, DetectionResult, DetectionStep, bytes_digest,
 )
 from dsh_retrieval.query_spec import digest
 
@@ -87,6 +87,7 @@ class GenericRunnerTests(unittest.TestCase):
 
     def test_shared_step_and_three_state_per_candidate(self):
         result = self.runner().run(self.job)
+        self.assertIs(type(result), CleaningJobResult)
         self.assertEqual(result.binding, self.job.binding)
         self.assertEqual([item.verdict for item in result.candidates], ["pass", "fail", "unknown"])
         self.assertEqual([[rule.verdict for rule in item.rules] for item in result.candidates],

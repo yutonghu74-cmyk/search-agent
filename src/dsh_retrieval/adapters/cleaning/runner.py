@@ -4,37 +4,22 @@ This module deliberately does not construct approvals, locate media, persist
 results, or register any real detector. Those are separate trusted boundaries.
 """
 
-from dataclasses import dataclass
 from typing import Mapping
 
 from ...errors import ServiceError
-from ...multi_rule_contracts import ApprovedCleaningJob, CleaningBinding, DetectionResult, bytes_digest
+from ...multi_rule_contracts import (
+    ApprovedCleaningJob,
+    CleaningCandidateVerdict as CandidateVerdict,
+    CleaningJobResult as JobVerdict,
+    CleaningRuleVerdict as RuleVerdict,
+    DetectionResult,
+    bytes_digest,
+    require_complete_cleaning_result,
+)
 
 
 MAX_CANDIDATE_BYTES = 10 * 1024 * 1024
 MAX_JOB_BYTES = 100 * 1024 * 1024
-
-
-@dataclass(frozen=True, slots=True)
-class RuleVerdict:
-    rule_id: str
-    verdict: str
-    reason_code: str
-    evidence_ref: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class CandidateVerdict:
-    candidate_id: str
-    asset_version: str
-    verdict: str
-    rules: tuple[RuleVerdict, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class JobVerdict:
-    binding: CleaningBinding
-    candidates: tuple[CandidateVerdict, ...]
 
 
 class GenericCleaningExecutor:
@@ -119,4 +104,4 @@ class GenericCleaningExecutor:
                                              overall, tuple(rules)))
             self._guard.require_current(job.binding)
         self._guard.require_current(job.binding)
-        return JobVerdict(job.binding, tuple(verdicts))
+        return require_complete_cleaning_result(job, JobVerdict(job.binding, tuple(verdicts)))

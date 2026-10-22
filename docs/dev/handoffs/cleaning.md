@@ -1,5 +1,12 @@
 # Cleaning 角色交接：通用多规则执行框架
 
+## 当前切片：共享逐素材结果输出（2026-10-22）
+
+- cleaning / `codex/cleaning-adapter` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/cleaning`；执行基线 `0a45c12241c0d7a5671165eb6677846b67b5a9e1`，任务卡 `docs/dev/cleaning-result-output-task.md`；状态 READY_FOR_REVIEW。
+- `GenericCleaningExecutor` 改为直接生成共享 `CleaningJobResult`/`CleaningCandidateVerdict`/`CleaningRuleVerdict`，并在返回前用 `require_complete_cleaning_result` 核对已批准作业的绑定、候选和规则完整性。原导出名保留为共享类别名，无执行语义变化。
+- 定向 cleaning 测试 14 项通过；完整回归 333 项通过，退出码 0。`python3 tools/collab_gate.py check --role cleaning --base 0a45c12241c0d7a5671165eb6677846b67b5a9e1` 退出码 0，SCOPE PASS / LOCAL GATE PASS / 333 项通过。合成检测仍验证 pass/fail/unknown、证据、候选/规则顺序及当前绑定；新断言确认实际输出类型为共享契约。
+- 本轮不持久化、不更改 task/accepted_count、不派发补数。NOT_RUN：真实 DJ 多规则、生产检测器、真实素材/内网、性能。下一步由 core 在当前任务/授权事务中原子发布该结果。
+
 ## 当前切片：批准作业的受控输入读取（2026-10-22）
 
 - 角色 / 分支 / worktree：cleaning / `codex/cleaning-adapter` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/cleaning`；基线 `5d72dd5ab5f7b4949280ff2ee1da62b8b9a737a8`。修改范围仅 `src/dsh_retrieval/adapters/cleaning/`、`tests/cleaning/` 与本交接。
