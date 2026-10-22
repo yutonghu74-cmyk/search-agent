@@ -1,0 +1,16 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "3c5effc8b3615b9225ba6655dfc154e18ef313cf",
+  "files": [
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "src/dsh_retrieval/ports.py",
+    "tests/test_api.py",
+    "tests/test_chat_ui.py",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "提供仅监听 loopback 的本地 Chat 体验页：自由文本和目标数量生成既有 query-spec@2 完整确认卡，用户点击确认后才创建 task；任务页可保存 all-scope 反馈草稿、展示派生后的完整方案和未编译提示，再确认或拒绝。HTTP 增加 feedback 草稿读取/写入、confirmations、revisions 路由，所有写请求仍需 Idempotency-Key 和模拟身份头；GET task 返回 pending_draft。启动器支持显式 --ledger 路径使用 SQLite，以便刷新/重启恢复，默认仍为内存；不得绑定非 loopback。页面不得声称反馈自然语言已成为可执行清洗规则，不展示未支持的真实结果/导出能力。覆盖路由、错误、身份、幂等、页面安全头与主流程测试；定向测试、完整回归及 integration 门禁通过。不运行真实检索/DJ、不访问内网。"
+}
