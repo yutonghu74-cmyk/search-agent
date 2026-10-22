@@ -1,5 +1,13 @@
 # Cleaning 角色交接：通用多规则执行框架
 
+## 当前切片：批准作业的受控输入读取（2026-10-22）
+
+- 角色 / 分支 / worktree：cleaning / `codex/cleaning-adapter` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/cleaning`；基线 `5d72dd5ab5f7b4949280ff2ee1da62b8b9a737a8`。修改范围仅 `src/dsh_retrieval/adapters/cleaning/`、`tests/cleaning/` 与本交接。
+- 验收边界：v1.9 7.3、7.7、7.8、7.10 和 A14 的局部执行安全要求。`ApprovedManifestAccess` 消费业务仓库的 `get_current` 和当前清单，向通用执行器同时提供 guard/reader；绑定必须与当前批准作业完全一致，候选必须属于冻结清单。授权媒体引用仅来自清单，流式读取有单素材上限，读前读后重查当前批准与权限。执行器另校验内容摘要及作业总上限。
+- 修改文件：`src/dsh_retrieval/adapters/cleaning/approved_input.py`、`__init__.py`、`tests/cleaning/test_approved_input.py`、本交接；没有公共契约变更。
+- 合成证据：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 于 2026-10-22 运行，330 项通过。用例覆盖批准清单读取、伪造绑定/候选拒绝、撤权/换代、媒体变化/超限、读取中换代；均为 SIMULATED，不是真实 DJ 或内网媒体联测。
+- 未完成：未登记真实多规则检测器或 DJ plan_flow；未建立后台派发、超时/重试、结果原子持久化与跨轮业务计数。当前返回判定不能直接算 accepted_count。下一步由 core 实现返回结果的当前代次原子 fencing 与完整性校验，再由 A 装配受控 Worker。
+
 - 角色 / 分支 / worktree：cleaning / `codex/cleaning-adapter` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/cleaning`。
 - 切片与验收：`docs/dev/cleaning-multi-rule-task.md`，v1.9 7.3、7.7、7.8 与 A09/A14 的框架级子集。分派基线 `2673bc02d65ab54c9e48acf6823d43b6f2e18dda`；本交接在提交前记录。
 - 状态：READY_FOR_REVIEW，须由 A 审查后集成；不代表真实 DJ 多规则通过。
