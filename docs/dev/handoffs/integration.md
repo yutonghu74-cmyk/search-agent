@@ -1,5 +1,14 @@
 # A 总控集成交接
 
+## 主标签/辅助标签扩词分组预览（2026-10-23）
+
+- A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/grouped-expansion-preview.json`，可信任务基线 `3fc0eaae5d054e3f63a025ebddc45fc8767ccfa6`，任务起点 `56882a763d2ae72af4a28505f21e677f7d7e639b`；状态 READY_FOR_REVIEW（本地页面验收待执行）。
+- 新增 `grouped-expansion@1` 和项目级扩词预览路由。只识别明确的“主标签扩N个词”（1–30），最多 20 组；无明确语法返回未识别，不猜测分类。当前 `local-template@1` 是确定性、可审阅模板，不宣称模型能力。
+- 主标签固定 `package_mode=separate` 并独立命名交付包；辅助词只用于召回，不成为包或配额。`delivery_target=null` 防止把扩词数量误当成交付图片数；跨组聚合默认同一素材只计一次。
+- Chat 示例 `动物，狗扩20个词，猫扩30个词` 会展示上级标签、每组完整辅助词、独立打包、尚未指定配额及跨组计数规则；确认草稿保存完整计划和摘要，篡改失败关闭。
+- 定向命令 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_grouped_expansion tests.test_api tests.test_chat_ui -q`：11 项 PASS；JavaScript `node --check` PASS；integration 门禁 SCOPE PASS、436 项 PASS、LOCAL GATE PASS。未在门禁外额外运行完整回归。
+- 边界：不调用模型、不生成真实查询计划、不启动检索/清洗/补数/打包；不访问内网或真实数据。后续需增加用户可编辑分组、每组交付配额和真实扩词 provider。
+
 ## 权威结果统计与稳定分页预览（2026-10-23）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/result-preview-ui.json`，可信任务基线 `9c9ddb8105b2fc2f8e11b122145526a64f3d9bc4`，任务起点 `4aa8ba9f3b3a7286e474d4fca301773d61e1fb2d`；状态 ACCEPTED（本地体验切片）。

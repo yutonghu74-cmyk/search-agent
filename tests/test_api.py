@@ -68,6 +68,13 @@ class ApiTest(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
 
     def test_ticket_feedback_confirmation_and_revisions(self):
+        status, expansion, _ = self.request("/v1/retrieval/projects/demo/expansions", body={
+            "raw_request": "动物，狗扩20个词，猫扩30个词", "dimension_id": "default"})
+        self.assertEqual(status, 200)
+        self.assertEqual([group["primary_label"] for group in expansion["plan"]["groups"]],
+                         ["狗", "猫"])
+        self.assertEqual([len(group["auxiliary_terms"]) for group in expansion["plan"]["groups"]],
+                         [20, 30])
         status, draft, _ = self.request("/v1/retrieval/projects/demo/drafts", body=BODY, key="draft")
         self.assertEqual(status, 200)
         status, task, _ = self.request("/v1/retrieval/tasks", key="task", body={
@@ -145,6 +152,9 @@ class ApiTest(unittest.TestCase):
         status, body, _ = self.request("/v1/retrieval/projects/demo/tasks", identity=False)
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
         status, body, _ = self.request("/v1/retrieval/projects/demo/conversations", identity=False)
+        self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
+        status, body, _ = self.request("/v1/retrieval/projects/demo/expansions", body={
+            "raw_request": "动物，狗扩20个词", "dimension_id": "default"}, identity=False)
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
         status, body, _ = self.request("/v1/retrieval/tasks/missing/progress", identity=False)
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))

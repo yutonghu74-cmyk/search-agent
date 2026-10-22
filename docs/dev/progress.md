@@ -4,15 +4,16 @@
 
 ## 当前快照
 
-- 更新时间：2026-10-23 02:18 CST（Asia/Shanghai）
+- 更新时间：2026-10-23 02:42 CST（Asia/Shanghai）
 - 总控角色 / 分支：A integration / `codex/integration`
 - 当前发布基线：`56882a7`（权威结果统计与稳定分页预览已验收）
 - 当前规范任务：`docs/dev/tasks/grouped-expansion-preview.json`
-- 总体状态：IN_PROGRESS（主标签/辅助标签扩词分组预览）；不代表 v1.9 完整产品验收。
+- 总体状态：READY_FOR_REVIEW（主标签/辅助标签扩词分组预览）；不代表 v1.9 完整产品验收。
 - 已完成：受信检测器发布配置加载、启动预检、制品与模型摘要、脱敏证据；清洗批准已绑定 `detector_release_digest`，core 账本持久化并兼容旧记录；运行时发布漂移会在素材读取前失败关闭。
-- 正在进行：冻结主标签交付单元、辅助检索词、独立打包与跨组去重规则。
+- 正在进行：分组扩词模型、预览路由、正式草稿保存和 Chat 确认展示已实现；11 项定向测试、JavaScript 语法检查和 integration 门禁 436 项通过，待本地页面验收。
 - 当前阻塞：无。
-- 下一步：实现分组扩词预览、确认卡持久化和页面展示；不把辅助词作为独立包。
+- 下一步：发布并重启 8080，用狗/猫示例做浏览器验收。
+- 本轮验证：分组扩词/API/UI 定向 11 项 PASS，JavaScript 语法 PASS；integration 门禁 SCOPE PASS、436 项 PASS、LOCAL GATE PASS。未在门禁外额外运行完整回归。
 - 本地验收：8080 页面显示“结果尚未发布”，并明确未发布当前版本权威结果集时不展示模拟素材或推算数量。
 - 本轮验证：结果视图 HTTP/UI/model 定向 12 项 PASS，JavaScript 语法 PASS；integration 门禁 SCOPE PASS、431 项 PASS、LOCAL GATE PASS。首次定向运行因测试夹具写错 `ResultReader` 赋值位置失败，修正后真实通过；未在门禁外额外运行完整回归。
 - 本地验收：8080 服务已从发布基线重启；浏览器确认正式任务显示 revision 1 / generation 1、阶段 PLANNING、目标 3、五个节点、有效数量与缺口“未知”，并显示“不展示估算百分比”。

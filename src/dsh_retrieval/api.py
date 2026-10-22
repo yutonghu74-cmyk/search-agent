@@ -18,6 +18,7 @@ from .adapters.task_storage.sqlite import SQLiteTaskRepository
 from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
 from .progress_models import build_task_progress
 from .result_views import ResultCursorError, build_result_page
+from .expansion_models import preview_grouped_expansion
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -30,6 +31,7 @@ RESULTS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/results$")
 PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
+EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -94,13 +96,29 @@ class Handler(BaseHTTPRequestHandler):
         draft_match = DRAFT_PATH.fullmatch(self.path)
         feedback_match = FEEDBACK_PATH.fullmatch(self.path)
         confirmation_match = CONFIRMATION_PATH.fullmatch(self.path)
+        expansion_match = EXPANSIONS_PATH.fullmatch(self.path)
         if (self.path != "/v1/retrieval/tasks" and draft_match is None
                 and not (feedback_match and feedback_match.group(2) is None)
-                and confirmation_match is None):
+                and confirmation_match is None and expansion_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
         def action() -> tuple[int, dict[str, Any], bool]:
+            if expansion_match:
+                actor = self._actor()
+                body = self._body()
+                if set(body) != {"raw_request", "dimension_id"}:
+                    raise ServiceError("INVALID_SPEC", "expansion preview requires raw_request and dimension_id", 422)
+                dimension = body["dimension_id"]
+                if not isinstance(dimension, str) or not dimension.strip():
+                    raise ServiceError("INVALID_SPEC", "dimension_id is required", 422,
+                                       field_path="$.dimension_id")
+                self.service.projects.require_access(
+                    actor, expansion_match.group(1), dimension, "create")
+                try:
+                    return HTTPStatus.OK, preview_grouped_expansion(body["raw_request"]), False
+                except ValueError as error:
+                    raise ServiceError("INVALID_EXPANSION_REQUEST", str(error), 422) from None
             if draft_match:
                 result, replayed = self.service.save_draft(self._actor(), draft_match.group(1),
                     self.headers.get("Idempotency-Key", ""), self._body(), draft_match.group(2))

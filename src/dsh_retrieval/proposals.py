@@ -5,6 +5,7 @@ import json
 
 from .errors import ServiceError, invalid
 from .query_spec import normalize_query_spec, digest
+from .expansion_models import normalize_grouped_expansion
 
 NODES = ("expansion", "retrieval", "cleaning", "refill", "packaging")
 
@@ -44,7 +45,8 @@ def normalize_proposal(body: dict) -> dict:
     modes = body.get("node_modes", dict.fromkeys(NODES, "manual"))
     if modes != dict.fromkeys(NODES, "manual"):
         raise ServiceError("FEATURE_NOT_SUPPORTED", "this slice requires five explicit manual gates", 422)
-    legacy = {k: v for k, v in spec.items() if k not in required}
+    grouped_expansion = spec.get("grouped_expansion")
+    legacy = {k: v for k, v in spec.items() if k not in required | {"grouped_expansion"}}
     legacy["schema_version"] = "query-spec@1"
     # Reuse field/rule validation, not the old wire contract or its defaults.
     legacy["allow_auto_refill"] = False
@@ -53,6 +55,11 @@ def normalize_proposal(body: dict) -> dict:
     normalized.pop("dedup_policy", None)
     normalized["schema_version"] = "query-spec@2"
     normalized.update({key: deepcopy(spec[key]) for key in required})
+    if grouped_expansion is not None:
+        try:
+            normalized["grouped_expansion"] = normalize_grouped_expansion(grouped_expansion)
+        except ValueError as error:
+            raise invalid(str(error), "$.query_spec.grouped_expansion") from None
     return {"dimension_id": dimension, "query_spec": normalized, "node_modes": dict(modes)}
 
 

@@ -26,6 +26,10 @@ class ChatUiTest(unittest.TestCase):
         self.assertIn("权威结果统计", CHAT_JS)
         self.assertIn("preview_status==='unavailable'", CHAT_JS)
         self.assertIn("loadMoreResults", CHAT_JS)
+        self.assertIn("主标签 ·", CHAT_JS)
+        self.assertIn("辅助检索词", CHAT_JS)
+        self.assertIn("独立打包", CHAT_JS)
+        self.assertIn("同一素材聚合总数只计一次", CHAT_JS)
         self.assertNotIn("完成百分比", CHAT_JS)
 
     def test_assets_do_not_embed_remote_dependencies_or_dynamic_html(self):
