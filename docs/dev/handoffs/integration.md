@@ -340,4 +340,5 @@
 - 范围：项目历史任务 GET、Chat 侧栏、正式 revision 展示与任务切换；明确不包含确认前逐句 conversation_message 草稿历史。
 - 23:42 里程碑：项目任务列表路由、历史侧栏、正式 revision 展示、任务切换/恢复和空/失败状态已完成；HTTP/UI/core 定向 10 项及 JavaScript 语法检查通过。
 - 23:45 交付：`python3 tools/collab_gate.py check --role integration --base 43b07f7ba3254b3f2cb4a7e1a2df2d9781d787cd --task docs/dev/tasks/chat-history-local-ui.json` 为 SCOPE PASS、完整 410 项通过、LOCAL GATE PASS；输出中的 `LOCAL GATE FAIL` 是既有负向门禁夹具。
-- 未验证：浏览器侧栏冒烟待合并重启后执行；真实 W3/内网、真实检索/DJ 和完整 conversation_message 草稿历史 NOT_RUN。
+- 23:48 浏览器冒烟：SQLite 中 2 条正式历史任务均出现在侧栏；点击“各种各样的兔子”成功展示 task、revision 1、方案摘要及继续反馈入口。体验服务已用最新 `master` 重启并保持在 `127.0.0.1:8080`。
+- 未验证：真实 W3/内网、真实检索/DJ 和完整 conversation_message 草稿历史 NOT_RUN。
