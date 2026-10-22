@@ -37,3 +37,23 @@
 - A 新增 5 项测试，完整 86 项通过：完成会话由新进程恢复、模拟提交中断后的已预约 operation 重用、内容变化拒绝、模式不匹配拒绝、取消后拒绝。提交中断通过注入 SystemExit 模拟，非真实断电测试。
 - SQLite 为本地开发单快照实现，16 MB 上限；schema format=1，版本不匹配或坏记录失败关闭，不自动清库。不是内网生产选型、SSE/outbox 或后台恢复调度；跨系统授权事务与断电故障注入尚未验证。无新增依赖、无 PostgreSQL 安装。
 - 主工作区集成 3ae6249 后，86 项回归 PASS；真实 DJ 新会话 /tmp/dm6avsi8a 运行成功，再由独立 CLI 进程执行 `--executor real --resume /tmp/dm6avsi8a`，恢复 PASS。operation_id 始终 clean_e7dfd2bd0ddd43e5a197bed94d2e1aab，task_version=3、unique_pass_count=2 不变，原 DJ run_r001 未重新提交。证据 /tmp/dm6avsi8a/demo-report.json（合成临时数据）。这验证已完成作业跨进程恢复；真实运行中的强杀/断电恢复尚未实测。
+
+## 2026-10-22 检索计划公共契约（未集成）
+
+- 角色 A / codex/integration / /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；基线 b2cdedd7b966ad7e4756c127525f81dafd9400fc；任务卡 docs/dev/retrieval-contract-task.md。
+- 状态 READY_FOR_REVIEW（契约级）；当前代码未提交，未发布新基线，主分支不变。上一轮 retrieval 模拟适配仍在其独立 worktree，本轮未复制或修改其代码，不把两边测试数量相加当集成验收。
+- 新增 RetrievalScope / RetrievalPlan 与无副作用校验器；新增 RetrievalPlanRepository 端口，定义计划确认的 CAS、同一提案多键幂等、任务版本递增、page 预约与事务提交。contracts/retrieval-plan.md 明确请求、错误、兼容和未实现范围。
+- 修改文件：src/dsh_retrieval/retrieval_contracts.py、src/dsh_retrieval/ports.py、tests/test_retrieval_contracts.py、contracts/retrieval-plan.md、docs/dev/retrieval-contract-task.md、本交接文件。
+- 校验覆盖：创建人/租户、project/task/revision/generation/需求摘要/task_version；未确认及旧 epoch；暂停/取消/终态/归档/FINALIZING；请求篡改；编码器/维度；空页、深度上限、游标循环/前驱/快照变化、live 不声称耗尽；错误绑定/超页上限/非有限分数/损坏命中。
+- 本轮不是确认服务或生产账本：校验函数不会批准/派发/写候选/更新计数。现有 CandidateIntake 不变，空检索页与清洗链路尚未装配；没有新的 HTTP 路由。
+- 本地验证：2026-10-22 10:02（Asia/Shanghai），Python 3.13.3，`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 首轮 101 项通过、退出码 0；追加边界测试后结果见后续记录。
+- 最终回归：2026-10-22 10:03（Asia/Shanghai），同一命令退出码 0，103 项通过（基线 86 + 本轮新增 17）；新增 FINALIZING 禁止提交及损坏命中显式错误用例。与 retrieval 分支的 104 项属于不同工作区，不是测试减少，也未完成双分支集成验证。
+- 角色门禁：`python3 tools/collab_gate.py check --role retrieval --base b2cdedd7b966ad7e4756c127525f81dafd9400fc` 退出码 1，原因 codex/integration 不符合 retrieval 分支。A 没有对应角色检查器，不改责任表/检查器，不使用 baseline 模式替代；未宣称门禁通过。git diff --check 通过；未跟踪新增文件另检查空白。
+- NOT_RUN：原子批准和幂等存储、真实权限撤销竞争、跨进程持久化、实际 ClickHouse/Milvus、真实 DJ、端到端检索→清洗；A20/A49 的实际授权/依赖故障不由纯校验器保证。
+- 下一步：用户确认本地提交/集成权限后，先发布 A 契约基线；再派发 core 任务账本原子确认实现，retrieval 同步消费已批准记录，A 做端到端装配。现有检索模拟批准夹具不得替代账本，也不能将本契约记录标为 P01 完成。
+
+## 本地集成授权与契约发布（2026-10-22）
+
+- 用户已确认本地提交与审查后合并；不推送、不部署、不访问内网。上述“未获提交授权”为历史状态。
+- A 重新审查公共契约、调用边界和测试，并在独立 integration 工作区重跑完整 103 项测试，退出码 0。只读审查 retrieval 适配切片，其原基线角色检查通过、104 项测试通过；下一步同步本契约基线后再验证组合。
+- 本提交发布契约级开发基线。纯校验器、协议定义可用于后续开发；原子确认/任务事务/真实连接器尚未实现。A 无专属角色检查器的限制保持，不把完整回归冒充角色门禁。

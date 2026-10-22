@@ -9,6 +9,52 @@ from .integration_models import (
     AccessContext, IndexBinding, Library, MediaResolution,
     QueryVector, SearchHit, SearchPage, SearchRequest,
 )
+from .retrieval_contracts import RetrievalPlan
+
+
+class RetrievalPlanRepository(Protocol):
+    """Pending contract; no implementation is provided by the validation slice.
+
+    Trusted backend proposals only. Every call rechecks owner/project/library
+    authority. confirm atomically checks digest + expected_task_version, increments
+    task_version, stores an approved plan rebound to that committed task version,
+    supersedes the prior plan, and records route-scoped idempotency. Replays of
+    the same body return the original record; changed bodies conflict. Different
+    keys confirming the same proposal have one effect. Replays do not reactivate
+    superseded plans. The existing task repository must share this transaction.
+
+    commit_page validates the current task/revision/generation/plan/epoch/input,
+    cursor provenance and snapshot in the same transaction as the page and outbox.
+    Empty pages are recorded without creating a cleaning operation. Do not write
+    accepted_count or mark the business task complete based on search exhaustion.
+    Network search runs OUTSIDE the transaction. This protocol is not an HTTP API.
+    """
+
+    def put_proposal(self, actor: Actor, proposal: RetrievalPlan) -> None: ...
+
+    def confirm(self, actor: Actor, task_id: str, plan_id: str, *, key: str,
+                proposal_digest: str, expected_task_version: int,
+                action: str) -> tuple[RetrievalPlan, bool]: ...
+
+    def get_current(self, actor: Actor, task_id: str) -> RetrievalPlan | None: ...
+
+    def commit_page(self, actor: Actor, operation_id: str, plan: RetrievalPlan,
+                    request: SearchRequest, page: SearchPage) -> bool:
+        """Return True only on an identical replay; changed operation bodies conflict.
+
+        operation_id must reference a previously reserved, authorized request,
+        never a worker-chosen identifier. Stale results are not current results.
+        """
+        ...
+
+    def reserve_page(self, actor: Actor, plan: RetrievalPlan, request: SearchRequest,
+                     key: str) -> tuple[str, bool]:
+        """Atomically reserve a logical operation before dispatch, scoped to task/route.
+
+        Validate current plan + owned predecessor cursor; replay returns the same
+        operation ID. Unapproved cursors and cross-plan continuations are rejected.
+        """
+        ...
 
 
 class TaskRepository(Protocol):
