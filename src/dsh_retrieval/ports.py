@@ -158,6 +158,10 @@ class TaskRepository(Protocol):
 
     def get_feedback_draft(self, actor: Actor, task_id: str, draft_id: str) -> dict[str, Any]: ...
 
+    def get_pending_feedback(self, actor: Actor, task_id: str) -> dict[str, Any] | None:
+        """Return the sole ready feedback draft, or None; never infer a future revision."""
+        ...
+
     def confirm_feedback_draft(self, actor: Actor, key: str, task_id: str, *,
                                draft_id: str, expected_draft_version: int,
                                proposal_digest: str, expected_task_version: int,

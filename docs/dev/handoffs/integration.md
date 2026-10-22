@@ -325,3 +325,11 @@
 - 冻结 `save/get/confirm_feedback_draft` 与 `list_revisions` 端口：反馈草稿不改变正式版本或运行，确认绑定 draft/task 版本、完整摘要和幂等键，拒绝不影响当前正式版本。
 - 首个体验版明确只把反馈文本追加进完整确认方案，不宣称已经把自然语言编译为可执行规则；真实 W3、检索、DJ、模型语义编译和内网均为 NOT_RUN/NOT_CONNECTED。
 - 验证：`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 共 391 项通过；`python3 tools/collab_gate.py check --role integration --base 9308a7353df7663417942855ff468cc51cebcc4b --task docs/dev/tasks/chat-feedback-contract.json` 为 SCOPE PASS、内部 391 项通过、LOCAL GATE PASS。输出中的 `LOCAL GATE FAIL` 来自既有负向门禁夹具。
+# 本地 Chat 提单与反馈体验（2026-10-22）
+
+- 角色：A integration；分支 `codex/integration`；基线 `e3ad25881bd7b464dfb7aaa019139c6cdf023019`；任务卡 `docs/dev/tasks/chat-feedback-local-ui.json`；23:02 开工。
+- 范围：依赖零新增的本地 HTML/CSS/JS、反馈/确认/版本 HTTP 路由、显式 SQLite 启动参数、端口补充及测试/说明。服务固定监听 loopback，页面使用 demo 身份。
+- 页面明确区分“反馈需求版本已确认”和“自然语言规则已编译/执行”；后者仍未实现。真实检索、DJ、W3、内网均不在本切片。
+- 23:10 里程碑：本地页面完成提单确认、反馈草稿、确认/拒绝和刷新恢复；HTTP 主流程、身份/幂等错误及页面安全头定向测试共 13 项通过。
+- 23:13 交付验证：完整回归 405 项通过；`python3 tools/collab_gate.py check --role integration --base e3ad25881bd7b464dfb7aaa019139c6cdf023019 --task docs/dev/tasks/chat-feedback-local-ui.json` 为 SCOPE PASS、内部 405 项通过、LOCAL GATE PASS。输出中的 `LOCAL GATE FAIL` 为既有负向门禁夹具。
+- 未验证：浏览器人工冒烟将在合并并启动后执行；真实检索、DJ、W3、模型语义编译和内网均 NOT_RUN。本地 SQLite 不是生产存储。

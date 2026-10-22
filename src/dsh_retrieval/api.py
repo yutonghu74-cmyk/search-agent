@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 import argparse
+from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -12,10 +13,15 @@ from .errors import ServiceError
 from .models import Actor
 from .service import InMemoryTaskRepository, TaskService
 from .adapters.projects import LocalProjectAccess
+from .adapters.task_storage.sqlite import SQLiteTaskRepository
+from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
 DRAFT_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/drafts(?:/([^/]+))?$")
+FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$")
+CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
+REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -42,6 +48,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _asset(self, content_type: str, value: str) -> None:
+        encoded = value.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type + "; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def _body(self) -> dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -65,7 +83,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         draft_match = DRAFT_PATH.fullmatch(self.path)
-        if self.path != "/v1/retrieval/tasks" and draft_match is None:
+        feedback_match = FEEDBACK_PATH.fullmatch(self.path)
+        confirmation_match = CONFIRMATION_PATH.fullmatch(self.path)
+        if (self.path != "/v1/retrieval/tasks" and draft_match is None
+                and not (feedback_match and feedback_match.group(2) is None)
+                and confirmation_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
@@ -74,21 +96,48 @@ class Handler(BaseHTTPRequestHandler):
                 result, replayed = self.service.save_draft(self._actor(), draft_match.group(1),
                     self.headers.get("Idempotency-Key", ""), self._body(), draft_match.group(2))
                 return HTTPStatus.OK, result, replayed
+            if feedback_match:
+                result, replayed = self.service.save_feedback(
+                    self._actor(), feedback_match.group(1), self.headers.get("Idempotency-Key", ""), self._body())
+                return HTTPStatus.OK, result, replayed
+            if confirmation_match:
+                result, replayed = self.service.confirm_feedback(
+                    self._actor(), confirmation_match.group(1), self.headers.get("Idempotency-Key", ""), self._body())
+                return HTTPStatus.ACCEPTED, result, replayed
             result, replayed = self.service.create_task(self._actor(), self.headers.get("Idempotency-Key", ""), self._body())
             return HTTPStatus.ACCEPTED, result, replayed
 
         self._run(action)
 
     def do_GET(self) -> None:  # noqa: N802
-        match = TASK_PATH.match(self.path)
+        if self.path == "/":
+            self._asset("text/html", CHAT_HTML)
+            return
+        if self.path == "/chat.css":
+            self._asset("text/css", CHAT_CSS)
+            return
+        if self.path == "/chat.js":
+            self._asset("text/javascript", CHAT_JS)
+            return
+        match = TASK_PATH.fullmatch(self.path)
         draft_match = DRAFT_PATH.fullmatch(self.path)
-        if match is None and not (draft_match and draft_match.group(2)):
+        feedback_match = FEEDBACK_PATH.fullmatch(self.path)
+        revisions_match = REVISIONS_PATH.fullmatch(self.path)
+        if (match is None and not (draft_match and draft_match.group(2))
+                and not (feedback_match and feedback_match.group(2))
+                and revisions_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
         def action() -> tuple[int, dict[str, Any], bool]:
             if draft_match:
                 return HTTPStatus.OK, self.service.get_draft(self._actor(), draft_match.group(1), draft_match.group(2)), False
+            if feedback_match:
+                return HTTPStatus.OK, self.service.get_feedback(
+                    self._actor(), feedback_match.group(1), feedback_match.group(2)), False
+            if revisions_match:
+                return HTTPStatus.OK, {"items": list(self.service.list_revisions(
+                    self._actor(), revisions_match.group(1)))}, False
             return HTTPStatus.OK, self.service.get_task(self._actor(), match.group(1)), False
 
         self._run(action)
@@ -111,11 +160,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Local development only; simulated identity headers, no W3")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--demo-project", action="store_true", help="grant tenant-a/user-a access to demo/default")
+    parser.add_argument("--ledger", help="local SQLite ledger path; omitted means in-memory storage")
     args = parser.parse_args()
     grants = [("tenant-a", "user-a", "demo", "default")] if args.demo_project else []
-    handler = create_handler(TaskService(InMemoryTaskRepository(), LocalProjectAccess(grants)))
+    repository = SQLiteTaskRepository(Path(args.ledger)) if args.ledger else InMemoryTaskRepository()
+    handler = create_handler(TaskService(repository, LocalProjectAccess(grants)))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; memory storage, simulated identity")
+    storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
+    print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -114,6 +114,17 @@ PYTHONPATH=src python3 -m dsh_retrieval.demo --executor real --resume /tmp/d实�
 SQLite 目前是上限 16 MB 的单快照开发账本，验证本机事务与进程重启，不是正式生产存储、outbox 或内网数据库选型。
 这不是最终业务交付，`accepted_count` 仍为空；真实模式只代表 DJ 确实运行，不代表真实库检索或全部业务规则通过。
 
+### Chat 提单与反馈体验（网页本地版）
+
+```bash
+mkdir -p var/chat-demo
+PYTHONPATH=src python3 -m dsh_retrieval.api --demo-project --ledger var/chat-demo/ledger.sqlite3 --port 8080
+```
+
+浏览器打开 `http://127.0.0.1:8080/`。页面支持自由文本生成确认卡、确认提单、保存反馈草稿、确认或拒绝反馈，以及发布新的需求 revision；SQLite 账本支持刷新和进程重启后读取。
+
+该页面只监听 loopback，使用可伪造的本地身份和固定 demo 项目授权。反馈文本会进入新的完整需求快照，但尚未编译成真实清洗规则，也不会启动真实检索、DJ、补数或交付。不要将服务暴露到局域网或公网。
+
 ## 目录
 
 - `src/dsh_retrieval/`：领域契约、状态机、应用服务和最小 HTTP 适配器。
