@@ -97,3 +97,10 @@
 - 完整回归命令 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：160 项通过、退出码 0（原 158 + 2 模型测试）。
 - `python3 tools/collab_gate.py check --role retrieval --base 4740d998e54961752dd062b796c9e5f8f0f538c9` 退出码 1：A 分支不是 retrieval 分支；没有 A 专用检查器，不冒充门禁通过。实现方需在本契约提交基线上通过角色门禁。
 - 真实媒体、内网、跨系统原子性和持久候选发布均未验证。
+
+## 授权媒体物化预览集成（2026-10-22 11:17，Asia/Shanghai）
+
+- 契约基线 10228c0ed84c45c49133e4f83868bd20af52a4f8；retrieval 实现 e559b505520f57ab30476ebc1c8886be9ee82e05，角色范围及 178 项测试通过。A 审查映射、身份聚合、读取上限、摘要和临时目录生命周期后快进合入 master。
+- 主分支执行 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`：退出码 0，178 项通过（原 158 + 2 模型 + 18 物化）。
+- ACCEPTED 仅本地临时候选预览开发切片：合成字节、模拟媒体网关与 SQLite；不是图片规则通过、真实召回、持久候选、清洗装配或内网验收。P01 仍未完成。
+- 未新增依赖、未运行 DJ/DSH、未访问内网、未推送。下一步持久候选快照与独立确认契约，解决检索原 scope 和清洗递增 task_version 的生命周期衔接；强杀清理/跨系统 ACL 原子性未验证。
