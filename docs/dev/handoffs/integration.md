@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 候选清单账本集成验收（2026-10-22 12:16，Asia/Shanghai）
+
+- 契约基线 8d7dcc8b39a672ad174cf91704a84e5c66eec883；core 实现 7b9c96d763a7581a39d495ee31f6181c95ac9ba6，角色范围与 204 项测试通过；A 审查事务、稳定 scope 读取例外、来源覆盖、权限重查和模拟服务组合后快进集成。
+- 主分支合入后 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` 退出码 0，204 项通过（178 原基线 + 6 契约 + 20 存储/模拟集成）。
+- ACCEPTED：本地单页不可变候选清单发布切片。独立进程读取、幂等/并发单次确认、原子本地事件、失败回滚通过；不推进任务或计算 accepted_count，不派发清洗。媒体路径不落账本，存版本化引用不等于永久可下载。
+- 当前仅合成字节/模拟网关/SQLite；真实 DJ、真实语义检索、内网联测均 NOT_RUN。没有新增依赖、推送或部署；未触碰用户运行库。新表不能由旧二进制直接读取，生产迁移/回滚未验收。
+- 下一步：将已发布 manifest 重新鉴权/物化，并与清洗执行 context 生命周期衔接；不得把本提案确认当成清洗授权，不得放宽检索原 task_version 栅栏。跨页候选池、全量规则和生产持久化仍未完成。
+
 ## 2026-10-22 候选清单持久化契约
 
 - A / codex/integration / var/worktrees/integration，基线 83b3607a96603e7e6ba18adbd62e1d57f24ed9f8；范围/验收见 candidate-ledger-task.md。
