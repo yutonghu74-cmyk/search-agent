@@ -19,14 +19,16 @@ from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal,
                                      require_complete_cleaning_result)
 from ...query_spec import digest
 from ...recipe_bridge import require_confirmed_rules
+from ...result_contracts import ExactResultSetPreview, build_exact_result_set
 from ...service import require_key, require_version
 
 
-FORMAT = 2
+FORMAT = 3
 
 
 def empty_state():
-    return {"proposals": {}, "approvals": {}, "results": {}, "keys": {}, "events": []}
+    return {"proposals": {}, "approvals": {}, "results": {}, "result_sets": {},
+            "current_result_sets": {}, "published_results": {}, "keys": {}, "events": []}
 
 
 def dump_state(state):
@@ -60,6 +62,28 @@ def load_state(row):
             if type(result) is not CleaningJobResult or approval is None:
                 raise ValueError("result")
             require_complete_cleaning_result(approval.job, result)
+        for result_set_id, record in state["result_sets"].items():
+            if (type(result_set_id) is not str or type(record) is not tuple or len(record) != 2
+                    or type(record[0]) is not ExactResultSetPreview or type(record[1]) is not int):
+                raise ValueError("result set")
+            preview, published_version = record
+            approval = state["approvals"].get(preview.operation_id)
+            result = state["results"].get(preview.operation_id)
+            if (approval is None or result is None or preview.cleaning_result_digest != result.result_digest
+                    or preview.task_version != approval.task_version
+                    or published_version != preview.task_version + 1):
+                raise ValueError("result set source")
+        for task_id, result_set_id in state["current_result_sets"].items():
+            record = state["result_sets"].get(result_set_id)
+            if record is None:
+                raise ValueError("current result set")
+            approval = state["approvals"][record[0].operation_id]
+            if approval.proposal.task_id != task_id:
+                raise ValueError("current result task")
+        for operation_id, result_set_id in state["published_results"].items():
+            record = state["result_sets"].get(result_set_id)
+            if record is None or record[0].operation_id != operation_id:
+                raise ValueError("published result source")
         for key, value in state["keys"].items():
             if (type(key) is not tuple or len(key) != 4 or type(value) is not tuple
                     or len(value) != 2 or type(value[0]) is not str
@@ -79,6 +103,15 @@ def load_state(row):
                           "task_id": result.binding.task_id,
                           "result_digest": result.result_digest}
                          for opid, result in state["results"].items()})
+        expected.update({"result-set-published:" + result_set_id:
+                         {"event_id": "result-set-published:" + result_set_id,
+                          "kind": "preview_result_set_published",
+                          "result_set_id": result_set_id,
+                          "task_id": state["approvals"][preview.operation_id].proposal.task_id,
+                          "accepted_count": preview.accepted_count,
+                          "gap": preview.gap,
+                          "stop_reason": preview.stop_reason}
+                         for result_set_id, (preview, _) in state["result_sets"].items()})
         actual = {event.get("event_id"): event for event in state["events"]
                   if type(event) is dict and type(event.get("event_id")) is str}
         if len(actual) != len(state["events"]) or actual != expected:
@@ -307,4 +340,118 @@ class SQLiteMultiRuleApprovalRepository:
             self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
             return result
 
+        return self._transaction(False, get)
+
+    @staticmethod
+    def _counting_target(task):
+        try:
+            query = json.loads(task.confirmed_proposal_json)["query_spec"]
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ServiceError("TASK_CORRUPT", "Confirmed query is unavailable", 500) from exc
+        if (query.get("media_type") != "image"
+                or query.get("intra_batch_dedup") != {"policy_ref": "exact-content",
+                                                       "config_version": "1"}
+                or query.get("cross_batch_dedup") != {"scope": "none", "references": [],
+                                                       "comparison_methods": [],
+                                                       "reference_digest": None}
+                or query.get("refill_policy") != {"mode": "input_only",
+                                                   "target_count": query.get("target_count"),
+                                                   "approved_library_ids": [],
+                                                   "progression": "manual"}
+                or query.get("target_count") != task.target_count):
+            raise ServiceError("FEATURE_NOT_SUPPORTED",
+                               "Only image exact-content input-only preview is supported", 422)
+        return task.target_count
+
+    def _read_result_set(self, memory, retrieval, candidates, state, actor, task_id,
+                         result_set_id):
+        task = self.manifests.retrieval._authorize(memory, actor, task_id, action="read")
+        record = state["result_sets"].get(result_set_id)
+        if record is None or state["current_result_sets"].get(task_id) != result_set_id:
+            raise ServiceError("NOT_FOUND", "Current result set not found", 404)
+        preview, published_version = record
+        approval = state["approvals"].get(preview.operation_id)
+        result = state["results"].get(preview.operation_id)
+        if (approval is None or result is None or approval.proposal.task_id != task_id
+                or task.task_version != published_version
+                or task.confirmed_revision != approval.proposal.revision
+                or task.run_generation != preview.generation):
+            raise ServiceError("REVISION_CONFLICT", "Result set is no longer current", 409)
+        task_checked, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
+                                                approval.proposal.manifest_ref, "read")
+        self._same_inputs(task_checked, manifest, approval.proposal)
+        require_confirmed_rules(task_checked, approval.proposal.recipe)
+        self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
+        target = self._counting_target(task_checked)
+        rebuilt = build_exact_result_set(approval.job, result, target)
+        if rebuilt != preview:
+            raise ServiceError("STORAGE_CORRUPT", "Published result set cannot be rebuilt", 500)
+        self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
+        return self._result_set_view(result_set_id, preview, published_version)
+
+    @staticmethod
+    def _result_set_view(result_set_id, preview, published_version):
+        return {"result_set_id": result_set_id, "kind": "preview", "status": "published",
+                "as_of_task_version": published_version, "operation_id": preview.operation_id,
+                "generation": preview.generation, "result_set_digest": preview.result_set_digest,
+                "policy_ref": "exact-content@1", "selection_ref": "candidate-identity-order@1",
+                "target_count": preview.target_count,
+                "eligible_unique_count": len(preview.accepted) + len(preview.reserve),
+                "accepted_count": preview.accepted_count, "reserve_count": len(preview.reserve),
+                "duplicate_count": preview.duplicate_count, "failed_count": preview.fail_count,
+                "pending_review_count": preview.unknown_count,
+                "currently_accessible_count": preview.accepted_count, "counts_status": "fresh",
+                "gap": preview.gap, "stop_reason": preview.stop_reason,
+                "accepted": tuple(preview.accepted), "reserve": tuple(preview.reserve),
+                "refill_dispatched": False}
+
+    def publish_preview(self, actor, task_id, operation_id):
+        def publish(memory, retrieval, candidates, state):
+            task = self.manifests.retrieval._authorize(memory, actor, task_id, action="write")
+            existing_id = state["published_results"].get(operation_id)
+            if existing_id is not None:
+                return self._read_result_set(memory, retrieval, candidates, state, actor,
+                                             task_id, existing_id), True
+            approval = state["approvals"].get(operation_id)
+            result = state["results"].get(operation_id)
+            if approval is None or result is None or approval.proposal.task_id != task_id:
+                raise ServiceError("NOT_FOUND", "Complete cleaning result not found", 404)
+            task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
+                                            approval.proposal.manifest_ref, "write")
+            self._same_inputs(task, manifest, approval.proposal)
+            self._current(task, approval)
+            require_confirmed_rules(task, approval.proposal.recipe)
+            self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
+            target = self._counting_target(task)
+            preview = build_exact_result_set(approval.job, result, target)
+            # Final authority/fence check immediately before the atomic local write.
+            task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
+                                            approval.proposal.manifest_ref, "write")
+            self._same_inputs(task, manifest, approval.proposal)
+            self._current(task, approval)
+            self.manifests._check(memory, retrieval, actor, manifest.proposal, reading=True)
+            authoritative = memory._tasks[task_id]
+            authoritative.task_version += 1
+            authoritative.stage = "refill"
+            authoritative.active_cleaning_operation_id = None
+            authoritative.active_plan_digest = None
+            result_set_id = "resultset_" + uuid.uuid4().hex
+            state["result_sets"][result_set_id] = (preview, authoritative.task_version)
+            state["current_result_sets"][task_id] = result_set_id
+            state["published_results"][operation_id] = result_set_id
+            state["events"].append({"event_id": "result-set-published:" + result_set_id,
+                                    "kind": "preview_result_set_published",
+                                    "result_set_id": result_set_id, "task_id": task_id,
+                                    "accepted_count": preview.accepted_count, "gap": preview.gap,
+                                    "stop_reason": preview.stop_reason})
+            return self._result_set_view(result_set_id, preview, authoritative.task_version), False
+        return self._transaction(True, publish)
+
+    def get_current_result_set(self, actor, task_id):
+        def get(memory, retrieval, candidates, state):
+            result_set_id = state["current_result_sets"].get(task_id)
+            if result_set_id is None:
+                raise ServiceError("NOT_FOUND", "Current result set not found", 404)
+            return self._read_result_set(memory, retrieval, candidates, state, actor,
+                                         task_id, result_set_id)
         return self._transaction(False, get)

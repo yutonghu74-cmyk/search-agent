@@ -25,6 +25,7 @@ from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal,
                                      CleaningCandidateRef, CleaningCandidateVerdict, CleaningJobResult, CleaningRecipe,
                                      CleaningRule, CleaningRuleVerdict, DetectionStep)
 from ...retrieval_contracts import RetrievalPlan, RetrievalScope
+from ...result_contracts import ExactRepresentative, ExactResultSetPreview
 
 
 TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal, Task, Draft,
@@ -33,7 +34,8 @@ TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal,
                               CandidateManifestProposal, ManifestItem, CleaningApproval,
                               CleaningApprovalProposal, CleaningBinding, CleaningCandidateRef, CleaningRecipe,
                               CleaningRule, DetectionStep, CleaningRuleVerdict,
-                              CleaningCandidateVerdict, CleaningJobResult)}
+                              CleaningCandidateVerdict, CleaningJobResult,
+                              ExactRepresentative, ExactResultSetPreview)}
 ENUMS = {t.__name__: t for t in (TaskLifecycle, RunStatus)}
 FORMAT = 1
 MAX_BYTES = 16 * 1024 * 1024

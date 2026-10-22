@@ -1,5 +1,15 @@
 # core 精确内容计数预览交接
 
+## 当前任务：input-only 精确去重预览原子发布（2026-10-22）
+
+- core / `codex/task-core` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`；执行基线 `4cfd13ebb9657be3dd3728d5571576b4bc720688`，任务卡 `docs/dev/exact-result-publication-task.md`；状态 READY_FOR_REVIEW。
+- 修改 `adapters/task_storage/multi_rule.py`、`sqlite.py`，新增 `tests/core/test_exact_result_publication.py` 及本交接。消费 A 已冻结的 `ExactResultSetPreview`；多规则账本 format 升为 3，旧 format 显式拒绝，不静默迁移或重置。
+- `publish_preview` 仅消费已批准且完整持久化的清洗结果，在单个 `BEGIN IMMEDIATE` 事务中重验创建人、项目/素材访问、task/revision/generation/task_version/operation、确认规则及固定 input-only 精确内容策略；原子写入不可变预览、当前指针、统计事件，并将任务版本加一、阶段推进到 `refill`、清除活动清洗 operation。重放和 12 次多连接并发只有一次效果；`get_current_result_set` 每次读取重新授权并从源结果确定性重建校验。
+- 返回 accepted/eligible/reserve/duplicate/fail/unknown/gap/stop_reason 和可追溯代表；固定输入不足时停止原因为 `SEARCH_STRATEGIES_EXHAUSTED`，语义只限已批准 input-only 范围，不代表全库穷尽。`refill_dispatched=false`，不创建新检索、清洗或 delivery。
+- 2026-10-22（Asia/Shanghai）：定向 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_exact_result_publication.py' -q` 退出码 0，6 项通过；完整回归 350 项通过。`python3 tools/collab_gate.py check --role core --base 4cfd13ebb9657be3dd3728d5571576b4bc720688` 退出码 0，SCOPE PASS / LOCAL GATE PASS；输出中的 `LOCAL GATE FAIL` 是门禁负向夹具预期。`git diff --check` 通过。
+- 覆盖：重启读回及任务推进、并发幂等、确认策略快照被改写/旧 generation 拒绝、撤权和后续 task_version 变化阻断读取、序列化失败时任务/指针/事件全回滚、持久化源结果被篡改后重启失败关闭。公共契约单测另覆盖精确去重、稳定代表、target/reserve 拆分、fail/unknown 不计与摘要变化。
+- NOT_RUN：自动补数、跨 batch 去重、相似去重、正式 delivery/result_set API、生产数据库与 outbox relay、真实 ClickHouse/Milvus/W3/DJ、断电/网络文件系统、性能与业务质量。继续自动补数前必须由 A 扩展 QuerySpec/ExecutionRules 与检索推进契约，core 不私建第二套协议。
+
 ## 当前任务：多规则清洗结果本地发布（2026-10-22）
 
 - core / `codex/task-core` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`；执行基线 `1c09d1fd69e1cfc844dc7ed74ae24e7a42cb3c03`，任务卡 `docs/dev/cleaning-result-storage-task.md`；状态 READY_FOR_REVIEW。
