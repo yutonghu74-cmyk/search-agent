@@ -75,3 +75,9 @@
 - 旧任务/清洗 payload 不变；同库新增 retrieval_ledger 表，未触碰用户已有运行库。旧二进制不能直接读取新增表的账本。生产数据库选型未变，PostgreSQL 非必装。
 - A 本轮只更新本记录及契约说明，无共享运行时代码变更；角色门禁证据采用本次 core 的实际通过结果，不宣称存在 A 专属检查器。
 - 尚缺公共的待执行作业/已提交页读取接口、候选发布、HTTP/清洗装配和事件 relay；当前支持已知幂等键恢复，不宣称后台自动接管。下一步先冻结这些接口后分派实现。
+
+## 授权作业读取契约（2026-10-22）
+
+- A / codex/integration / var/worktrees/integration；基线 ecc58429096b94136627eae6b4fcab2e846926e5；任务卡 docs/dev/retrieval-read-task.md。响应 core 已登记的读取接口缺口，新增 RetrievalOperation、get_operation、list_pending，不改变已有写入接口或存储格式。
+- 本提交发布契约基线，core 同步后实施。只读当前批准计划，区分 reserved 与已提交空页；重验身份/当前权限/版本；不派发、不加 lease，不作为媒体读取权限。
+- 完整回归 146 项通过（原 144 + 2 返回模型用例），命令 `PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q`，退出码 0。A 按要求运行 core 角色检查，因 codex/integration 非 core 分支退出码 1；没有 A 专属检查器，不改检查器绕过。core 实现需独立通过角色门禁。

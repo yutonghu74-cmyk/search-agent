@@ -44,4 +44,13 @@ snapshot exhausted 也仅指批准查询及连接器可访问集合，不证明�
 - INVALID_SEARCH_PAGE：连接器输出不可信；不是业务内容 fail。
 - 原接口未改签名；SQLiteRetrievalPlanRepository 为显式装配的本地实现，路径 src/dsh_retrieval/adapters/task_storage/retrieval.py，构造时必须注入项目/库权限服务。HTTP 和 CandidateIntake 不会自动接入。
 - 原子确认/回传/恢复的本地证据见 tests/core/test_retrieval_storage.py 与 docs/dev/handoffs/core.md。任务表和检索表共库同事务；本地事件尚无发送器，不代表生产 outbox 完成。
-- 下一切片：冻结待执行作业/已提交页的授权读取及候选清单发布接口，再装配空召回与非空候选确认。真实 ClickHouse/Milvus 和清洗联测另验收。
+- 下一切片：实现下述授权读取接口，再冻结候选清单发布/媒体物化接口并装配确认流程。真实 ClickHouse/Milvus 和清洗联测另验收。
+
+## 授权恢复读取（本次新增契约）
+
+- `get_operation(actor, task_id, operation_id)` 返回不可变 RetrievalOperation，字段为 operation_id、plan、request、page，status 派生为 reserved/committed。page=None 表示已预约未提交，不是失败，也不是零结果；已提交空页的 status 仍为 committed。
+- `list_pending(actor, task_id)` 只列当前批准计划未提交的作业，operation_id 排序，最多 100；超限返回 INPUT_LIMIT，不截断。当前没有批准计划时返回空元组；权限/存储故障不得转换为空列表。
+- 这两个方法是可信后端接口，不是新 HTTP 路由。每次重新校验所有人/项目/库和当前 task/revision/generation/plan/epoch；暂停、取消、终结、旧计划拒绝。跨 task/owner/tenant ID 按 NOT_FOUND 隐藏。历史浏览另设契约，不能靠恢复入口读取旧可执行计划。
+- 返回只读快照，不修改 task_version、不创建事件、不派发、不获取 lease。两个恢复进程可能读到同一个作业；正式执行前还须预约/重查，外部调用费用与业务幂等分别处理。实际自动接管和 exactly-once 执行不在承诺内。
+- 原始 hits/score 不授予媒体访问权；下游必须再通过 MediaRepository/MediaAccessGateway 当前授权解析、读取。候选发布和清洗确认不由读取接口自动完成。
+- 兼容性：新增读取方法及返回模型；已有写入签名/存储格式不变。旧实现不具有这两个新方法，装配必须显式升级，不能退回直接读私有字典。

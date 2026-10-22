@@ -56,6 +56,23 @@ class RetrievalPlan:
         return digest(asdict(self))
 
 
+@dataclass(frozen=True, slots=True)
+class RetrievalOperation:
+    """Internal authorized snapshot, not a dispatch instruction or result set.
+
+    page=None means reserved, NOT failed or empty. A committed empty SearchPage
+    remains a committed result. Recheck ledger authority/fences before any work.
+    """
+    operation_id: str
+    plan: RetrievalPlan
+    request: SearchRequest
+    page: SearchPage | None
+
+    @property
+    def status(self) -> str:
+        return "reserved" if self.page is None else "committed"
+
+
 def validate_plan(plan: RetrievalPlan) -> None:
     request, binding, vector = plan.request, plan.request.binding, plan.request.vector
     if (not _positive(plan.epoch) or not _positive(request.plan_version)

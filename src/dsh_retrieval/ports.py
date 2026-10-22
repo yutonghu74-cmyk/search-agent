@@ -9,11 +9,11 @@ from .integration_models import (
     AccessContext, IndexBinding, Library, MediaResolution,
     QueryVector, SearchHit, SearchPage, SearchRequest,
 )
-from .retrieval_contracts import RetrievalPlan
+from .retrieval_contracts import RetrievalOperation, RetrievalPlan
 
 
 class RetrievalPlanRepository(Protocol):
-    """Pending contract; no implementation is provided by the validation slice.
+    """Retrieval ledger contract; a local SQLite development adapter is available.
 
     Trusted backend proposals only. Every call rechecks owner/project/library
     authority. confirm atomically checks digest + expected_task_version, increments
@@ -37,6 +37,25 @@ class RetrievalPlanRepository(Protocol):
                 action: str) -> tuple[RetrievalPlan, bool]: ...
 
     def get_current(self, actor: Actor, task_id: str) -> RetrievalPlan | None: ...
+
+    def get_operation(self, actor: Actor, task_id: str, operation_id: str) -> RetrievalOperation:
+        """Owner/project/library-authorized immutable current-plan snapshot.
+
+        Unknown/cross-task IDs return NOT_FOUND without disclosing another task.
+        Stale scope/epoch, pause/cancel/finalization and revoked authority reject.
+        Committed pages contain raw retrieval evidence, never media read grants.
+        """
+        ...
+
+    def list_pending(self, actor: Actor, task_id: str) -> tuple[RetrievalOperation, ...]:
+        """Return only reserved operations for the current approved plan, ID-sorted.
+
+        No approved plan -> empty tuple. Recheck current authorization and fences;
+        dependency errors must not become empty results. Bounded to 100 entries;
+        overflow raises INPUT_LIMIT without truncating. Reading does not claim,
+        lease, dispatch or approve work; concurrent readers may see the same item.
+        """
+        ...
 
     def commit_page(self, actor: Actor, operation_id: str, plan: RetrievalPlan,
                     request: SearchRequest, page: SearchPage) -> bool:

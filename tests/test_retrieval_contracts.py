@@ -1,5 +1,5 @@
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 import unittest
 
 from dsh_retrieval.adapters.memory import InMemoryTaskRepository
@@ -7,7 +7,7 @@ from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.integration_models import IndexBinding, QueryVector, SearchHit, SearchPage, SearchRequest
 from dsh_retrieval.models import Actor, RunStatus, TaskLifecycle
 from dsh_retrieval.retrieval_contracts import (
-    RetrievalPlan, RetrievalScope, validate_confirmation, validate_execution, validate_page,
+    RetrievalOperation, RetrievalPlan, RetrievalScope, validate_confirmation, validate_execution, validate_page,
 )
 from draft_helpers import confirmation, make_service
 
@@ -48,6 +48,18 @@ class RetrievalContractTest(unittest.TestCase):
         self.assertEqual(self.task, before)
         self.assertEqual(self.plan.proposal_digest, deepcopy(self.plan).proposal_digest)
         self.assertEqual(self.repo.get(self.actor, self.task.task_id), before)
+
+    def test_operation_snapshot_is_immutable(self):
+        operation = RetrievalOperation("op", self.plan, self.request, None)
+        self.assertEqual(operation.status, "reserved")
+        with self.assertRaises(FrozenInstanceError):
+            operation.operation_id = "changed"
+
+    def test_committed_empty_page_is_not_pending(self):
+        operation = RetrievalOperation("op", self.plan, self.request,
+                                       SearchPage((), None, "exhausted", "snapshot", "snap"))
+        self.assertEqual(operation.status, "committed")
+        self.assertEqual(operation.page.hits, ())
 
     def test_explicit_confirmation_version_and_digest(self):
         self.assert_code("CONFIRMATION_REQUIRED", lambda: self.confirm(action="auto"))
