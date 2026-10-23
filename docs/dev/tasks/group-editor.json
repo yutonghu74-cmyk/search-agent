@@ -1,0 +1,15 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "5a927ce9845489586bda8ad5555f170d8feebca7",
+  "files": [
+    "src/dsh_retrieval/expansion_models.py",
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "tests/test_grouped_expansion.py",
+    "contracts/grouped-expansion.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "允许用户结构化编辑主标签与辅助召回词，服务端严格校验并计算摘要；不要求指定扩词数量；保留旧模板兼容。预览可返回编辑，确认持久化后历史详情展示分组。项目权限和已有确认摘要生效，SQLite 重启读回保持一致。分组配额及真实检索不在此切片中启用。定向验证及 integration 角色门禁通过。"
+}
