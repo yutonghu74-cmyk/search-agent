@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 多分支批准与调度契约（2026-10-23）
+
+- ACCEPTED（本地契约切片）；A integration / codex/integration；worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；基线 9c94b84c2769c1ccbf3cde9d34038e6907acfb69；任务卡 docs/dev/tasks/multi-branch-contract.json。
+- 新增不可变 RetrievalPlanSet、整组确认/成员执行校验、独立仓库协议；复用 PreparedQuery 和 RetrievalPlan。最多 64 个成员，同 scope/epoch/逻辑摘要，保留原文分支，拒绝重复物理查询和混合索引绑定。未修改 core、旧单计划仓库或适配器。
+- `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_multi_branch_contracts tests.test_physical_query_preparation tests.test_query_branches -q`：18 项 PASS。
+- `python3 tools/collab_gate.py check --role integration --base 9c94b84c2769c1ccbf3cde9d34038e6907acfb69 --task docs/dev/tasks/multi-branch-contract.json`：SCOPE PASS、458 项 PASS、LOCAL GATE PASS，退出码 0；中间 LOCAL GATE FAIL 是既有负例夹具输出。git diff --check PASS；未额外重复完整回归。
+- 事务/持久化/真实检索/页面装配 NOT_RUN；纯校验不是批准。下一步 core 依本契约实现整组原子批准、作用域重绑定、游标隔离、预留及结果幂等、SQLite 重启恢复，之后由 A 集成调度。
+
 ## 授权物理查询准备（2026-10-23）
 
 - ACCEPTED（本地后端准备切片）；A integration / codex/integration；worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；任务卡 docs/dev/tasks/physical-query-preparation.json；基线 cb1388c3d0fd7a61ea0d5ad8902e24961c0f8608。
