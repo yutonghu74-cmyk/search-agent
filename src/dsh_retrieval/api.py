@@ -19,6 +19,7 @@ from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
 from .progress_models import build_task_progress
 from .result_views import ResultCursorError, build_result_page
 from .expansion_models import preview_grouped_expansion, preview_edited_groups
+from .query_branches import build_query_branch_view
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -32,6 +33,7 @@ PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
+QUERY_BRANCHES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-branches$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -160,14 +162,31 @@ class Handler(BaseHTTPRequestHandler):
         project_tasks_match = PROJECT_TASKS_PATH.fullmatch(path)
         project_conversations_match = PROJECT_CONVERSATIONS_PATH.fullmatch(path)
         conversation_match = CONVERSATION_PATH.fullmatch(path)
+        branches_match = QUERY_BRANCHES_PATH.fullmatch(path)
         if (match is None and not (draft_match and draft_match.group(2))
                 and not (feedback_match and feedback_match.group(2))
                 and revisions_match is None and progress_match is None and results_match is None and project_tasks_match is None
-                and project_conversations_match is None and conversation_match is None):
+                and project_conversations_match is None and conversation_match is None and branches_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
         def action() -> tuple[int, dict[str, Any], bool]:
+            if branches_match:
+                actor = self._actor()
+                task_id = branches_match.group(1)
+                task = self.service.get_task(actor, task_id)
+                revisions = self.service.list_revisions(actor, task_id)
+                proposal = next((item["proposal"] for item in revisions
+                                 if item["revision"] == task["confirmed_revision"]), None)
+                try:
+                    result = build_query_branch_view(task, proposal)
+                except ValueError:
+                    raise ServiceError("STORAGE_CORRUPT", "query branch binding is invalid", 500) from None
+                current = self.service.get_task(actor, task_id)
+                if any(current[key] != task[key] for key in
+                       ("confirmed_revision", "task_version", "run_generation")):
+                    raise ServiceError("REVISION_CONFLICT", "task changed during preview; reload", 409)
+                return HTTPStatus.OK, result, False
             if draft_match:
                 return HTTPStatus.OK, self.service.get_draft(self._actor(), draft_match.group(1), draft_match.group(2)), False
             if feedback_match:

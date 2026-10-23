@@ -1,5 +1,15 @@
 # A 总控集成交接
 
+## 查询分支编译与预览（2026-10-23）
+
+- ACCEPTED（本地逻辑预览切片）；A integration / codex/integration；独立 worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；基线 80712ee58d6f556a1453533876b03113820eb60c；任务卡 docs/dev/tasks/query-branches.json。
+- 用户已明确授权本地提交、基线发布和合并，不推送远端。上一包 74c8121 已合并 master，引用前次 440 项门禁证据，不重复测试未变代码。
+- 新模块、只读 API 和 Chat 入口实现原文保底、主标签/辅助词分支、空白规范化指纹、跨组来源保留、约束引用及版本绑定。无模型调用、无自动批准或执行，未修改 core/适配器。
+- 首次定向 20 项运行中 1 项夹具错误：make_service 漏传 repository，已修正。复测 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_query_branches tests.test_api tests.test_chat_ui tests.test_grouped_expansion -q`，20 项 PASS。
+- `python3 tools/collab_gate.py check --role integration --base 80712ee58d6f556a1453533876b03113820eb60c --task docs/dev/tasks/query-branches.json`：SCOPE PASS、445 项 PASS、LOCAL GATE PASS（退出码 0）。LOCAL GATE FAIL 来自既有负例夹具。git diff --check PASS；无额外重复全量回归。
+- 8081 浏览器验收 PASS：重启隔离服务并加载已确认本地测试任务，点击“查看查询分支（未执行）”，显示原文、狗、狗 柯基、猫、猫 橘猫共 5 分支，以及版本绑定、来源、约束引用、指纹和未执行说明。未新增正式任务、未写 8080 用户账本。
+- 下一步：授权目录选库与编码能力校验后生成物理计划，接现有批准账本；多分支批准及执行装配需独立工作包，不绕过 core 责任边界。真实检索/模型/内网 NOT_RUN。
+
 ## 可编辑交付分组（2026-10-23）
 
 - 13:32 CST：确认成功后清空草稿引用并移除旧卡操作；确认失败保留草稿用于重试。确认/编辑入口增加状态防护，避免已确认方案退回草稿编辑。新增 Node 行为测试覆盖失败保留、成功移除、重复调用不再请求；同一定向命令 15 项 PASS，同一角色门禁 440 项 PASS、SCOPE PASS、LOCAL GATE PASS（退出码 0），git diff --check PASS。8081 隔离服务已重启加载变更；本次状态防护以行为测试验证，未重复浏览器合成提单。8080 未变，提交与合并仍未执行。
