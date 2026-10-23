@@ -150,3 +150,11 @@
 - 范围：`service.py`、内存/SQLite task repository、`tests/core/test_conversation_storage.py` 和本交接。实现需求草稿/反馈消息与对应草稿同事务保存，确认时写独立 task/revision 关联；消息不进入正式 revision 时间线。
 - 验证覆盖：新需求→确认→反馈→再确认的消息与两次关联；幂等不重复；错误绑定全回滚；创建人/项目撤权；SQLite 重启恢复；移除 conversation 容器及 Task/Draft 新字段的旧快照兼容。`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.core.test_conversation_storage tests.test_drafts tests.core.test_feedback tests.core.test_sqlite_storage -q`：35 项通过、退出码 0。`python3 tools/collab_gate.py check --role core --base 2877e6ce7e0883378f3b30471361d43773790f78`：SCOPE PASS、420 项通过、LOCAL GATE PASS、退出码 0；其中 `LOCAL GATE FAIL` 为既有负向夹具输出。按用户要求未在门禁外重复完整回归。
 - 不实现 HTTP/UI、附件、assistant 消息、保留/删除策略；不访问内网、真实业务数据、W3 或 DJ。
+# 多分支整组批准持久化（2026-10-23）
+
+- READY_FOR_REVIEW；角色 core，分支 codex/task-core，独立 worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core；任务卡 docs/dev/tasks/multi-branch-storage.json；基线 cc9d14c6e3b5f27484ed47299babbfc6ba04fdc7。
+- 新增 SQLitePlanSetApprovalRepository，仅实现 put_proposal/confirm/get_current；新表与现有 local_ledger 同一事务。序列化注册 PreparedQuery/RetrievalPlanSet，旧格式不重置；无共享模型变更。
+- 全成员权限、scope/CAS/摘要/epoch 校验；一次任务版本增长、所有成员 scope 重绑定、当前集合/幂等/outbox 同事务。相同 proposal 多 key 一次效果；旧批准重放仅返回旧记录，不改变当前集合。
+- 定向 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.core.test_plan_set_storage tests.test_multi_branch_contracts -q`：初次 12 项 PASS，补独立进程恢复测试后 13 项 PASS。
+- `python3 tools/collab_gate.py check --role core --base cc9d14c6e3b5f27484ed47299babbfc6ba04fdc7`：SCOPE PASS、465 项 PASS、LOCAL GATE PASS，退出码 0（中间 LOCAL GATE FAIL 为既有负向夹具）；git diff --check PASS。未在门禁外重复完整回归。
+- 不实现 reserve_page/commit_page、调度或 HTTP，不声称完整实现 RetrievalPlanSetRepository。真实目录/编码器/内网未运行。下一步实现成员级分页预留与回传事务，复用已发布协议。

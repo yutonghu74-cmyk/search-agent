@@ -27,6 +27,8 @@ from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal,
 from ...retrieval_contracts import RetrievalPlan, RetrievalScope
 from ...result_contracts import ExactRepresentative, ExactResultSetPreview
 from ...conversation_models import ConversationConfirmation, ConversationMessage
+from ...physical_query_preparation import PreparedQuery
+from ...multi_branch_contracts import RetrievalPlanSet
 
 
 TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal, Task, Draft,
@@ -37,7 +39,7 @@ TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal,
                               CleaningRule, DetectionStep, CleaningRuleVerdict,
                               CleaningCandidateVerdict, CleaningJobResult,
                               ExactRepresentative, ExactResultSetPreview,
-                              ConversationConfirmation, ConversationMessage)}
+                              ConversationConfirmation, ConversationMessage, PreparedQuery, RetrievalPlanSet)}
 ENUMS = {t.__name__: t for t in (TaskLifecycle, RunStatus)}
 FORMAT = 1
 MAX_BYTES = 16 * 1024 * 1024
@@ -134,7 +136,7 @@ class SQLiteTaskRepository:
             with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if tables and ("local_ledger" not in tables or tables - {"local_ledger", "retrieval_ledger", "candidate_ledger", "multi_rule_cleaning_ledger"}):
+                if tables and ("local_ledger" not in tables or tables - {"local_ledger", "retrieval_ledger", "candidate_ledger", "multi_rule_cleaning_ledger", "plan_set_ledger"}):
                     raise ServiceError("STORAGE_FORMAT_UNSUPPORTED", "not a local demo ledger", 500)
                 db.execute("CREATE TABLE IF NOT EXISTS local_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)")
                 row = db.execute("SELECT format, payload FROM local_ledger WHERE id=1").fetchone()
