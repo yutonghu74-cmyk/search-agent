@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import re
+import time
+import urllib.error
 import urllib.request
 
 from .errors import ServiceError
@@ -67,9 +69,24 @@ class ModelRuntime:
         request = urllib.request.Request(profile.config.base_url.rstrip('/') + '/chat/completions',
             data=json.dumps(body, ensure_ascii=False).encode(), method='POST',
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + profile.config.api_key})
+        for attempt in range(3):
+            try:
+                with self.opener.open(request, timeout=60) as response:
+                    raw = response.read(1_000_001)
+                break
+            except urllib.error.HTTPError as error:
+                if error.code not in (429, 502, 503, 504) or attempt == 2:
+                    raise ServiceError('MODEL_REQUEST_FAILED', 'Model request failed; no model fallback', 502) from None
+                retry_after = error.headers.get('Retry-After', '') if error.headers else ''
+                delay = max(2 ** attempt, min(int(retry_after), 5) if retry_after.isdigit() else 0)
+                time.sleep(delay)
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt == 2:
+                    raise ServiceError('MODEL_REQUEST_FAILED', 'Model request failed; no model fallback', 502) from None
+                time.sleep(2 ** attempt)
+            except Exception:
+                raise ServiceError('MODEL_REQUEST_FAILED', 'Model request failed; no model fallback', 502) from None
         try:
-            with self.opener.open(request, timeout=60) as response:
-                raw = response.read(1_000_001)
             if len(raw) > 1_000_000:
                 raise ValueError('oversized')
             choice = json.loads(raw)['choices'][0]
@@ -80,8 +97,8 @@ class ModelRuntime:
                 raise ValueError('not object')
             return value
         except Exception:
-            # No upstream bodies, addresses or credentials in logs/errors; no retries.
-            raise ServiceError('MODEL_REQUEST_FAILED', 'Model failed or returned invalid JSON; no automatic fallback', 502) from None
+            # No upstream bodies, addresses or credentials in logs/errors.
+            raise ServiceError('MODEL_REQUEST_FAILED', 'Model returned invalid or incomplete JSON', 502) from None
 
     def expand(self, raw_request, llm_id, vlm_id):
         if not isinstance(raw_request, str) or not 1 <= len(raw_request.strip()) <= 2000:

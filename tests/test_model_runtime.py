@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.expansion_models import normalize_grouped_expansion
@@ -109,6 +110,31 @@ class ModelRuntimeTest(unittest.TestCase):
             with self.assertRaises(ServiceError) as raised:
                 runtime.assess('狗', b'\xff\xd8\xfffixture', 'image/jpeg', runtime.binding('text', 'vision'))
             self.assertNotIn('test-secret', str(raised.exception))
+
+    def test_temporary_upstream_limit_retries_with_bounded_wait(self):
+        limited = HTTPError('https://fixture.invalid/v1/chat/completions', 429,
+                            'private upstream error', {'Retry-After': '99'}, BytesIO(b'private'))
+        runtime = self.runtime([limited, {'parent_label': None, 'groups': [
+            {'primary_label': '狗', 'auxiliary_terms': []}]}])
+        with patch('dsh_retrieval.model_runtime.time.sleep') as sleep:
+            result = runtime.expand('狗', 'text', 'vision')
+        self.assertEqual(result['plan']['groups'][0]['primary_label'], '狗')
+        self.assertEqual(len(self.transport.calls), 2)
+        sleep.assert_called_once_with(5)
+
+    def test_permanent_http_invalid_response_and_retry_exhaustion_fail_closed(self):
+        def error(code):
+            return HTTPError('https://fixture.invalid/v1/chat/completions', code,
+                             'test-secret', {}, BytesIO(b'test-secret'))
+        for outputs, expected_calls in (([error(400)], 1), (['not an object'], 1),
+                                        ([error(503), error(503), error(503)], 3)):
+            runtime = self.runtime(outputs)
+            with patch('dsh_retrieval.model_runtime.time.sleep') as sleep:
+                with self.assertRaises(ServiceError) as raised:
+                    runtime.expand('狗', 'text', 'vision')
+            self.assertEqual(len(self.transport.calls), expected_calls)
+            self.assertNotIn('test-secret', str(raised.exception))
+            self.assertEqual(sleep.call_count, expected_calls - 1)
 
     def test_config_drift_and_remote_image_are_rejected_before_call(self):
         runtime = self.runtime([])

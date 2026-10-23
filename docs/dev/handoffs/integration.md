@@ -1,5 +1,15 @@
 # A 总控集成交接
 
+## 百度图片真实用例与模型限流（2026-10-23）
+
+- ACCEPTED（模型稳定性切片，非端到端业务验收）；A integration / codex/integration；独立 worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；任务卡 model-live-reliability.json；基线 da5ee05ad8166dbb77d798591a5519a692ede618。
+- 从百度图片搜索页分别取“金毛犬公园照片”“橘猫窗边照片”各 20 张，保存来源清单及原图至忽略的 var/integration/baidu-case；浏览器资产下载 40/40，WebP 转 JPEG 40/40，JPEG SHA-256 去重后 38 张。图片只用于隔离验收，未入库或发布。
+- 真实 gpt-4o-mini VLM 逐张初轮：狗图 pass 12/fail 1/unknown 1/error 6；猫图 pass 0/fail 12/unknown 0/error 8。失败后单独探测 6 张：2 次 HTTP 429，其余 4 次 200 并返回判定；分类结果不是人工标注准确率，不计为业务有效素材。Gemini 对 4 张抽样 1 fail/3 error，一张失败样本重试 200；服务稳定性未验收。
+- 8081 Chat 真实 gpt-4o-mini 扩词：输入“金毛犬在室外草地、橘猫在室内窗边，分别打包；不要人物/卡通/玩具/文字水印，每类 20 张”，生成两组各 20 辅助词与 40 张总目标的待确认卡，保留原文；未点“确认提单”。每组 20 被识别为扩词数量，分组交付配额仍未指定；否定条件尚未成为已执行规则，不能声称语义要求已落实。
+- 有界重试已实现：只对暂时性传输/上游 429、502、503、504 最多重试 2 次，数字 Retry-After 最多 5 秒；无效输出、400 等仍失败关闭，不切换模型。针对性模型适配测试 8 项 PASS，覆盖重试/不重试/耗尽/脱敏。
+- 6 张先前失败的真实图片复测全部得到判定：狗 3 pass、猫 3 fail；其中 1 张经历 2 次请求，其余各 1 次。没有全量 40 张重复调用；初轮失败率仍是本次稳定性证据，不能将复测结果拼接成完整重跑统计。真实图像未进入已批准清洗 worker，检索/计数/打包未联测。
+- `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_model_runtime -q`：8 项 PASS。`python3 tools/collab_gate.py check --role integration --base da5ee05ad8166dbb77d798591a5519a692ede618 --task docs/dev/tasks/model-live-reliability.json`：SCOPE PASS、482 项 PASS、LOCAL GATE PASS，退出码 0；中间 LOCAL GATE FAIL 是既有负例夹具。git diff --check PASS；未在门禁外重复全量回归。
+
 ## 可选择 LLM/VLM 接入（2026-10-23）
 
 - ACCEPTED（本地模型接入切片）；A integration / codex/integration；独立 worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；任务卡 model-selection.json；基线 30a5830b39f3c19e81195845354f7403e78dcafb。
