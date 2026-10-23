@@ -1,0 +1,7 @@
+{
+  "role": "core", "branch": "codex/task-core",
+  "worktree": "/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core",
+  "source_base": "f2510b911ed92c735617d36b6d8065a21c5a13e6",
+  "files": ["src/dsh_retrieval/adapters/task_storage/plan_sets.py", "tests/core/test_plan_set_pages.py", "docs/dev/handoffs/core.md"],
+  "acceptance": "按已发布多分支协议实现 reserve_page/commit_page：当前集合、成员与版本校验，成员独立游标，预留/回传幂等与冲突，集合级在途上限 100，页面/outbox 同事务；失败、撤权、旧集合/旧 generation 回传拒绝。旧批准格式迁移及重启恢复测试，不改变有效计数、不真实执行检索、不增加未发布公共接口。core 门禁通过。"
+}

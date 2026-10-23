@@ -4,6 +4,10 @@
 
 ## 当前快照
 
+- 2026-10-23：IN_PROGRESS，core 多分支分页预留/回传任务，卡片 multi-branch-pages.json，起点 f2510b9。独立 core worktree 开发，聚焦成员游标隔离、幂等、版本栅栏与格式迁移；未启动真实检索。
+
+## 整组批准验收
+
 - 2026-10-23：ACCEPTED（本地持久化切片），core 多分支整组批准持久化 b4f0e30 已审查并快进合并 master。put/confirm/get_current、整组 scope 重绑定、幂等/并发一次效果、失败回滚及独立进程恢复已验证；13 项定向测试、465 项 core 门禁 PASS。任务卡 multi-branch-storage.json，基线 cc9d14c6e3b5f27484ed47299babbfc6ba04fdc7；明细见 core handoff。未额外重复全量回归。
 - 下一步：成员级分页预留/回传、分支游标隔离和旧集合回传栅栏；尚无真实检索、页面批准入口或后台调度。本轮未修改 8080/8081 服务及用户账本。
 
