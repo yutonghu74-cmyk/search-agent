@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 可选择 LLM/VLM 接入（2026-10-23）
+
+- ACCEPTED（本地模型接入切片）；A integration / codex/integration；独立 worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；任务卡 model-selection.json；基线 30a5830b39f3c19e81195845354f7403e78dcafb。
+- 增加受信 JSON/环境变量模型配置、HTTPS 聊天兼容传输、脱敏目录、LLM 结构化扩词和 VLM 字节判定接口。Chat 可选 LLM/VLM；选择与配置/指令摘要随分组草稿保存，历史可见；旧模板兼容。未安装依赖、未发送真实业务数据。
+- 定向 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_model_runtime tests.test_grouped_expansion tests.test_api tests.test_chat_ui -q`：21 项 PASS，含模拟 HTTP 选择→草稿→确认→历史。`python3 tools/collab_gate.py check --role integration --base 30a5830b39f3c19e81195845354f7403e78dcafb --task docs/dev/tasks/model-selection.json`：SCOPE PASS、480 项 PASS、LOCAL GATE PASS，退出码 0；中间 FAIL 为既有负例夹具。git diff --check PASS；未额外重复完整回归。
+- 8081 隔离服务重启，浏览器新标签只读验收 PASS：LLM/VLM 选择框、未配置提示、VLM 未执行说明及旧历史分组均正常展示；未写用户账本，未刷新原标签草稿。真实模型 NOT_RUN：端点与模型资料已向用户询问，未收到前不做真实联测。
+- VLM 尚未装配到已批准清洗 worker/受信发布注册表；真实检索端到端未完成。下一步接授权素材读取与受信 VLM 检测器发布，再写回权威清洗结果，不跳过审批或把 unknown 当通过。
+
 ## 多分支批准与调度契约（2026-10-23）
 
 - ACCEPTED（本地契约切片）；A integration / codex/integration；worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；基线 9c94b84c2769c1ccbf3cde9d34038e6907acfb69；任务卡 docs/dev/tasks/multi-branch-contract.json。

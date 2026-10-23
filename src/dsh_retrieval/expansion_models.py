@@ -118,12 +118,19 @@ def normalize_grouped_expansion(value: dict) -> dict:
     if not isinstance(value, dict):
         raise ValueError("grouped expansion must be an object")
     expected = set(_plan_payload(None, [])) | {"plan_digest"}
+    binding = value.get('model_binding')
+    if 'model_binding' in value:
+        expected.add('model_binding')
+        if (not isinstance(binding, dict) or set(binding) != {'llm', 'vlm', 'config_digest', 'prompt_version'}
+                or any(not isinstance(v, str) or not v or len(v) > 100 for v in binding.values())
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', binding['config_digest'])):
+            raise ValueError('invalid model binding')
     if set(value) != expected:
         raise ValueError("grouped expansion fields are invalid")
     if value["schema_version"] != "grouped-expansion@1":
         raise ValueError("unsupported grouped expansion version")
     generator = value["generator"]
-    if generator not in ("local-template@1", "user-edited@1"):
+    if generator not in ("local-template@1", "user-edited@1", "llm@1") or (generator == 'llm@1' and binding is None):
         raise ValueError("unsupported generator")
     parent = value["parent_label"]
     if parent is not None and (not isinstance(parent, str) or not parent or len(parent) > 32):
@@ -141,7 +148,7 @@ def normalize_grouped_expansion(value: dict) -> dict:
             raise ValueError("label group fields are invalid")
         label, count = group["primary_label"], group["requested_expansion_count"]
         if (not isinstance(label, str) or not label or len(label) > 32 or label in labels
-                or type(count) is not int or not (0 if generator == "user-edited@1" else 1) <= count <= MAX_EXPANSIONS):
+                or type(count) is not int or not (1 if generator == "local-template@1" else 0) <= count <= MAX_EXPANSIONS):
             raise ValueError("label group identity is invalid")
         terms = group["auxiliary_terms"]
         if (not isinstance(terms, list) or len(terms) != count
@@ -158,6 +165,8 @@ def normalize_grouped_expansion(value: dict) -> dict:
         normalized.append({key: (list(terms) if key == "auxiliary_terms" else group[key])
                            for key in fields})
     payload = _plan_payload(parent, normalized, generator)
+    if binding is not None:
+        payload['model_binding'] = dict(binding)
     if (value["overlap_policy"] != payload["overlap_policy"]
             or value["aggregate_manifest"] is not True
             or value["generator"] != payload["generator"]

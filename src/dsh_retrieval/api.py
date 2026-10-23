@@ -20,6 +20,7 @@ from .progress_models import build_task_progress
 from .result_views import ResultCursorError, build_result_page
 from .expansion_models import preview_grouped_expansion, preview_edited_groups
 from .query_branches import build_query_branch_view
+from .model_runtime import ModelRuntime, load_model_runtime
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -34,12 +35,14 @@ PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conver
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
 QUERY_BRANCHES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-branches$")
+MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "dsh-retrieval-p0"
     service: TaskService
     result_reader: Any = None
+    model_runtime: Any = None
 
     def _trace_id(self) -> str:
         return self.headers.get("X-Request-Id") or "tr_" + uuid.uuid4().hex
@@ -109,6 +112,9 @@ class Handler(BaseHTTPRequestHandler):
             if expansion_match:
                 actor = self._actor()
                 body = self._body()
+                selection = body.pop('model_selection', None)
+                if selection is not None and (not isinstance(selection, dict) or set(selection) != {'llm', 'vlm'}):
+                    raise ServiceError('INVALID_SPEC', 'Select LLM and VLM profile IDs', 422)
                 edited = set(body) == {"parent_label", "groups", "dimension_id"}
                 if not edited and set(body) != {"raw_request", "dimension_id"}:
                     raise ServiceError("INVALID_SPEC", "expansion preview requires raw_request and dimension_id", 422)
@@ -119,6 +125,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.service.projects.require_access(
                     actor, expansion_match.group(1), dimension, "create")
                 try:
+                    if selection is not None:
+                        binding = self.model_runtime.binding(selection['llm'], selection['vlm'])
+                        if edited:
+                            return HTTPStatus.OK, self.model_runtime.bind(
+                                preview_edited_groups(body['parent_label'], body['groups']), binding), False
+                        result = self.model_runtime.expand(body['raw_request'], selection['llm'], selection['vlm'])
+                        self.service.projects.require_access(actor, expansion_match.group(1), dimension, 'create')
+                        return HTTPStatus.OK, result, False
                     if edited:
                         return HTTPStatus.OK, preview_edited_groups(body["parent_label"], body["groups"]), False
                     return HTTPStatus.OK, preview_grouped_expansion(body["raw_request"]), False
@@ -163,14 +177,18 @@ class Handler(BaseHTTPRequestHandler):
         project_conversations_match = PROJECT_CONVERSATIONS_PATH.fullmatch(path)
         conversation_match = CONVERSATION_PATH.fullmatch(path)
         branches_match = QUERY_BRANCHES_PATH.fullmatch(path)
+        models_match = MODELS_PATH.fullmatch(path)
         if (match is None and not (draft_match and draft_match.group(2))
                 and not (feedback_match and feedback_match.group(2))
                 and revisions_match is None and progress_match is None and results_match is None and project_tasks_match is None
-                and project_conversations_match is None and conversation_match is None and branches_match is None):
+                and project_conversations_match is None and conversation_match is None and branches_match is None and models_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
         def action() -> tuple[int, dict[str, Any], bool]:
+            if models_match:
+                self.service.projects.require_access(self._actor(), models_match.group(1), 'default', 'read')
+                return HTTPStatus.OK, {'items': self.model_runtime.catalog()}, False
             if branches_match:
                 actor = self._actor()
                 task_id = branches_match.group(1)
@@ -252,13 +270,14 @@ class Handler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
 
-def create_handler(service: TaskService, result_reader: Any = None) -> type[Handler]:
+def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
 
     BoundHandler.service = service
     BoundHandler.result_reader = result_reader
+    BoundHandler.model_runtime = model_runtime or ModelRuntime()
     return BoundHandler
 
 
@@ -267,10 +286,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--demo-project", action="store_true", help="grant tenant-a/user-a access to demo/default")
     parser.add_argument("--ledger", help="local SQLite ledger path; omitted means in-memory storage")
+    parser.add_argument('--model-config', help='trusted model profile JSON path; keys are environment references')
     args = parser.parse_args()
     grants = [("tenant-a", "user-a", "demo", "default")] if args.demo_project else []
     repository = SQLiteTaskRepository(Path(args.ledger)) if args.ledger else InMemoryTaskRepository()
-    handler = create_handler(TaskService(repository, LocalProjectAccess(grants)))
+    runtime = load_model_runtime(args.model_config) if args.model_config else ModelRuntime()
+    handler = create_handler(TaskService(repository, LocalProjectAccess(grants)), model_runtime=runtime)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
