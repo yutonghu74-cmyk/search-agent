@@ -1,5 +1,20 @@
 # A 总控集成交接
 
+## 可编辑交付分组（2026-10-23）
+
+- 13:32 CST：确认成功后清空草稿引用并移除旧卡操作；确认失败保留草稿用于重试。确认/编辑入口增加状态防护，避免已确认方案退回草稿编辑。新增 Node 行为测试覆盖失败保留、成功移除、重复调用不再请求；同一定向命令 15 项 PASS，同一角色门禁 440 项 PASS、SCOPE PASS、LOCAL GATE PASS（退出码 0），git diff --check PASS。8081 隔离服务已重启加载变更；本次状态防护以行为测试验证，未重复浏览器合成提单。8080 未变，提交与合并仍未执行。
+- A integration；独立 worktree 为本文件所在仓库；分支 codex/integration；基线 3db96536f6eb76bde6ceda95f0b97b01533f8695；任务卡 docs/dev/tasks/group-editor.json。
+- READY_FOR_REVIEW：结构化输入主标签/召回词，返回修改后重新生成确认卡；历史正式版本展示保存的分组。新 generator=user-edited@1 允许零辅助词；旧 local-template@1 保持兼容。词来源不是素材分类证据。
+- 变更影响 API/公共分组验证/Chat；不启用配额计数或真实检索。后续阶段依次推进语义扩词 provider、查询分支编译与人工批准、真实检索装配、分组判定及数量分配、交付打包。
+- 定向测试：PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_grouped_expansion tests.test_api tests.test_chat_ui -q，13 项 PASS；包括改词摘要变化及 SQLite 重启恢复。JavaScript node --check PASS。
+- 角色门禁：`python3 tools/collab_gate.py check --role integration --base 3db96536f6eb76bde6ceda95f0b97b01533f8695 --task docs/dev/tasks/group-editor.json`：SCOPE PASS、438 项 PASS、LOCAL GATE PASS，退出码 0；其中 LOCAL GATE FAIL 是既有负向测试输出。未在门禁外重复完整回归。
+- HTTP 冒烟：复用 ApiTest 本地临时服务器，结构化狗/猫组及零辅助词返回 200，缺少身份返回 401，越项目返回 403，全部断言 PASS。
+- 2026-10-23 13:30 CST 续开发：浏览器首次因启动遗漏 --demo-project 返回 403，暴露 setBusy(false) 清除错误提示的问题；补齐独立预览服务参数，并修复 UI 保留失败提示。新增 Node 行为测试验证多行/零召回词解析及错误提示，不仅检查语法。
+- 最新定向命令同上，14 项 PASS；同一基线角色门禁 SCOPE PASS、439 项 PASS、LOCAL GATE PASS，退出码 0。没有在门禁外重复完整回归。
+- 浏览器验收 PASS：8081 使用独立 var/integration/group-editor-acceptance.sqlite3，输入狗（金毛、柯基）和猫（零词），返回修改为狗（柯基）/猫（橘猫）；确认本地合成任务后刷新，历史正式版本保留两组及用户编辑来源。未操作 8080 用户账本。当前服务进程用于隔离体验，不代表发布。
+- 交付状态：改动保留在 integration 工作区，尚未提交或合并；不访问内网、真实素材或真实模型。
+- 后续大包提案（规格 §5.3/§12.4）：统一完成查询分支编译、确定性指纹去重、原始核心查询保底、group/source_term 来源、constraint_refs 保留、预览 API/UI 与负向测试；只生成提案，不自行批准或触发检索。复用现有 RetrievalPlan/批准账本，执行装配涉及 core 文件时另行分派，不跨角色修改。发布新任务基线与本地提交/合并已向用户申请授权，未获答复前不自行执行。
+
 ## 主标签/辅助标签扩词分组预览（2026-10-23）
 
 - A / `codex/integration` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `docs/dev/tasks/grouped-expansion-preview.json`，可信任务基线 `3fc0eaae5d054e3f63a025ebddc45fc8767ccfa6`，任务起点 `56882a763d2ae72af4a28505f21e677f7d7e639b`；状态 ACCEPTED（本地体验切片）。

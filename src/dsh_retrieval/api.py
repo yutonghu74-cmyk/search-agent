@@ -18,7 +18,7 @@ from .adapters.task_storage.sqlite import SQLiteTaskRepository
 from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
 from .progress_models import build_task_progress
 from .result_views import ResultCursorError, build_result_page
-from .expansion_models import preview_grouped_expansion
+from .expansion_models import preview_grouped_expansion, preview_edited_groups
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -107,7 +107,8 @@ class Handler(BaseHTTPRequestHandler):
             if expansion_match:
                 actor = self._actor()
                 body = self._body()
-                if set(body) != {"raw_request", "dimension_id"}:
+                edited = set(body) == {"parent_label", "groups", "dimension_id"}
+                if not edited and set(body) != {"raw_request", "dimension_id"}:
                     raise ServiceError("INVALID_SPEC", "expansion preview requires raw_request and dimension_id", 422)
                 dimension = body["dimension_id"]
                 if not isinstance(dimension, str) or not dimension.strip():
@@ -116,6 +117,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.service.projects.require_access(
                     actor, expansion_match.group(1), dimension, "create")
                 try:
+                    if edited:
+                        return HTTPStatus.OK, preview_edited_groups(body["parent_label"], body["groups"]), False
                     return HTTPStatus.OK, preview_grouped_expansion(body["raw_request"]), False
                 except ValueError as error:
                     raise ServiceError("INVALID_EXPANSION_REQUEST", str(error), 422) from None

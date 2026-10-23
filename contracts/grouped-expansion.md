@@ -1,5 +1,7 @@
 # 主标签与辅助检索词分组
 
+编辑入口也接受 {dimension_id, parent_label, groups:[{primary_label, auxiliary_terms}]}，输出 generator=user-edited@1。辅助词可为空，表示仅保留主标签；不自动补齐固定数量。用户预览后可以返回修改，新方案生成新摘要，正式确认沿用草稿摘要与版本校验。持久化后的分组在历史正式版本中展示。当前仅支持独立包配置，实际打包与分组配额未启用。
+
 `grouped-expansion@1` 将“交付分类”和“召回用词”分开：每个 group 的 `primary_label` 是独立交付单元，`package_name` 必须与主标签相同且 `package_mode=separate`；`auxiliary_terms` 只用于建立后续查询分支，不创建独立结果包，也不单独占用交付数量。
 
 本地预览只识别用户明确写出的 `主标签扩N个词`，N 为 1–30，最多 20 组。例如 `动物，狗扩20个词，猫扩30个词` 生成上级标签“动物”下的狗、猫两组。没有明确语法时返回 `recognized=false`，不从普通自然语言猜测分类；当前 `local-template@1` 只是可审阅的确定性词表组合，不代表模型扩词质量。

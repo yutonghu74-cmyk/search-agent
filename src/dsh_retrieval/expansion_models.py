@@ -29,14 +29,14 @@ def _group_id(parent_label: str | None, primary_label: str) -> str:
     return "group_" + digest({"parent_label": parent_label, "primary_label": primary_label})[7:23]
 
 
-def _plan_payload(parent_label, groups):
+def _plan_payload(parent_label, groups, generator="local-template@1"):
     return {
         "schema_version": "grouped-expansion@1",
         "parent_label": parent_label,
         "groups": groups,
         "overlap_policy": "single_primary_per_aggregate",
         "aggregate_manifest": True,
-        "generator": "local-template@1",
+        "generator": generator,
         "requires_confirmation": True,
     }
 
@@ -87,6 +87,32 @@ def preview_grouped_expansion(raw_request: str) -> dict:
             "note": "主标签决定独立交付包；辅助词仅用于召回，需确认后才能固定到正式版本。"}
 
 
+def preview_edited_groups(parent_label, groups):
+    """Build a reviewed proposal from explicit user input, never inferred labels."""
+    if parent_label is not None and not isinstance(parent_label, str):
+        raise ValueError("parent label must be text")
+    parent_label = parent_label.strip() or None if parent_label is not None else None
+    if not isinstance(groups, list) or not 1 <= len(groups) <= MAX_GROUPS:
+        raise ValueError("provide 1-20 groups")
+    rows = []
+    for group in groups:
+        if not isinstance(group, dict) or set(group) != {"primary_label", "auxiliary_terms"}:
+            raise ValueError("each group requires primary_label and auxiliary_terms")
+        label, terms = group["primary_label"], group["auxiliary_terms"]
+        if not isinstance(label, str) or not isinstance(terms, list):
+            raise ValueError("invalid group")
+        if any(not isinstance(term, str) for term in terms):
+            raise ValueError("terms must be text")
+        label, terms = label.strip(), [term.strip() for term in terms]
+        rows.append({"group_id": _group_id(parent_label, label), "primary_label": label,
+                     "requested_expansion_count": len(terms), "auxiliary_terms": terms,
+                     "package_name": label, "package_mode": "separate", "delivery_target": None})
+    payload = _plan_payload(parent_label, rows, "user-edited@1")
+    return {"recognized": True,
+            "plan": normalize_grouped_expansion({**payload, "plan_digest": digest(payload)}),
+            "note": "用户填写的召回词已保存为待确认方案；查询命中不代表素材标签已验证。"}
+
+
 def normalize_grouped_expansion(value: dict) -> dict:
     """Validate a preview before it becomes part of an immutable query revision."""
     if not isinstance(value, dict):
@@ -94,6 +120,11 @@ def normalize_grouped_expansion(value: dict) -> dict:
     expected = set(_plan_payload(None, [])) | {"plan_digest"}
     if set(value) != expected:
         raise ValueError("grouped expansion fields are invalid")
+    if value["schema_version"] != "grouped-expansion@1":
+        raise ValueError("unsupported grouped expansion version")
+    generator = value["generator"]
+    if generator not in ("local-template@1", "user-edited@1"):
+        raise ValueError("unsupported generator")
     parent = value["parent_label"]
     if parent is not None and (not isinstance(parent, str) or not parent or len(parent) > 32):
         raise ValueError("parent_label is invalid")
@@ -110,7 +141,7 @@ def normalize_grouped_expansion(value: dict) -> dict:
             raise ValueError("label group fields are invalid")
         label, count = group["primary_label"], group["requested_expansion_count"]
         if (not isinstance(label, str) or not label or len(label) > 32 or label in labels
-                or type(count) is not int or not 1 <= count <= MAX_EXPANSIONS):
+                or type(count) is not int or not (0 if generator == "user-edited@1" else 1) <= count <= MAX_EXPANSIONS):
             raise ValueError("label group identity is invalid")
         terms = group["auxiliary_terms"]
         if (not isinstance(terms, list) or len(terms) != count
@@ -126,7 +157,7 @@ def normalize_grouped_expansion(value: dict) -> dict:
         group_ids.add(group["group_id"])
         normalized.append({key: (list(terms) if key == "auxiliary_terms" else group[key])
                            for key in fields})
-    payload = _plan_payload(parent, normalized)
+    payload = _plan_payload(parent, normalized, generator)
     if (value["overlap_policy"] != payload["overlap_policy"]
             or value["aggregate_manifest"] is not True
             or value["generator"] != payload["generator"]
