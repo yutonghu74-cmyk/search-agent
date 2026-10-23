@@ -1,5 +1,14 @@
 # A 总控集成交接
 
+## 授权物理查询准备（2026-10-23）
+
+- ACCEPTED（本地后端准备切片）；A integration / codex/integration；worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；任务卡 docs/dev/tasks/physical-query-preparation.json；基线 cb1388c3d0fd7a61ea0d5ad8902e24961c0f8608。
+- 新增 PhysicalQueryPreparer/受信能力注册与契约，复用现有目录、Embedding、授权及 RetrievalPlan；读取当前确认方案重编译分支，验证预览摘要/作用域/单一授权绑定，编码前后权限及版本复验。未知模型、错误向量、过期索引注册、超限、权限不可用均失败关闭；非空来源约束不静默忽略。
+- `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_physical_query_preparation tests.test_query_branches -q`：12 项 PASS；均合成依赖。
+- `python3 tools/collab_gate.py check --role integration --base cb1388c3d0fd7a61ea0d5ad8902e24961c0f8608 --task docs/dev/tasks/physical-query-preparation.json`：SCOPE PASS、452 项 PASS、LOCAL GATE PASS，退出码 0；中间 LOCAL GATE FAIL 为既有负例夹具。git diff --check PASS，不额外重复完整回归。
+- 不修改其他角色文件、公共端口或既有物理计划结构。只准备单分支，不批准、不保存、不执行。真实依赖、浏览器及 HTTP 装配 NOT_RUN（本包未改页面）。
+- 下一步依赖：现有 core 账本只有一个 current plan，多分支原子批准与调度需要单独公共契约及 core 工作包；不通过重复确认多个计划绕过。生产目录和经过验证的文本编码能力注册仍需真实联测。
+
 ## 查询分支编译与预览（2026-10-23）
 
 - ACCEPTED（本地逻辑预览切片）；A integration / codex/integration；独立 worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；基线 80712ee58d6f556a1453533876b03113820eb60c；任务卡 docs/dev/tasks/query-branches.json。
