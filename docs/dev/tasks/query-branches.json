@@ -1,0 +1,15 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "74c812173b363cb719f309e8b4bef42316f59f04",
+  "files": [
+    "src/dsh_retrieval/query_branches.py",
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "tests/test_query_branches.py",
+    "contracts/query-branches.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "按 v1.9 §5.3 实现无副作用的查询分支编译与预览：原文保底、主标签和召回词分支、规范化去重及全部来源追踪、约束引用与输入摘要绑定、稳定分支指纹。基于已确认任务的只读 API 复用当前任务权限与版本；Chat 展示分支及未批准执行边界。测试覆盖重复词、跨组来源、篡改、权限隔离和不产生正式执行记录。不生成向量、不调用模型、不自行批准、不修改 core 存储或检索适配器。角色门禁通过。"
+}
