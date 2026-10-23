@@ -4,6 +4,10 @@
 
 ## 当前快照
 
+- 2026-10-23：IN_PROGRESS，core 多分支整组批准持久化任务已分派至独立 core worktree；工作范围为计划集合账本、新类型序列化及定向测试。先完成 put/confirm/get_current 和恢复，不声称分页调度已实现。任务卡 docs/dev/tasks/multi-branch-storage.json；契约基线 9e3fbf3。
+
+## 多分支契约验收
+
 - 2026-10-23 17:34 CST：ACCEPTED（本地契约切片），multi-branch-contract.json / 9c94b84c2769c1ccbf3cde9d34038e6907acfb69；整组模型、确认摘要与成员执行校验、后续账本协议已实现，18 项定向及 458 项角色门禁 PASS。未实现整组持久化或调度，页面不变；下一包推进 core 原子批准与 SQLite 恢复验证。
 
 ## 物理准备验收

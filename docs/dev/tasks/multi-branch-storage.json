@@ -1,0 +1,8 @@
+{
+  "role": "core",
+  "branch": "codex/task-core",
+  "worktree": "/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core",
+  "source_base": "9e3fbf3cd8a28e4a128744ae811520b42fc2df2b",
+  "files": ["src/dsh_retrieval/adapters/task_storage/plan_sets.py", "src/dsh_retrieval/adapters/task_storage/sqlite.py", "tests/core/test_plan_set_storage.py", "docs/dev/handoffs/core.md"],
+  "acceptance": "实现多分支提案保存、整组原子确认与当前集合读取；共享 SQLite task 事务，摘要/CAS/全成员授权、幂等、多 key 一次效果、一次版本增长、成员 scope 全量重绑定、outbox 同事务。SQLite 重启恢复、撤权/中途失败回滚、跨用户隔离、旧集合重放不激活、epoch 递增。仅批准持久化切片，不实现 reserve/commit 或真实调度；旧单计划及 task 存储兼容。core 门禁通过。"
+}
