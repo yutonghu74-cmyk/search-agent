@@ -1,21 +1,23 @@
-"""Local atomic multi-branch approval slice. No dispatch/reservation support."""
+"""Local multi-branch ledger. No network search or automatic dispatch."""
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 import sqlite3
+import uuid
 
 from .sqlite import SQLiteTaskRepository, MAX_BYTES, encode, decode, dump
 from ...errors import ServiceError
 from ...integration_models import AccessContext
 from ...models import RunStatus
-from ...multi_branch_contracts import validate_plan_set, validate_set_confirmation
+from ...multi_branch_contracts import validate_plan_set, validate_set_confirmation, validate_member_execution
 from ...query_spec import digest
-from ...retrieval_contracts import RetrievalScope
+from ...retrieval_contracts import RetrievalScope, validate_page
 from ...service import require_key
 
 
 def empty_state():
-    return {name: {} for name in ('proposals', 'approved', 'current', 'epochs', 'keys')} | {'events': []}
+    return {name: {} for name in ('proposals', 'approved', 'current', 'epochs', 'keys',
+                                  'reserve_keys', 'operations', 'requests', 'cursors')} | {'events': []}
 
 
 def serialize(state):
@@ -27,10 +29,15 @@ def serialize(state):
 
 def restore(row):
     try:
-        if row is None or row[0] != 1 or not isinstance(row[1], str) or len(row[1].encode()) > MAX_BYTES:
+        if row is None or row[0] not in (1, 2) or not isinstance(row[1], str) or len(row[1].encode()) > MAX_BYTES:
             raise ValueError('invalid format')
         state = decode(json.loads(row[1]))
         expected = empty_state()
+        if row[0] == 1:
+            added = {'reserve_keys', 'operations', 'requests', 'cursors'}
+            if not isinstance(state, dict) or set(state) != set(expected) - added:
+                raise ValueError('invalid legacy shape')
+            state.update({key: {} for key in added})
         if (not isinstance(state, dict) or set(state) != set(expected)
                 or any(type(state[k]) is not type(expected[k]) for k in expected)):
             raise ValueError('invalid shape')
@@ -40,7 +47,7 @@ def restore(row):
 
 
 class SQLitePlanSetApprovalRepository:
-    """put/confirm/get only; not yet a full RetrievalPlanSetRepository."""
+    """Implements the plan-set protocol; reservations do not dispatch work."""
     def __init__(self, path, *, projects, authorization):
         self.tasks = SQLiteTaskRepository(path)
         self.projects, self.authorization = projects, authorization
@@ -49,10 +56,13 @@ class SQLitePlanSetApprovalRepository:
                 db.execute('BEGIN IMMEDIATE')
                 exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='plan_set_ledger' AND type='table'").fetchone()
                 if exists:
-                    restore(db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone())
+                    row = db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone()
+                    state = restore(row)
+                    if row[0] == 1:
+                        db.execute('UPDATE plan_set_ledger SET format=2,payload=? WHERE id=1', (serialize(state),))
                 else:
                     db.execute('CREATE TABLE plan_set_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)')
-                    db.execute('INSERT INTO plan_set_ledger VALUES (1,1,?)', (serialize(empty_state()),))
+                    db.execute('INSERT INTO plan_set_ledger VALUES (1,2,?)', (serialize(empty_state()),))
         except sqlite3.Error as error:
             raise ServiceError('STORAGE_UNAVAILABLE', 'Plan set storage unavailable', 503) from error
 
@@ -66,7 +76,7 @@ class SQLitePlanSetApprovalRepository:
                 if write:
                     task_payload, set_payload = dump(memory), serialize(state)
                     db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (task_payload,))
-                    db.execute('UPDATE plan_set_ledger SET payload=? WHERE id=1', (set_payload,))
+                    db.execute('UPDATE plan_set_ledger SET format=2,payload=? WHERE id=1', (set_payload,))
                 return result
         except sqlite3.Error as error:
             raise ServiceError('STORAGE_UNAVAILABLE', 'Plan set transaction failed', 503) from error
@@ -153,3 +163,70 @@ class SQLitePlanSetApprovalRepository:
                 self._authorize(memory, actor, task_id, current)
             return current
         return self._transaction(False, read)
+
+    def reserve_page(self, actor, approved, *, plan_id, request, key):
+        require_key(key)
+        fingerprint = digest({'set': approved.proposal_digest, 'member': plan_id, 'request': asdict(request)})
+        def reserve(memory, state):
+            task_id = approved.scope.task_id
+            task = self._authorize(memory, actor, task_id, approved, 'approve')
+            validate_member_execution(actor, task, approved, state['current'].get(task_id),
+                                      plan_id=plan_id, request=request)
+            identity = (actor.tenant_id, actor.user_id, task_id, key)
+            old = state['reserve_keys'].get(identity)
+            if old is not None:
+                if old[0] != fingerprint:
+                    raise ServiceError('IDEMPOTENCY_CONFLICT', 'Reservation key changed', 409)
+                return old[1], True
+            chain = (approved.proposal_digest, plan_id)
+            if request.cursor is not None and (*chain, request.cursor) not in state['cursors']:
+                raise ServiceError('CURSOR_INVALID', 'No committed member predecessor', 409)
+            operation_id = state['requests'].get(fingerprint)
+            replay = operation_id is not None
+            if not replay:
+                pending = sum(record[0] == approved and record[3] is None
+                              for record in state['operations'].values())
+                if pending >= 100:
+                    raise ServiceError('INPUT_LIMIT', 'Plan set pending limit reached', 422)
+            self._authorize(memory, actor, task_id, approved, 'approve')
+            if operation_id is None:
+                operation_id = 'setpage_' + uuid.uuid4().hex
+                state['operations'][operation_id] = (approved, plan_id, request, None)
+                state['requests'][fingerprint] = operation_id
+            state['reserve_keys'][identity] = (fingerprint, operation_id)
+            return operation_id, replay
+        return self._transaction(True, reserve)
+
+    def commit_page(self, actor, approved, *, operation_id, plan_id, request, page):
+        def commit(memory, state):
+            task_id = approved.scope.task_id
+            task = self._authorize(memory, actor, task_id, approved, 'approve')
+            validate_member_execution(actor, task, approved, state['current'].get(task_id),
+                                      plan_id=plan_id, request=request)
+            record = state['operations'].get(operation_id)
+            if record is None or record[:3] != (approved, plan_id, request):
+                raise ServiceError('OPERATION_MISMATCH', 'Page does not match reservation', 409)
+            if record[3] is not None:
+                if record[3] != page:
+                    raise ServiceError('RESULT_CONFLICT', 'Committed page is immutable', 409)
+                return True
+            chain = (approved.proposal_digest, plan_id)
+            previous = None
+            if request.cursor is not None:
+                predecessor = state['cursors'].get((*chain, request.cursor))
+                if predecessor is None:
+                    raise ServiceError('CURSOR_INVALID', 'Missing member predecessor', 409)
+                previous = state['operations'][predecessor][3]
+            seen = frozenset(cursor for set_digest, member_id, cursor in state['cursors']
+                             if (set_digest, member_id) == chain)
+            validate_page(request, page, previous=previous, seen_cursors=seen)
+            self._authorize(memory, actor, task_id, approved, 'approve')
+            state['operations'][operation_id] = (approved, plan_id, request, page)
+            if page.next_cursor is not None:
+                state['cursors'][(*chain, page.next_cursor)] = operation_id
+            state['events'].append({'kind': 'plan_set_page_committed',
+                                    'event_id': 'set-page:' + operation_id,
+                                    'operation_id': operation_id, 'set_digest': approved.proposal_digest,
+                                    'plan_id': plan_id})
+            return False
+        return self._transaction(True, commit)

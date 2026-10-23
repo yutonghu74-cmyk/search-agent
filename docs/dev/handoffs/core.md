@@ -158,3 +158,10 @@
 - 定向 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.core.test_plan_set_storage tests.test_multi_branch_contracts -q`：初次 12 项 PASS，补独立进程恢复测试后 13 项 PASS。
 - `python3 tools/collab_gate.py check --role core --base cc9d14c6e3b5f27484ed47299babbfc6ba04fdc7`：SCOPE PASS、465 项 PASS、LOCAL GATE PASS，退出码 0（中间 LOCAL GATE FAIL 为既有负向夹具）；git diff --check PASS。未在门禁外重复完整回归。
 - 不实现 reserve_page/commit_page、调度或 HTTP，不声称完整实现 RetrievalPlanSetRepository。真实目录/编码器/内网未运行。下一步实现成员级分页预留与回传事务，复用已发布协议。
+# 多分支分页预留与回传（2026-10-23）
+
+- READY_FOR_REVIEW；core / codex/task-core；worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core；任务卡 docs/dev/tasks/multi-branch-pages.json；基线 73ab359f118af480174fb917c4a2af6c01f12ce7。
+- plan_set_ledger 格式升至 2：只对精确旧格式 1 增补分页字典并原子迁移；新版缺字段视为损坏，不重置。reserve_page/commit_page 复用已发布协议与 validate_member_execution/validate_page，检查整组/成员/版本、独立游标链、请求与结果幂等、上限、权限及不可变页面；页面/outbox 同事务，不变更任务有效数。
+- 定向命令 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.core.test_plan_set_pages tests.core.test_plan_set_storage -q`：16 项 PASS。首次 14 项虽 PASS 但暴露测试 SQLite 连接未关闭警告，已用 closing 修复；复测无警告。覆盖格式迁移、打开新仓库恢复、重复/并发、跨分支游标、错误快照、旧集合/generation、撤权和序列化回滚、在途上限。
+- `python3 tools/collab_gate.py check --role core --base 73ab359f118af480174fb917c4a2af6c01f12ce7`：SCOPE PASS、474 项 PASS、LOCAL GATE PASS，退出码 0；中间 LOCAL GATE FAIL 来自既有负例。git diff --check PASS，未额外重复完整回归。
+- 真实检索/内网/页面 NOT_RUN；没有后台 worker、领取租约或自动发起检索。下一步需冻结可恢复调度读取契约并装配执行器，不通过内部字典读取构造生产调度。
