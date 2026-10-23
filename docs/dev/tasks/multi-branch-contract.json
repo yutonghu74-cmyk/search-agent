@@ -1,0 +1,7 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "f1ee126781d9abd52ff9eb392566a8d4f5da6cba",
+  "files": ["src/dsh_retrieval/multi_branch_contracts.py", "tests/test_multi_branch_contracts.py", "contracts/multi-branch-retrieval.md", "docs/dev/progress.md", "docs/dev/handoffs/integration.md"],
+  "acceptance": "冻结多分支批准与调度契约：复用 PreparedQuery/RetrievalPlan 的不可变集合，同一 scope/epoch/逻辑摘要，保留 original 分支，禁止重复物理查询与混合绑定；整组确认摘要、发起人权限及版本栅栏。定义独立多分支账本协议与事务要求，不实现或调用现有单计划账本批准，不进行检索。测试篡改、跨版本、漏原文、重复、未批准/旧集合、非法成员请求和预算，角色门禁通过。"
+}
