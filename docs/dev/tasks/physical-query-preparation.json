@@ -1,0 +1,13 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "91d36dbf016a6ceb1e03eb0110001b91e6c208b5",
+  "files": [
+    "src/dsh_retrieval/physical_query_preparation.py",
+    "tests/test_physical_query_preparation.py",
+    "contracts/physical-query-preparation.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "依据 v1.9 §6.1-6.3，复用 CatalogRepository、EmbeddingProvider、AuthorizationService、RetrievalPlan。后端从当前确认方案重编译分支，验证分支摘要与任务作用域；只在授权目录内选择明确绑定，并要求服务端注册完整绑定的文本编码能力、过滤模板、数量上限。编码前后复验权限和任务版本，验证模型版本/维度/有限数值，错误失败关闭；返回未批准物理计划及来源摘要，不保存、批准或执行。不扩展单当前计划账本为多分支，不修改其他角色文件，不调用真实依赖。测试正常、权限撤销、过期版本、错误向量、无能力、越界绑定与预算上限，角色门禁通过。"
+}
