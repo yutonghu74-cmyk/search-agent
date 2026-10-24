@@ -115,6 +115,9 @@ class CoordinatorTest(unittest.TestCase):
         self.repo.rows[plan_id] = replace(self.repo.rows[plan_id], committed_pages=-1)
         with self.assertRaises(ServiceError):
             self.tick()
+        self.repo.rows[plan_id] = replace(self.repo.rows[plan_id], committed_pages=0, request=None)
+        with self.assertRaises(ServiceError):
+            self.tick()
         self.assertEqual(self.calls, [])
 
 

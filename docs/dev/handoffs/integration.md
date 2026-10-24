@@ -1,10 +1,12 @@
 # A 总控集成交接
 
-## R06 有界协调器（2026-10-24，IN_PROGRESS）
+## R06 有界协调器（2026-10-24，READY_FOR_REVIEW 本地切片）
 
 - A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 retrieval-coordinator.json，基线 8d8af665b55547f040da04d4c2319886ebf2a78c，源基线 6e4303da4012e4ab4c57e4405d6981e884a288f9。
-- 缺口：已批准集合与 reserve/commit 已有，尚无公开分页恢复读取。用户明确允许顺序进入独立 B/core 包补此接口，不启动代理，不改业务数据。先发布 A 契约及协调器，B 仅新增授权只读进度恢复，再集成验证。
-- 契约新增 PlanSetMemberProgress 与 get_progress：每成员最新已提交页或未完成预留，绑定已批准集合，完整权限及页链校验；不另建影子状态库。测试 NOT_RUN。
+- 公共契约新增 PlanSetMemberProgress 与 get_progress；B/core 独立工作包在 SQLite 账本内实现授权只读恢复，按完整成员链和当前整组计划校验，不另建影子状态库。B 基线 7c1afd315efc2c80d24c3ed4f92f46572cb5cbd3，提交 afaa09e，9 项定向及 588 项角色门禁 PASS，详见 core.md。
+- A 的 RetrievalCoordinator 只对已确认整组计划执行显式有界 tick；按成员预留、调用网关、回传、重试并从账本恢复。构造时缺恢复接口立即失败；计划/任务变化、撤权和损坏页链拒绝。A 草稿 12 项定向及 579 项角色门禁 PASS（基线 bf97c1b）；合入测试工程 v2 任务卡后，基线 23b0078 的范围复验 PASS，因代码状态未变不重复全量。
+- 最终集成：`tests/core/test_plan_set_progress.py` 使用真实 SQLite 和独立进程验证恢复；两个分支同名游标、已提交页跳过、未完成预留重试、检索返回后撤权均 PASS。A 补充损坏请求类型测试和路线图状态说明。`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_retrieval_coordinator tests.core.test_plan_set_progress -q` 退出 0，15 项 PASS；`PYTHONDONTWRITEBYTECODE=1 python3 tools/collab_gate.py check --role integration --base afaa09e --task docs/dev/tasks/retrieval-coordinator.json` 退出 0，SCOPE PASS、588 项完整测试 PASS、LOCAL GATE PASS。日志 `/tmp/search-agent-r06-final-integration-gate.log`；本行记录仅改文档，未变更被测代码。
+- 限制：网关为测试替身，未接真实 Milvus/embedding/媒体映射；无生产租约、持久尝试/费用预算、自动 ExecutionRules 和 HTTP 派发入口。不能把本地协调切片算作整个 R06 或真实两库检索完成。现有运行服务及用户账本未改。
 
 ## 物理索引注册表（2026-10-24，ACCEPTED 公共配置切片）
 
