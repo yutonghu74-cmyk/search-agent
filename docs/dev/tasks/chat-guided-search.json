@@ -1,0 +1,21 @@
+{
+  "role": "integration",
+  "branch": "codex/chat-guided-search",
+  "source_base": "de30fb609cb3f33333dcd924febc780c33fbfa50",
+  "files": [
+    "src/dsh_retrieval/chat_ui.py",
+    "src/dsh_retrieval/first_search_local.py",
+    "tests/test_chat_ui.py",
+    "tests/test_first_search_local.py",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/chat-guided-search.md"
+  ],
+  "acceptance": "按 v1.9 5.1、5.3、12.10.1 将首次需求改为单输入框对话：必需信息不足时明确追问且不生成扩词或任务；清晰时生成可编辑的扩词建议，用户单独确认后才保存/确认业务方案。已确认方案的本地测试检索复用现有授权选库、整组批准和有界 tick；每个已执行查询分支及原始候选显示准确的检索词来源标签。未配置任意词 embedding 或媒体服务时明确展示不可执行/无缩略图，不伪造逐词结果、不把原始候选当合格素材。保留历史任务及反馈功能，验证本地页面和回归。",
+  "handoff": "docs/dev/handoffs/chat-guided-search.md",
+  "tests": {
+    "mode": "full",
+    "targets": [],
+    "reason": "修改需求确认、扩词批准和检索候选血缘，涉及业务语义与授权结果；仅对最终代码执行一次完整门禁。"
+  }
+}
