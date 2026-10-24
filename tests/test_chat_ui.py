@@ -83,6 +83,14 @@ class ChatUiTest(unittest.TestCase):
         self.assertIn('@media(max-width:560px)', CHAT_CSS)
         self.assertIn('@media(prefers-reduced-motion:reduce)', CHAT_CSS)
 
+    def test_chat_analyzes_each_submitted_utterance_before_draft_write(self):
+        self.assertIn('/v1/retrieval/projects/demo/intent-preview', CHAT_JS)
+        self.assertIn('LLM 诉求分析 · 待审阅', CHAT_JS)
+        self.assertIn('await analyzeChatText(text);const expansion=', CHAT_JS)
+        self.assertIn("await analyzeChatText(text);state.feedback=", CHAT_JS)
+        self.assertIn('分析只供审阅，不自动改写原文', CHAT_JS)
+        self.assertNotIn('innerHTML', CHAT_JS)
+
 
 if __name__ == "__main__":
     unittest.main()

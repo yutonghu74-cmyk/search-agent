@@ -1,0 +1,12 @@
+{
+  "models": [
+    {
+      "id": "chat-llm",
+      "kind": "llm",
+      "provider": "openai-compatible",
+      "model": "REPLACE_WITH_MODEL_ID",
+      "base_url": "https://REPLACE_WITH_TRUSTED_ENDPOINT/v1",
+      "api_key_env": "DSH_CHAT_LLM_API_KEY"
+    }
+  ]
+}

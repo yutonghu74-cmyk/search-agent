@@ -138,6 +138,8 @@ PYTHONPATH=src python3 -m dsh_retrieval.api --demo-project --ledger var/chat-dem
 
 ### 本地首次检索体验（显式启用）
 
+Chat 可对每条新诉求和反馈做 LLM 意图分析预览。复制 `config/chat-models.example.json` 到仓库外的私有配置文件，填入受信 HTTPS 接口及真实模型 ID；在启动服务的环境中提供 `DSH_CHAT_LLM_API_KEY`，再追加 `--model-config /私有路径/chat-models.json`。密钥只从环境变量读取，不要放在 JSON、页面或仓库中。页面选择该 LLM 后，点击生成确认卡/反馈确认卡会先调用模型并显示逐条引文、歧义和能力状态；模型失败会停在草稿前，不会悄悄退回模板。未选择模型则明确使用模板模式。分析预览不自动改写 QuerySpec、不批准任务；仅选 LLM 时扩词仍为模板，LLM 扩词另需同时配置并选择 VLM。当前本地模式仍使用可伪造身份，只限隔离测试，不传真实业务诉求。
+
 此模式使用固定测试向量进行实际相似度排序，支持两索引选择、整组确认、手动逐批检索和授权后的原始候选列表；不是 Milvus、学习型 embedding、真实缩略图或清洗结果。先在当前终端设置私有且重启保持不变的 `DSH_LOCAL_CURSOR_SECRET`（至少 32 字节，勿写入仓库），然后在仓库根目录运行：
 
 ```bash

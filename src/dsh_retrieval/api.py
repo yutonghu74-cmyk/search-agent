@@ -43,6 +43,7 @@ PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
+INTENT_PREVIEW_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/intent-preview$")
 QUERY_BRANCHES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-branches$")
 MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
 CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
@@ -161,9 +162,11 @@ class Handler(BaseHTTPRequestHandler):
         suggestion_match = FEEDBACK_SUGGESTION_PATH.fullmatch(self.path)
         confirmation_match = CONFIRMATION_PATH.fullmatch(self.path)
         expansion_match = EXPANSIONS_PATH.fullmatch(self.path)
+        intent_match = INTENT_PREVIEW_PATH.fullmatch(self.path)
         if (self.path != "/v1/retrieval/tasks" and draft_match is None
                 and not (feedback_match and feedback_match.group(2) is None)
-                and suggestion_match is None and confirmation_match is None and expansion_match is None):
+                and suggestion_match is None and confirmation_match is None
+                and expansion_match is None and intent_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
@@ -207,6 +210,15 @@ class Handler(BaseHTTPRequestHandler):
                           'status': 'advisory_only',
                           'note': '仅供审阅；不在反馈确认摘要内，不能创建或运行清洗管线。'}
                 result['suggestion_digest'] = digest(result)
+                return HTTPStatus.OK, result, False
+            if intent_match:
+                actor = self._actor()
+                body = self._body()
+                if set(body) != {'raw_request', 'dimension_id', 'llm_id'} or not isinstance(body['dimension_id'], str) or not body['dimension_id'].strip():
+                    raise ServiceError('INVALID_SPEC', 'Intent preview requires raw_request, dimension_id and llm_id', 422)
+                self.service.projects.require_access(actor, intent_match.group(1), body['dimension_id'], 'create')
+                result = self.model_runtime.analyze_request(body['raw_request'], body['llm_id'])
+                self.service.projects.require_access(actor, intent_match.group(1), body['dimension_id'], 'create')
                 return HTTPStatus.OK, result, False
             if expansion_match:
                 actor = self._actor()

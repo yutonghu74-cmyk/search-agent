@@ -11,7 +11,7 @@ import urllib.request
 
 from .errors import ServiceError
 from .expansion_models import normalize_grouped_expansion, preview_edited_groups
-from .intent_model import ModelConfig, NoRedirect
+from .intent_model import IntentModelClient, ModelConfig, NoRedirect
 from .query_spec import digest
 
 
@@ -65,7 +65,14 @@ class ModelRuntime:
         return {'llm': llm_id, 'vlm': vlm_id, 'prompt_version': PROMPT_VERSION,
                 'config_digest': digest([{'id': p.profile_id, 'kind': p.kind,
                     'provider': p.config.provider, 'model': p.config.model,
-                    'endpoint': p.config.base_url} for p in selected])}
+                'endpoint': p.config.base_url} for p in selected])}
+
+    def analyze_request(self, raw_request, llm_id):
+        """Review one Chat utterance; never turn model output into a task."""
+        if not isinstance(raw_request, str) or not 1 <= len(raw_request.strip()) <= 2000:
+            raise ServiceError('INVALID_SPEC', 'Request must contain 1-2000 characters', 422)
+        profile = self.select(llm_id, 'llm')
+        return IntentModelClient(profile.config, opener=self.opener).interpret(raw_request)
 
     def _request(self, profile, system, content):
         body = {'model': profile.config.model, 'temperature': 0, 'max_tokens': 3000,
