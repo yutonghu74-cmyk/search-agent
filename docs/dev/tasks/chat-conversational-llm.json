@@ -1,0 +1,19 @@
+{
+  "role": "integration",
+  "branch": "codex/chat-conversational-llm",
+  "source_base": "06f9c3396fadf790916b32306589e0da31fae0ed",
+  "files": [
+    "src/dsh_retrieval/chat_ui.py",
+    "tests/test_chat_ui.py",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/chat-conversational-llm.md"
+  ],
+  "acceptance": "按 v1.9 5.1、12.10.1，将已接通的 LLM 诉求分析融入 Chat 对话：单一受信 LLM/VLM profile 可见且默认选中（用户可切回模板），提交时立即显示模型分析中和自然语言助手回复、澄清提示及可展开详细证据；明确数量仅在用户未手改时填入待确认字段，模型输出不直接批准任务。反馈同样显示模型回复；无模型、模型失败及并发选择变化不伪装成功。现有 8085 真模型浏览器冒烟及测试覆盖。",
+  "handoff": "docs/dev/handoffs/chat-conversational-llm.md",
+  "tests": {
+    "mode": "full",
+    "targets": [],
+    "reason": "模型建议可能影响待确认目标数量和扩词草稿，属于业务语义高风险；按用户不重复回归要求仅执行一次完整工作包门禁。"
+  }
+}
