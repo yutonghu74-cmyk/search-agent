@@ -4,6 +4,7 @@
 
 ## 当前快照
 
+- 2026-10-24：8085 本地体验已接用户提供的兼容接口与 `gpt-4o-mini`（私有配置/密钥在仓库外，8084 不变）。真实合成诉求调用返回经引文校验的 LLM 分析，浏览器显示待审阅分析卡及提单确认卡，未自动提单；`execution_allowed=false`。模型提示修正独立包 628 项门禁 PASS。当前标点被判未解析、能力未注册；真实反馈调用/长期质量/生产权限 NOT_RUN。
 - 2026-10-24：READY_FOR_REVIEW（意图引文 occurrence 提示收紧），任务卡 intent-occurrence-prompt.json，基线 40f41cd、更新门禁基线 c9cda1c。真实 `gpt-4o-mini` 首次因 occurrence 写成字符位置被安全拒绝；收紧提示后 8086 合成诉求返回经校验的分析预览且不可自动执行，严格引文校验不变。628 项完整门禁 PASS；真实模型长期质量与生产权限联测 NOT_RUN。
 - 2026-10-24：ACCEPTED（Chat LLM 逐条诉求分析），任务卡 chat-llm-analysis.json，独立 `codex/chat-llm-analysis`，基线 98f58c5，实施提交 dbc1be7 已合并主线。已接授权分析预览和提单/反馈入口；模型输出仅审阅、不覆盖原文或自动批准。18 项定向、628 项完整门禁及 JS 语法 PASS；8084 当前仍未配置模型，真实联测 NOT_RUN。
 - 2026-10-24：ACCEPTED（本地首次检索 1–5），独立 `codex/first-search-local`，任务卡 first-search-local.json，基线 f18caee，实施提交 327ec3b 已合并主线。显式选库/整组确认/有界 HTTP tick/授权原始候选列表已接通；25 项定向、624 项完整工作包门禁、JavaScript 语法和 8084 双索引两批页面冒烟 PASS。缺映射候选失败关闭，原始命中不计为有效清洗数量。真实 Milvus/embedding/媒体缩略图/清洗有效数量仍 NOT_RUN；不得标为真实端到端完成。
