@@ -88,6 +88,15 @@ def validate_member_execution(actor, task, submitted, current, *, plan_id, reque
         raise ServiceError('CURSOR_INVALID', 'Invalid continuation cursor', 409)
 
 
+@dataclass(frozen=True, slots=True)
+class PlanSetMemberProgress:
+    plan_id: str
+    request: SearchRequest
+    operation_id: str | None
+    page: SearchPage | None
+    committed_pages: int
+
+
 class RetrievalPlanSetRepository(Protocol):
     """Future core transaction boundary, not implemented by single-plan storage.
 
@@ -111,6 +120,17 @@ class RetrievalPlanSetRepository(Protocol):
                 expected_task_version: int, action: str, key: str) -> tuple[RetrievalPlanSet, bool]: ...
 
     def get_current(self, actor: Actor, task_id: str) -> RetrievalPlanSet | None: ...
+
+    def get_progress(self, actor: Actor, approved: RetrievalPlanSet) -> tuple[PlanSetMemberProgress, ...]:
+        """Authorized transaction snapshot, one head per member in approved order.
+
+        No operation: initial request, page=None, count=0. Pending reservation:
+        latest request/op, page=None. Otherwise latest committed request/op/page.
+        Count is committed pages in this member chain, never accepted media count.
+        Validate the whole chain, current set/scope and all-library authority
+        before and after reading. Corrupt/disconnected chains fail closed.
+        """
+        ...
 
     def reserve_page(self, actor: Actor, approved: RetrievalPlanSet, *, plan_id: str,
                      request: SearchRequest, key: str) -> tuple[str, bool]: ...

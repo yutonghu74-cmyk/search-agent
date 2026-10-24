@@ -15,3 +15,12 @@ commit_page 必须验证预留 operation 归属、集合摘要/epoch、成员 pl
 兼容性：新增独立协议，不改变现有 RetrievalPlanRepository 或 SQLite 单计划表；迁移、事务实现、恢复验证和多分支 worker 装配必须由 core 后续工作包完成。接口不接受用户伪造的授权对象。现有单计划执行路径维持原行为，不能把新集合传入旧账本。
 
 验收仍需后续实现证明：整组中途失败回滚、撤权、幂等并发、恢复后当前指针一致、跨分支游标拒绝、替换期间晚到结果拒绝。当前测试仅证明纯契约边界，不代表这些事务验收通过。
+# R06 恢复读取及有界协调器补充
+
+`get_progress(actor, approved)` 在同一授权读取事务返回每个成员的 `PlanSetMemberProgress(plan_id, request, operation_id, page, committed_pages)`，顺序与批准成员一致。无请求时为初始 request/op=None/page=None/count=0；未完成预留为相应 op/request/page=None；否则为最新已提交页及其 request/op。计数仅为分页数，不是有效素材数。读取前后复验发起人、项目、所有库权限、任务 scope、当前集合，校验整个成员页链；重复游标、孤立预留、混合成员、损坏记录拒绝，不从头重置。
+
+`RetrievalCoordinator` 包装 put_proposal/confirm，但确认只由调用者明确传入 action/key/version/digest，不自动批准或派发。`tick(actor, task_id, max_requests=1)` 只消费当前已批准集合，读取恢复点、确定性键预留、再次读取是否已完成、调用 gateway、提交回传，再读取当前进度。单 tick 最多 1–64 次外部请求，每成员最多一次；优先未完成预留，再按已完成分页数公平推进。重建协调器不持有业务进度，全部恢复点来自账本。
+
+可重试依赖错误（显式 retryable 且 429/502/503/504）保留原 operation，报告 retry_pending；下一次显式 tick 复用该请求/预留，不静默开新页。权限、版本、游标和结果错误直接失败。已提交页跳过，终止页不再派发；分页停止不代表任务完成、目标数量满足或素材合格。检索不更新 accepted_count，不自动清洗或补数。
+
+本阶段为受控单调度者的显式有界执行入口，不是完整生产调度器。没有跨进程租约、持久尝试/费用计数、定时退避或自动执行策略批准；未知网络结果可能被重发，同一逻辑页业务提交幂等但外部调用不保证恰好一次。启用自动循环和多调度者前必须接已批准 ExecutionRules、持久 attempt/预算及租约（R23）。真实 gateway 和分页能力仍分别验收。恢复接口缺失时构造协调器即报 RECOVERY_NOT_CONFIGURED，不读 SQLite 私有状态绕过权限。

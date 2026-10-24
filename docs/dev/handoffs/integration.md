@@ -1,5 +1,11 @@
 # A 总控集成交接
 
+## R06 有界协调器（2026-10-24，IN_PROGRESS）
+
+- A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 retrieval-coordinator.json，基线 8d8af665b55547f040da04d4c2319886ebf2a78c，源基线 6e4303da4012e4ab4c57e4405d6981e884a288f9。
+- 缺口：已批准集合与 reserve/commit 已有，尚无公开分页恢复读取。用户明确允许顺序进入独立 B/core 包补此接口，不启动代理，不改业务数据。先发布 A 契约及协调器，B 仅新增授权只读进度恢复，再集成验证。
+- 契约新增 PlanSetMemberProgress 与 get_progress：每成员最新已提交页或未完成预留，绑定已批准集合，完整权限及页链校验；不另建影子状态库。测试 NOT_RUN。
+
 ## 物理索引注册表（2026-10-24，ACCEPTED 公共配置切片）
 
 - A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 physical-index-registry.json，发布基线 949226583fae5e24dc29c54786f3932ade39d25a，源基线 4c3f2128e26587b53d30f62a7eaa10dcbff38187。中断恢复时工作区干净，未重复发布任务卡。
