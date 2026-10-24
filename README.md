@@ -41,9 +41,14 @@ DSH 的独立开发环境已安装在 `.venv-dsh`。当前冻结候选为 SDK/�
 项目只使用 Python 标准库，要求 Python 3.11+。
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+# 测试入口会自行配置 src、仓库根目录与 tests 导入路径
+python3 tools/run_tests.py --all -v
+# 定向示例：模块、类、方法或 tests 下的 Python 文件
+python3 tools/run_tests.py tests.test_query_routing -v
 PYTHONPATH=src python3 -m dsh_retrieval.api --demo-project --port 8080
 ```
+
+完整用法和真实依赖测试分层见[测试工程策略](docs/dev/testing-strategy.md)。
 
 DSH 离线验证：
 
