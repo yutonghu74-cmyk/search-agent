@@ -1,0 +1,14 @@
+{
+  "role": "integration",
+  "branch": "codex/integration",
+  "source_base": "90793f88c21b2ca126bc50a8eed38ba7ef5261a0",
+  "files": [
+    "src/dsh_retrieval/chat_ui.py",
+    "src/dsh_retrieval/catalog_ui.py",
+    "tests/test_chat_ui.py",
+    "tests/test_catalog_api.py",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/integration.md"
+  ],
+  "acceptance": "优化现有本地 Chat 与已有索引配置页的视觉层级、表单布局、确认卡、历史记录、五节点进度、空态/错误态、响应式布局及键盘与屏幕阅读器可用性；保持草稿、正式版本和业务执行时间线的边界，五节点分别展示 node_status、gate_status 与 manual/auto，未知计数不得伪造百分比，未发布结果、未批准选库和未接通能力继续明确标注。不得新增或暗示已经支持的真实检索、自动清洗、图片上传、历史批次选择、导出或内网能力，不改变 API、公共契约或业务状态机。覆盖 v1.9 A73 的现有可实现展示边界，并回归 A74、A79 相关文案不越权；补充语义结构、焦点可见性、状态播报、移动端和安全渲染测试，运行定向 UI 测试、JavaScript 语法检查、浏览器体验验证、完整回归及 integration 角色门禁。"
+}
