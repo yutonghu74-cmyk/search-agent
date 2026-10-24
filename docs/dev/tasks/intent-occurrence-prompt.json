@@ -11,8 +11,8 @@
   "acceptance": "v1.9 5.1 真实意图分析：模型提示明确 occurrence 为相同 quote 的零基出现次数而非字符位置；服务端严格引文校验不变。添加提示契约测试并以隔离真实模型合成诉求验证一次成功解析；真实联测结果如实记录，不扩大执行授权。",
   "handoff": "docs/dev/handoffs/intent-occurrence-prompt.md",
   "tests": {
-    "mode": "targeted",
-    "targets": ["tests.test_intent_model", "tests.test_chat_intent"],
-    "reason": "只调整模型提示文案和提示测试，不改公共 schema、权限或状态机；保持现有严格引文校验，定向测试足够。"
+    "mode": "full",
+    "targets": [],
+    "reason": "意图模型入口被协作检查器判为高风险路径；保持严格引文校验，并按门禁要求执行一次完整回归。"
   }
 }
