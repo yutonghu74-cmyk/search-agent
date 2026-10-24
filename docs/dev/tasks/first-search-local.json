@@ -1,0 +1,29 @@
+{
+  "role": "integration",
+  "branch": "codex/first-search-local",
+  "source_base": "05d900ddf39f97f811ea217ae098484925a96733",
+  "files": [
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "src/dsh_retrieval/first_search_local.py",
+    "src/dsh_retrieval/adapters/task_storage/plan_sets.py",
+    "tests/test_first_search_local.py",
+    "tests/test_first_search_api.py",
+    "tests/test_chat_ui.py",
+    "config/local-first-search.example.json",
+    "config/local-first-search-catalog.example.json",
+    "config/local-first-search-capabilities.example.json",
+    "contracts/multi-branch-retrieval.md",
+    "docs/dev/remaining-roadmap.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/first-search-local.md",
+    "README.md"
+  ],
+  "acceptance": "本地测试模式的首次检索 1–5：复用已集成 LOCAL_EXACT 适配器；从当前授权任务发现分支和索引，明确选择并准备整组方案、仅发起人显式确认；新增有界 HTTP tick 调用已批准计划，SQLite 预留/回传/重启续查及旧版本拒收；授权读取已提交命中并按绑定+版本+vector ID 映射为候选状态，不把原始命中计为有效清洗数量，不泄漏媒体私有引用；Chat 展示选择、确认、执行和首批候选，全部标明本地测试/未清洗；双索引、空结果、缺映射、撤权、幂等、重启、错误/未配置做端到端定向测试。没有真实 Milvus、模型或媒体接口时不得声称真实检索及缩略图可用。对应 v1.9 6.5–6.7、13.6、A37/A44/A45 的本地子集。",
+  "handoff": "docs/dev/handoffs/first-search-local.md",
+  "tests": {
+    "mode": "full",
+    "targets": [],
+    "reason": "新增用户确认和执行 HTTP、授权候选读取及 SQLite 账本投影，涉及权限、幂等、版本与持久化，交付需完整回归。"
+  }
+}
