@@ -71,6 +71,26 @@ class ReleasedDetectorTests(unittest.TestCase):
         extra = DetectionStep("unused", "fixture.detector", "fixture.validator", "fixture.eval")
         self.assert_unreleased(self.f.registry, replace(recipe, steps=recipe.steps + (extra,)))
 
+    def test_runtime_configuration_drift_is_fenced_before_media_read(self):
+        self.f.detector.release_config_digest = "sha256:" + "a" * 64
+        self.f.assert_code("DETECTOR_NOT_RELEASED", self.f.run_pipeline)
+        self.assertEqual(self.f.gateway.reads, 0)
+        self.assertEqual(self.f.f.state()["results"], {})
+
+    def test_task_scoped_review_must_match_recipe(self):
+        self.f.detector.source_review_digest = "sha256:" + "1" * 64
+        self.assert_unreleased(self.f.registry, self.f.approval.job.recipe)
+
+    def test_new_configuration_has_new_release_and_rejects_old_approval(self):
+        original = self.f.registry.release_digest
+        self.f.detector.release_config_digest = "sha256:" + "a" * 64
+        changed = ReleasedDetectorRegistry(self.f.capabilities, self.f.bindings,
+            {self.f.detector.backend_ref: self.f.detector}, self.f.artifact_manifest)
+        self.assertNotEqual(changed.release_digest, original)
+        self.f.registry = changed
+        self.f.assert_code("DETECTOR_NOT_RELEASED", self.f.run_pipeline)
+        self.assertEqual(self.f.gateway.reads, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

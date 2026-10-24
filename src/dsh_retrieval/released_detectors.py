@@ -31,11 +31,33 @@ class ReleasedDetectorRegistry:
             raise ValueError("duplicate detector binding")
         self.detectors = dict(detectors)
         self.artifact_manifest = artifact_manifest
+        self._config_digests = self._detector_config_digests()
         self.release_digest = digest({
-            "schema_version": "released-detector-registry@1",
+            "schema_version": "released-detector-registry@2",
             "capability_registry_digest": self.registry_digest,
             "artifact_manifest_digest": self.artifact_manifest.manifest_digest,
+            "detector_config_digests": self._config_digests,
         })
+
+    def _detector_config_digests(self):
+        configs = {}
+        for backend_ref, detector in sorted(self.detectors.items()):
+            value = getattr(detector, "release_config_digest", None)
+            if value is not None:
+                if (not isinstance(value, str) or len(value) != 71
+                        or not value.startswith("sha256:")
+                        or any(char not in "0123456789abcdef" for char in value[7:])):
+                    raise ValueError("invalid detector release configuration")
+                configs[backend_ref] = value
+        return configs
+
+    def _require_config_unchanged(self):
+        try:
+            unchanged = self._detector_config_digests() == self._config_digests
+        except (TypeError, ValueError):
+            unchanged = False
+        if not unchanged:
+            raise ServiceError("DETECTOR_NOT_RELEASED", "Approved detector release unavailable", 409)
 
     def require_recipe(self, recipe: CleaningRecipe):
         def unavailable():
@@ -43,6 +65,7 @@ class ReleasedDetectorRegistry:
 
         if type(recipe) is not CleaningRecipe or recipe.registry_digest != self.registry_digest:
             unavailable()
+        self._require_config_unchanged()
         steps = {step.step_id: step for step in recipe.steps}
         if set(steps) != {rule.step_id for rule in recipe.rules}:
             unavailable()
@@ -75,6 +98,9 @@ class ReleasedDetectorRegistry:
                     or getattr(detector, "evidence_ref", None) != step.evidence_ref
                     or not callable(getattr(detector, "detect", None))):
                 unavailable()
+            review_digest = getattr(detector, "source_review_digest", None)
+            if review_digest is not None and review_digest != recipe.source_review_digest:
+                unavailable()
         self.artifact_manifest.require_detectors(
             self.detectors, tuple(step.backend_ref for step in recipe.steps))
         return dict(self.detectors)
@@ -83,6 +109,7 @@ class ReleasedDetectorRegistry:
         """Validate the complete trusted release before serving any work."""
 
         released_backends = {binding.backend_ref for binding in self.bindings}
+        self._require_config_unchanged()
         if set(self.detectors) != released_backends:
             raise ServiceError("DETECTOR_NOT_RELEASED", "Approved detector release unavailable", 409)
         self.artifact_manifest.preflight(self.detectors)

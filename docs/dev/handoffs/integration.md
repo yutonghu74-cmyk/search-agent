@@ -1,5 +1,12 @@
 # A 总控集成交接
 
+## 已批准 VLM 检测器（2026-10-24，ACCEPTED）
+
+- A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `vlm-approved-detector.json`；发布基线 `7004ee9b0721ec7a355afd16a511311ad3d81e8f`，源基线 `9c46943a6c7139b003c2dd35b5e8b5cca3f21ef9`。
+- 已加入任务需求、模型绑定、提示版本、复核摘要的发布配置摘要，配方复核摘要匹配，以及 pass/fail/unknown 到检测事实的适配，含模拟批准工作器三态链路测试。`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_vlm_detector tests.test_released_detectors tests.test_multi_rule_pipeline -q`：29 项 PASS；`python3 tools/collab_gate.py check --role integration --base 7004ee9b0721ec7a355afd16a511311ad3d81e8f --task docs/dev/tasks/vlm-approved-detector.json`：SCOPE PASS、489 项 PASS、LOCAL GATE PASS，退出码 0；`git diff --check` PASS。门禁输出中 LOCAL GATE FAIL 为既有负向夹具。门禁之外未再跑完整回归。模拟模型和素材，不是内网、真实检索或真实清洗完成。
+- 接口变更：`ReleasedDetectorRegistry.release_digest` 从 `released-detector-registry@1` 升为 `@2`，旧批准需重新准备并由发起人确认。新增 `VLMRequirementDetector` 仅供受信服务按已确认复核构造；不更改 D 所有工作器接口。
+- 下一步：完成测试、审查源变更，记录真实结果；后续工作包将 Chat 已确认条件编译为发布规则，并配置授权图片网关与逐素材证据。
+
 ## 百度图片真实用例与模型限流（2026-10-23）
 
 - ACCEPTED（模型稳定性切片，非端到端业务验收）；A integration / codex/integration；独立 worktree /Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration；任务卡 model-live-reliability.json；基线 da5ee05ad8166dbb77d798591a5519a692ede618。
