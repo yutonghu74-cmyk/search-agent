@@ -4,6 +4,8 @@
 
 ## 当前快照
 
+- 2026-10-24：READY_FOR_REVIEW（用户授权协作流程简化），独立 codex/workflow-simplification 工作包，基线 90793f88c21b2ca126bc50a8eed38ba7ef5261a0。新增可信工作包范围检查、跨模块授权、独立分支/交接与按风险测试；旧角色命令保持兼容。完整回归 573 项 PASS，差异格式检查 PASS；治理升级不自称通过旧角色范围门禁。R06 草稿及其他窗口未提交文件保持不动；详见 handoffs/workflow-simplification.md。
+
 - 2026-10-24：ACCEPTED（物理索引配置校验切片）；A integration，任务卡 physical-index-registry.json，基线 949226583fae5e24dc29c54786f3932ade39d25a。完整模型/物理目标/读取声明、配置摘要漂移、类型化主键隔离及授权范围缓存键已实现；19 项定向、555 项角色门禁 PASS。真实驱动/连接健康/权限联测 NOT_RUN，未接现有 HTTP，8082 不变；下一步消费此契约接真实连接器。
 - 2026-10-24：ACCEPTED（选库预览 API/UI），A integration，任务卡 routing-preview-ui.json，基线 c5a1e17dcc17a914f33998aaaf312b829496ef13。显式能力注册/配置漂移复验完成；36 项定向、543 项门禁 PASS。8082 已更新，HTTP 页面包含“查看选库结果（未执行）”；现有账本沿用，8081 不变。8082 尚无真实索引清单/模型密钥/能力配置，不能生成真实路由或执行检索。下一步需真实配置与编码器接入。
 - 2026-10-24：ACCEPTED（后端接线切片），已保存配置到选库路由；任务卡 configured-routing.json，A integration / codex/integration，基线 449b64cc88892321ab35c3558ca0699daa1f40d4。授权后字面匹配、精确索引能力及配置版本栅栏完成；28 项定向、534 项角色门禁 PASS。未接页面路由入口、真实编码器/搜索，现有 8081/8082 服务未改。下一步是受信编码器接入与路由 API/UI；真实清单仍待提供。
