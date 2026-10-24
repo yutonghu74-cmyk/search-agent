@@ -1,5 +1,16 @@
 # A 总控集成交接
 
+## 前端界面优化（2026-10-24，READY_FOR_REVIEW）
+
+- A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `frontend-ui-optimization.json`，任务源基线 f0da9a6f55598cb6ee7b6a96f9ae02f67c1cf342，实施基线 de1331562c2238178c7f47ab228241f0dc4dd1c8。
+- Chat 重排为明确的导航、项目上下文、能力边界、模型配置、方案时间线、新需求和历史区；顶部常驻“新建 Chat”。模型区明确区分“DSH 需求理解 / 扩词模型（LLM）”与“清洗语义判定模型（VLM）”，只选择服务端已配置模型，不把端点或密钥放进页面。索引配置页改为描述→预览→确认的分步布局。
+- 五节点详情改为可展开的语义化 `details/summary`，继续分别展示 node_status、gate_status、manual/auto 与说明；未知计数仍显示“未知”，未发布结果、未批准选库和未接自动清洗能力仍明示，不增加 API、业务状态或虚假能力。
+- 无障碍与响应式：增加跳转主内容链接、结构化标题/区域、`role=log`、忙碌与状态播报、键盘焦点和 reduced-motion；桌面保留左侧历史，窄屏把模型配置和新需求前置、历史后置。浏览器实测默认桌面与 390×844 视口，Chat 与索引配置页布局/可见性 PASS；本地服务使用独立 `DSH_HOME=var/ui-preview`、端口 8093 和独立 SQLite，未写用户运行账本。
+- 后续界面迭代：按 Codex 风格重排为左侧历史 Chat、中间持续对话、右侧“新建 Chat / 模型设置”三栏；历史 Chat 支持恢复草稿继续对话与浏览器本地别名重命名。右栏增加 API 地址、密码型密钥输入及 LLM/VLM 模型名，但密钥只暂存在页面内存，刷新清除，尚未接服务端密钥存储或真实调用。五节点改为横向流水线，每个节点展开后显示已有权威水位或明确的“尚未生成/尚未发布”，不伪造结果。
+- 本轮按用户明确要求仅运行前端相关验证：`PYTHONPATH=src:tests python3 -m unittest tests.test_chat_ui tests.test_catalog_api tests.test_grouped_expansion tests.test_progress_models` 24 项 PASS，Chat JavaScript `node --check` 与 `git diff --check` PASS；未重复运行完整回归或角色门禁。浏览器在约 740px 面板实测三栏、历史草稿续聊和 API 配置展开 PASS。
+- 验证：`PYTHONPATH=src:tests python3 -m unittest tests.test_chat_ui tests.test_catalog_api tests.test_routing_preview tests.test_grouped_expansion tests.test_progress_models` 33 项 PASS；Chat/Catalog JavaScript 分别 `node --check` PASS；`python3 -m py_compile` 与 `git diff --check` PASS；`PYTHONPATH=src:tests python3 -m unittest discover -s tests -p 'test*.py'` 589 项 PASS。`python3 tools/collab_gate.py check --role integration --base de1331562c2238178c7f47ab228241f0dc4dd1c8 --task docs/dev/tasks/frontend-ui-optimization.json`：SCOPE PASS、589 项 PASS、LOCAL GATE PASS；门禁输出中的局部 FAIL 为既有负向夹具。
+- 未验证：未配置真实模型 profile，因此页面显示“尚未配置模型”；真实 LLM/VLM、真实检索、自动清洗、图片上传、历史批次选择、导出、内网与生产可用性均 NOT_RUN。本切片不声明 v1.9 A73 全场景完成。
+
 ## R06 有界协调器（2026-10-24，READY_FOR_REVIEW 本地切片）
 
 - A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 retrieval-coordinator.json，基线 8d8af665b55547f040da04d4c2319886ebf2a78c，源基线 6e4303da4012e4ab4c57e4405d6981e884a288f9。
