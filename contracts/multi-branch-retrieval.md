@@ -24,3 +24,9 @@ commit_page 必须验证预留 operation 归属、集合摘要/epoch、成员 pl
 可重试依赖错误（显式 retryable 且 429/502/503/504）保留原 operation，报告 retry_pending；下一次显式 tick 复用该请求/预留，不静默开新页。权限、版本、游标和结果错误直接失败。已提交页跳过，终止页不再派发；分页停止不代表任务完成、目标数量满足或素材合格。检索不更新 accepted_count，不自动清洗或补数。
 
 本阶段为受控单调度者的显式有界执行入口，不是完整生产调度器。没有跨进程租约、持久尝试/费用计数、定时退避或自动执行策略批准；未知网络结果可能被重发，同一逻辑页业务提交幂等但外部调用不保证恰好一次。启用自动循环和多调度者前必须接已批准 ExecutionRules、持久 attempt/预算及租约（R23）。真实 gateway 和分页能力仍分别验收。恢复接口缺失时构造协调器即报 RECOVERY_NOT_CONFIGURED，不读 SQLite 私有状态绕过权限。
+
+## R06 只读 HTTP 进度投影
+
+`GET /v1/retrieval/tasks/{task_id}/retrieval-progress` 只从当前已批准整组账本读取。先认证任务发起人和项目，再由账本在同一读取事务中复验当前 task/revision/generation/plan 和所有成员库的现行搜索授权。无批准时返回 `status=unapproved`；已批准时返回摘要、epoch、任务版本及每成员 `plan_id/branch_id/library_id/binding_id/index_version/committed_pages/status/stop_reason`。状态仅为 `not_started/pending/more_available/stopped`；`pending` 表示已预留但未提交，不能区分正在请求与需要重试。`pagination_stopped` 只指已批准检索分页停止，不等于有效素材数达标或任务完成。响应不含向量、原始命中、游标、内部 operation ID 或媒体地址。
+
+未装配账本返回 503，非发起人 404，撤权 403，旧 generation/版本冲突 409；不允许查询参数。现有本地服务默认关闭，可用 `--plan-set-progress` 显式开启，必须同时指定独立 SQLite 任务账本、受信本地目录源与 `--demo-project`，并沿用单一 `demo/default` 项目授权。此入口仅供本地试验，不代替 W3、生产授权或真实索引连接。没有 POST 派发接口；HTTP 请求重放还缺持久请求级幂等及执行预算，不能把 GET 状态投影当成可安全自动执行的依据。

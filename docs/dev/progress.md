@@ -4,6 +4,8 @@
 
 ## 当前快照
 
+- 2026-10-24：READY_FOR_REVIEW（R06 只读进度 HTTP 切片），独立 `codex/r06-progress-api` 工作包，基线 e43355f3dee2fe7b31f060792dd40f7e79051b8a。已实现已批准整组的授权 SQLite 进度投影及本地 demo 显式装配；7 项定向测试、603 项完整工作包门禁 PASS。HTTP 派发和真实向量网关仍未接入，8081/8082 运行服务未重启。
+
 - 2026-10-24：READY_FOR_REVIEW（R06 本地协调切片），A integration 整组已批准计划的有界预留/请求/回传/重试已实现；B/core 只读恢复接口已提交 afaa09e。真实 SQLite 的独立进程恢复、跨分支游标、重试和撤权测试 9 项 PASS；core 与最终 integration 角色门禁各 588 项 PASS。真实检索网关、自动执行策略和生产租约仍 TODO，不改 8081/8082 服务或用户账本。
 - 2026-10-24：READY_FOR_REVIEW（用户授权协作流程简化），独立 codex/workflow-simplification 工作包，基线 90793f88c21b2ca126bc50a8eed38ba7ef5261a0。新增可信工作包范围检查、跨模块授权、独立分支/交接与按风险测试；旧角色命令保持兼容。完整回归 573 项 PASS，差异格式检查 PASS；治理升级不自称通过旧角色范围门禁。R06 草稿及其他窗口未提交文件保持不动；详见 handoffs/workflow-simplification.md。
 - 2026-10-24：ACCEPTED（物理索引配置校验切片）；A integration，任务卡 physical-index-registry.json，基线 949226583fae5e24dc29c54786f3932ade39d25a。完整模型/物理目标/读取声明、配置摘要漂移、类型化主键隔离及授权范围缓存键已实现；19 项定向、555 项角色门禁 PASS。真实驱动/连接健康/权限联测 NOT_RUN，未接现有 HTTP，8082 不变；下一步消费此契约接真实连接器。

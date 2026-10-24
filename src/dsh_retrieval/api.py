@@ -26,6 +26,7 @@ from .catalog_ui import CATALOG_HTML, CATALOG_JS
 from .text_catalog_config import CatalogConfigScope
 from .local_catalog import build_local_catalog
 from .routing_preview import LocalRoutingPreview
+from .retrieval_progress import build_local_demo_progress_repository, read_retrieval_progress
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -44,6 +45,7 @@ QUERY_BRANCHES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-branches$"
 MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
 CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
 ROUTING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-routing$")
+RETRIEVAL_PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/retrieval-progress$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -53,6 +55,7 @@ class Handler(BaseHTTPRequestHandler):
     model_runtime: Any = None
     catalog_config: Any = None
     routing_preview: Any = None
+    plan_set_repository: Any = None
 
     def _catalog_action(self, match, post=False):
         actor = self._actor()
@@ -247,6 +250,21 @@ class Handler(BaseHTTPRequestHandler):
                 return HTTPStatus.OK, self.routing_preview.preview(actor, routing_match.group(1), branches), False
             self._run(routing_action)
             return
+        retrieval_progress_match = RETRIEVAL_PROGRESS_PATH.fullmatch(path)
+        if retrieval_progress_match:
+            def retrieval_progress_action():
+                actor = self._actor()
+                task_id = retrieval_progress_match.group(1)
+                self.service.get_task(actor, task_id)
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Retrieval progress has no query parameters', 422)
+                if self.plan_set_repository is None:
+                    raise ServiceError('RETRIEVAL_PROGRESS_NOT_CONFIGURED',
+                                       'Approved plan-set ledger is not configured', 503)
+                return HTTPStatus.OK, read_retrieval_progress(
+                    self.plan_set_repository, actor, task_id), False
+            self._run(retrieval_progress_action)
+            return
         if path == '/catalog':
             self._asset('text/html', CATALOG_HTML)
             return
@@ -370,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None, catalog_config=None,
-                   routing_preview=None) -> type[Handler]:
+                   routing_preview=None, plan_set_repository=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
@@ -380,6 +398,7 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.model_runtime = model_runtime or ModelRuntime()
     BoundHandler.catalog_config = catalog_config
     BoundHandler.routing_preview = routing_preview
+    BoundHandler.plan_set_repository = plan_set_repository
     return BoundHandler
 
 
@@ -392,6 +411,8 @@ def main() -> None:
     parser.add_argument('--catalog-source', help='trusted local existing-index inventory and explicit grants JSON')
     parser.add_argument('--catalog-ledger', help='independent local SQLite configuration file')
     parser.add_argument('--query-capabilities', help='trusted exact text-to-image index capability JSON; preview only')
+    parser.add_argument('--plan-set-progress', action='store_true',
+                        help='enable read-only approved-plan progress for local demo tasks')
     args = parser.parse_args()
     if bool(args.catalog_source) != bool(args.catalog_ledger):
         parser.error('--catalog-source and --catalog-ledger must be supplied together')
@@ -399,13 +420,18 @@ def main() -> None:
         parser.error('--query-capabilities requires --catalog-source and --catalog-ledger')
     if args.catalog_ledger and args.ledger and Path(args.catalog_ledger).resolve() == Path(args.ledger).resolve():
         parser.error('catalog ledger must be independent from task ledger')
+    if args.plan_set_progress and not (args.ledger and args.catalog_source and args.demo_project):
+        parser.error('--plan-set-progress requires --ledger, --catalog-source and --demo-project')
     grants = [("tenant-a", "user-a", "demo", "default")] if args.demo_project else []
     repository = SQLiteTaskRepository(Path(args.ledger)) if args.ledger else InMemoryTaskRepository()
     runtime = load_model_runtime(args.model_config) if args.model_config else ModelRuntime()
     catalog = build_local_catalog(args.catalog_source, args.catalog_ledger, runtime) if args.catalog_source else None
     service = TaskService(repository, LocalProjectAccess(grants))
     routing = LocalRoutingPreview(service, catalog, args.catalog_source, args.query_capabilities) if args.query_capabilities else None
-    handler = create_handler(service, model_runtime=runtime, catalog_config=catalog, routing_preview=routing)
+    plan_sets = build_local_demo_progress_repository(Path(args.ledger), projects=service.projects,
+        source_path=args.catalog_source) if args.plan_set_progress else None
+    handler = create_handler(service, model_runtime=runtime, catalog_config=catalog,
+                             routing_preview=routing, plan_set_repository=plan_sets)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
