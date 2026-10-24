@@ -2,7 +2,7 @@
 
 - 角色 / 分支 / worktree：A integration / `codex/chat-llm-analysis` / `var/worktrees/chat-llm-analysis`。
 - 可信发布基线：`98f58c5fe53c5f4048efd908c67a0e1f83bfa182`；source_base `5335d785a4fa86c98d3a1366e1875914e10496d6`；任务卡 `docs/dev/tasks/chat-llm-analysis.json`。
-- 状态：READY_FOR_REVIEW。
+- 状态：ACCEPTED；实施提交 `dbc1be7` 已快进合并主线。
 - 范围：新增授权 `intent-preview`，复用现有受信 LLM profile 和引文校验解释器；Chat 的提单/反馈先做逐条分析预览，失败不自动降级或创建草稿。原文仍是确认卡源数据，分析不构成批准或可执行规则。
 - 凭据：私有模型配置只引用环境变量，仓库仅保留无密钥样例；当前 8084 无模型 ID/服务端密钥，真实模型联测 NOT_RUN。
 - 测试：`PYTHONPATH=src:tests python3 -m unittest tests.test_chat_intent tests.test_chat_ui tests.test_model_runtime -q`，18 项 PASS；`PYTHONPATH=src python3 -c 'from dsh_retrieval.chat_ui import CHAT_JS; print(CHAT_JS)' | node --check` PASS；`git diff --check` PASS。
