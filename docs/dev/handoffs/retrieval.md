@@ -1,5 +1,15 @@
 # Retrieval 检索适配切片
 
+## 2026-10-24 本地精确向量检索切片（待总控审查）
+
+- 角色 / 分支 / worktree：retrieval / codex/retrieval-adapters / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/retrieval`。
+- 基线：`e559b505520f57ab30476ebc1c8886be9ee82e05`；范围仅 `src/dsh_retrieval/adapters/retrieval/`、`tests/retrieval/`、本交接文件。
+- 验收：v1.9 6.5–6.7 的本地可替换子集。`local_vector.py` 用受信测试向量进行 COSINE/IP/L2 精确排序；双索引各自编码、服务端范围模板、签名游标、固定语料摘要、深度上限、版本/请求不匹配失败关闭，以及命中到授权素材的版本化映射。游标仅在相同语料、模板、请求和密钥下跨实例继续。新增 SQLite 账本组合用例覆盖显式确认、每页预留/提交、新实例续页；不触发清洗或正式有效数量。
+- 测试：2026-10-24 CST，`PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.retrieval.test_local_vector -v`，5 项通过，退出码 0。
+- 角色门禁：`python3 tools/collab_gate.py check --role retrieval --base e559b505520f57ab30476ebc1c8886be9ee82e05`，SCOPE PASS / LOCAL GATE PASS，183 项通过，退出码 0。
+- 状态：READY_FOR_REVIEW；`LOCAL_EXACT` 是本地测试实现，不是 Milvus、学习型 embedding 或生产授权服务。ApprovedFixture 是受信测试装配，不代替用户批准。现有公共 `SearchPage` 未表达 v1.9 全量 read_watermark/has_more=unknown；本切片只承诺不可变本地语料的 snapshot 语义。
+- NOT_RUN：真实 Milvus/embedding/元数据/权限联测、正式端到端业务装配、跨进程并发和性能。总控后续接入已确认检索计划与账本；生产接入前仍需真实连接器能力验证。
+
 ## 当前任务：授权媒体物化预览
 
 - 角色 retrieval；独立 var/worktrees/retrieval；分支 codex/retrieval-adapters；基线 10228c0ed84c45c49133e4f83868bd20af52a4f8。
