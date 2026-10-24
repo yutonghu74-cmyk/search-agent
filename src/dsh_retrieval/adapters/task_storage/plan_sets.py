@@ -9,7 +9,8 @@ from .sqlite import SQLiteTaskRepository, MAX_BYTES, encode, decode, dump
 from ...errors import ServiceError
 from ...integration_models import AccessContext
 from ...models import RunStatus
-from ...multi_branch_contracts import validate_plan_set, validate_set_confirmation, validate_member_execution
+from ...multi_branch_contracts import (PlanSetMemberProgress, validate_plan_set,
+                                        validate_set_confirmation, validate_member_execution)
 from ...query_spec import digest
 from ...retrieval_contracts import RetrievalScope, validate_page
 from ...service import require_key
@@ -162,6 +163,80 @@ class SQLitePlanSetApprovalRepository:
                 validate_plan_set(actor, task, current)
                 self._authorize(memory, actor, task_id, current)
             return current
+        return self._transaction(False, read)
+
+    def get_progress(self, actor, approved):
+        """Rebuild every member head from the committed ledger in one read transaction."""
+        def corrupt():
+            raise ServiceError('STORAGE_CORRUPT', 'Invalid plan set page chain', 500)
+
+        def read(memory, state):
+            task_id = approved.scope.task_id
+            task = self._authorize(memory, actor, task_id, approved)
+            current = state['current'].get(task_id)
+            if current != approved:
+                raise ServiceError('PLAN_NOT_CURRENT', 'Set unapproved or superseded', 409)
+            validate_plan_set(actor, task, current)
+            members = {member.plan.request.plan_id: member.plan.request for member in current.members}
+            operations = {plan_id: {} for plan_id in members}
+            expected_cursors = {}
+            for operation_id, record in state['operations'].items():
+                if not isinstance(record, tuple) or len(record) != 4:
+                    corrupt()
+                saved, plan_id, request, page = record
+                if saved != current:
+                    continue
+                if (not isinstance(operation_id, str) or not operation_id
+                        or plan_id not in members):
+                    corrupt()
+                validate_member_execution(actor, task, approved, current,
+                                          plan_id=plan_id, request=request)
+                fingerprint = digest({'set': current.proposal_digest, 'member': plan_id,
+                                      'request': asdict(request)})
+                if state['requests'].get(fingerprint) != operation_id:
+                    corrupt()
+                if request.cursor in operations[plan_id]:
+                    corrupt()
+                operations[plan_id][request.cursor] = (operation_id, request, page)
+                if page is not None and page.next_cursor is not None:
+                    key = (current.proposal_digest, plan_id, page.next_cursor)
+                    if key in expected_cursors:
+                        corrupt()
+                    expected_cursors[key] = operation_id
+
+            actual_cursors = {key: value for key, value in state['cursors'].items()
+                              if isinstance(key, tuple) and len(key) == 3
+                              and key[0] == current.proposal_digest}
+            if actual_cursors != expected_cursors:
+                corrupt()
+
+            result = []
+            for plan_id, initial in members.items():
+                chain = operations[plan_id]
+                cursor, previous, seen, visited, committed = None, None, set(), set(), 0
+                while cursor in chain:
+                    if cursor in visited:
+                        corrupt()
+                    visited.add(cursor)
+                    operation_id, request, page = chain[cursor]
+                    if page is None:
+                        head = PlanSetMemberProgress(plan_id, request, operation_id, None, committed)
+                        break
+                    validate_page(request, page, previous=previous, seen_cursors=frozenset(seen))
+                    committed += 1
+                    head = PlanSetMemberProgress(plan_id, request, operation_id, page, committed)
+                    if page.next_cursor is None:
+                        break
+                    seen.add(page.next_cursor)
+                    cursor, previous = page.next_cursor, page
+                else:
+                    if committed == 0:
+                        head = PlanSetMemberProgress(plan_id, initial, None, None, 0)
+                if len(visited) != len(chain):
+                    corrupt()
+                result.append(head)
+            self._authorize(memory, actor, task_id, current)
+            return tuple(result)
         return self._transaction(False, read)
 
     def reserve_page(self, actor, approved, *, plan_id, request, key):

@@ -1,5 +1,14 @@
 # core 精确内容计数预览交接
 
+## R06 多分支授权恢复读取（2026-10-24，READY_FOR_REVIEW）
+
+- 用户已批准的独立 core 工作包；角色 core，独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`，分支 `codex/task-core`，可信执行基线 `7c1afd315efc2c80d24c3ed4f92f46572cb5cbd3`。范围仅 `src/dsh_retrieval/adapters/task_storage/plan_sets.py`、`tests/core/test_plan_set_progress.py`、本交接；不改其他工作区与真实业务数据库。
+- 验收：在同一只读 SQLite 事务内重验当前整组计划、任务版本和全部库权限，按已提交页面与待完成预留恢复每个成员进度；缺页、重复页、游标索引损坏拒绝。R06 对应规格第 8.2、11.3–11.5 节和 A15/A20/A37 的本地确定性部分。
+- 实现 `get_progress(actor, approved)`，按成员顺序返回最新页或待处理预留以及已提交页数；保持原账本格式 2，不重写业务 task 或事件。
+- 定向验证：`PYTHONPATH=src:tests:. PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.core.test_plan_set_progress -q`，退出 0，9 项 PASS；含新进程恢复、两分支相同游标隔离、重新实例化协调器跳过已提交页、超时重试复用预留、请求后撤权阻止提交。`git diff --check` 退出 0。
+- 角色门禁：`PYTHONDONTWRITEBYTECODE=1 python3 tools/collab_gate.py check --role core --base 7c1afd315efc2c80d24c3ed4f92f46572cb5cbd3`，退出 0；SCOPE PASS、588 项完整测试 PASS、LOCAL GATE PASS。门禁日志位于 `/tmp/search-agent-r06-core-gate.log`；本行补充实际结果仅改文档，未改被测代码。
+- 真实 ClickHouse/Milvus、费用/租约与生产后台调度 NOT_RUN；这些超出此恢复读取包。下一步完成门禁、合并后由 A 复验整个协调器。
+
 ## 检测器发布摘要批准持久化（2026-10-22）
 
 - core / `codex/task-core` / `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/core`；发布基线 `d9a48e61478ccdccf28cb93998fc4b9f8132f018`，任务卡 `docs/dev/tasks/detector-release-approval-storage.json`；状态 READY_FOR_REVIEW。
