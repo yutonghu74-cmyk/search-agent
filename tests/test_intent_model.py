@@ -54,6 +54,9 @@ class IntentModelTest(unittest.TestCase):
         request, timeout = opener.calls[0]
         self.assertEqual(request.full_url, "https://fixture.invalid/v1/chat/completions")
         self.assertEqual(request.get_header("Authorization"), "Bearer dummy-test-secret")
+        system_prompt = json.loads(request.data)['messages'][0]['content']
+        self.assertIn('首次必须为 0', system_prompt)
+        self.assertIn('绝不是字符位置', system_prompt)
         self.assertNotIn("dummy-test-secret", request.data.decode())
         self.assertNotIn("dummy-test-secret", repr(self.config))
         self.assertNotIn("dummy-test-secret", json.dumps(result))

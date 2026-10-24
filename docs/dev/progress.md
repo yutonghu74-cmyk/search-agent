@@ -4,6 +4,7 @@
 
 ## 当前快照
 
+- 2026-10-24：IN_PROGRESS（意图引文 occurrence 提示收紧），任务卡 intent-occurrence-prompt.json，基线 40f41cd。真实 `gpt-4o-mini` 首次合成诉求因 occurrence 误写为字符位置被安全拒绝；提示收紧，严格引文校验不变，定向门禁与真实再试待完成。
 - 2026-10-24：ACCEPTED（Chat LLM 逐条诉求分析），任务卡 chat-llm-analysis.json，独立 `codex/chat-llm-analysis`，基线 98f58c5，实施提交 dbc1be7 已合并主线。已接授权分析预览和提单/反馈入口；模型输出仅审阅、不覆盖原文或自动批准。18 项定向、628 项完整门禁及 JS 语法 PASS；8084 当前仍未配置模型，真实联测 NOT_RUN。
 - 2026-10-24：ACCEPTED（本地首次检索 1–5），独立 `codex/first-search-local`，任务卡 first-search-local.json，基线 f18caee，实施提交 327ec3b 已合并主线。显式选库/整组确认/有界 HTTP tick/授权原始候选列表已接通；25 项定向、624 项完整工作包门禁、JavaScript 语法和 8084 双索引两批页面冒烟 PASS。缺映射候选失败关闭，原始命中不计为有效清洗数量。真实 Milvus/embedding/媒体缩略图/清洗有效数量仍 NOT_RUN；不得标为真实端到端完成。
 - 2026-10-24：READY_FOR_REVIEW（R06 只读进度 HTTP 切片），独立 `codex/r06-progress-api` 工作包，基线 e43355f3dee2fe7b31f060792dd40f7e79051b8a。已实现已批准整组的授权 SQLite 进度投影及本地 demo 显式装配；7 项定向测试、603 项完整工作包门禁 PASS。HTTP 派发和真实向量网关仍未接入，8081/8082 运行服务未重启。
