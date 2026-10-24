@@ -19,3 +19,21 @@
 当前配置按个人项目隔离，是本地持久化后端，不是生产共享目录。目录摘要用于漂移检测，不提供跨授权服务/目录/SQLite 的分布式事务；执行端仍须逐批授权与版本校验。配置语义描述不是实际过滤条件，也不证明连接可用或向量空间兼容。
 
 下一包：配置管理 HTTP/UI、真实受信索引清单加载、配置到 QueryRoutingService 的 CatalogRepository 装配；应保留现有实时任务/项目权限检查和 TextQueryCapability 精确匹配。真实模型质量、ClickHouse/Milvus、端到端搜索均未在本包验证。
+
+## 配置管理入口（后续切片）
+
+已有本地 `/catalog` 页面，Chat 提供入口；页面固定 demo 项目及模拟身份，与现有 Chat 一致，不能直接暴露到生产网络。
+
+- GET `/v1/retrieval/projects/{project}/catalog-config` 返回 `{config: null|已保存配置}`。
+- POST 同路径 `/preview`，严格载荷 `{text, llm_id}`，返回候选 proposal 和 proposal_digest。
+- POST 同路径 `/confirm`，严格载荷 `{proposal, proposal_digest}`，返回 `{version}`。
+- scope 从身份头和路径派生，仍需可信网关认证；普通项目访问不授予配置权。默认未装配返回 503；独立配置授权失败返回 403。
+- 页面展示预览与保存配置、明确确认；修改文本/模型清除旧预览，处理中禁用输入，错误不伪装保存成功。现有运行服务不会自动重载代码。
+
+本地启动额外提供 `--catalog-source <私有受信JSON路径> --catalog-ledger <独立SQLite路径>`，两个参数必须同时提供；不得与任务账本同路径。清单实时读取，缺失/损坏失败关闭。示例结构（仅虚构 ID，不是实际连接配置）：
+
+```json
+{"schema":"local-catalog@1","libraries":[{"library_id":"animals","description":"动物图片库","media_type":"image","bindings":[{"binding_id":"animal-image-v1","library_id":"animals","index_version":"v1","encoder_ref":"cross-modal@1","vector_dimension":512,"metric":"COSINE"}]}],"grants":[{"tenant_id":"tenant-a","owner_id":"user-a","project_id":"demo","can_configure":true,"library_ids":["animals"]}]}
+```
+
+清单由管理员提供真实且已验证的逻辑索引绑定，禁止把示例当已接入资源。它不包含物理连接、凭据或数据库发现功能；真实连接解析及配置到检索路由的装配仍待完成。文件变更需管理员原子替换；跨文件读取不是分布式事务，执行端仍须重新授权。

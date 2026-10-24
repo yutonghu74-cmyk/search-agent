@@ -3,7 +3,7 @@
 CHAT_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DSH 检索需求体验</title><link rel="stylesheet" href="/chat.css"></head>
-<body><main>
+<body><main><nav><a href="/catalog">已有索引配置</a></nav>
   <header><div><span class="eyebrow">LOCAL PREVIEW</span><h1>检索需求 Chat</h1></div><div class="project">项目 <strong>demo</strong> / 子维度 <strong>default</strong></div></header>
   <div class="layout"><aside class="history"><div class="history-title"><h2>历史记录</h2><button class="icon-button" id="refresh-history" aria-label="刷新历史记录">↻</button></div><p>草稿会话与正式版本分层保存；会话不是业务执行时间线。</p><div id="history-list"></div></aside>
   <div class="chat"><section class="notice">本页使用模拟身份和本地账本。反馈清洗建议仅供审阅，不在确认摘要内；反馈文字尚未编译成真实清洗规则，也不会启动真实检索。</section>

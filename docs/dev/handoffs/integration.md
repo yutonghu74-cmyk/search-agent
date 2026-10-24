@@ -1,5 +1,12 @@
 # A 总控集成交接
 
+## 索引配置入口（2026-10-24，ACCEPTED 本地切片）
+
+- A integration / codex/integration，独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 catalog-config-ui.json，基线 ef6d8f7d80f52bf3eb3749c17a164fb4e88a5670，源基线 e3d500e35762a592ad7fea5e6d15e924a11919d7。
+- 范围：独立页面、严格 API、显式受信 JSON 索引/授权清单与独立配置 SQLite 启动参数；不修改 C 的连接器、不物理建库、不默认授予配置权。测试 NOT_RUN。
+- 实现里程碑：页面/API/启动装配完成。定向 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_catalog_api tests.test_text_catalog_config tests.test_chat_ui tests.test_api -q` 27 项 PASS；随后补充旧配置失效仍允许重新生成、输入修改清空预览及模型失败禁用确认的 Node 行为测试，`tests.test_catalog_api` 7 项 PASS（含 JS 语法）。`git diff --check` PASS，角色门禁 RUNNING。浏览器视觉验收和真实模型联测 NOT_RUN。
+- 交付：`python3 tools/collab_gate.py check --role integration --base ef6d8f7d80f52bf3eb3749c17a164fb4e88a5670 --task docs/dev/tasks/catalog-config-ui.json` 范围通过、524 项 PASS、最终 LOCAL GATE PASS，退出码 0（中间 FAIL 为既有负例）。门禁外未重复全量回归。A 审查范围、授权默认关闭、严格请求体及明示本地边界后接受。8080/8081 未重启；没有添加真实索引/凭据、未修改用户账本。后续接配置路由和真实清单；当前仅本地配置登记流程，不代表生产连接或真实检索完成。
+
 ## R02 文本配置后端（2026-10-24，ACCEPTED 后端切片）
 
 - A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 text-catalog-config.json；发布基线 a35d420fae4eb94afd8609f94cba39c45f5f44dc，源基线 40f855ceb104abb60508b66147a2fa7e7f847e87。

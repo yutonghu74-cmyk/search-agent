@@ -4,6 +4,7 @@
 
 ## 当前快照
 
+- 2026-10-24：ACCEPTED（本地配置入口切片），索引配置页面/API 及显式本地目录装配；A integration，任务卡 catalog-config-ui.json，基线 ef6d8f7d80f52bf3eb3749c17a164fb4e88a5670。首轮定向 27 项、补充后配置 API/UI 7 项和角色门禁 524 项 PASS。独立配置授权默认拒绝；8081 未重启，浏览器视觉验收及真实模型/目录联测 NOT_RUN。下一步配置到选库路由装配和真实索引清单验证。
 - 2026-10-24：ACCEPTED（R02 文本配置后端切片）；A integration / codex/integration，任务卡 text-catalog-config.json，发布基线 a35d420fae4eb94afd8609f94cba39c45f5f44dc。已有索引文本候选、授权/摘要校验、SQLite 原子确认和配置读取已实现；首轮 34 项定向、补充后配置 15 项、角色门禁 517 项 PASS。仅登记受信已有库，不物理建库。下一步配置页面/API、真实索引清单和路由装配；8081 未重启，真实模型/目录联测 NOT_RUN。
 - 2026-10-24：ACCEPTED（R01 后端切片），后续总清单见 `remaining-roadmap.md`（R01–R29）。A integration / codex/integration，任务卡 query-routing.json，基线 dd2fd37ec872a4b01109706f45f2c1159af8905a；授权索引发现和整组路由准备已实现，24 项定向/502 项角色门禁 PASS。不同库按各自编码器准备计划；无权限、陈旧/混合版本和重复路由失败关闭。真实目录、向量库与编码器资料待提供；下一项 R02，当前无新页面入口或真实向量搜索。
 - 2026-10-24：ACCEPTED（反馈清洗建议预览），任务卡 feedback-cleaning-suggestion.json，A integration / codex/integration，发布基线 32ce770be55c7c07279319aeabd860b14231e262。已实现当前反馈草稿的 LLM→候选 VLM 指令建议、调用前后版本复验与 Chat 独立建议卡；含并发确认在内的 16 项定向测试、JS 语法及 491 项角色门禁 PASS。建议不属于反馈确认摘要，不创建清洗管线；8081 旧进程未在本切片重启。

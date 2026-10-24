@@ -22,6 +22,9 @@ from .expansion_models import preview_grouped_expansion, preview_edited_groups
 from .query_branches import build_query_branch_view
 from .model_runtime import ModelRuntime, load_model_runtime
 from .query_spec import digest
+from .catalog_ui import CATALOG_HTML, CATALOG_JS
+from .text_catalog_config import CatalogConfigScope
+from .local_catalog import build_local_catalog
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -38,6 +41,7 @@ CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
 QUERY_BRANCHES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-branches$")
 MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
+CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -45,6 +49,24 @@ class Handler(BaseHTTPRequestHandler):
     service: TaskService
     result_reader: Any = None
     model_runtime: Any = None
+    catalog_config: Any = None
+
+    def _catalog_action(self, match, post=False):
+        actor = self._actor()
+        self.service.projects.require_access(actor, match.group(1), 'default', 'read')
+        if self.catalog_config is None:
+            raise ServiceError('CATALOG_NOT_CONFIGURED', '未装配受信索引清单与独立配置权限', 503)
+        scope = CatalogConfigScope(actor.tenant_id, actor.user_id, match.group(1))
+        if not post:
+            return HTTPStatus.OK, {'config': self.catalog_config.read(scope)}, False
+        body = self._body()
+        if match.group(2) == 'preview' and set(body) == {'text', 'llm_id'}:
+            result = self.catalog_config.preview(scope, body['text'], body['llm_id'])
+        elif match.group(2) == 'confirm' and set(body) == {'proposal', 'proposal_digest'}:
+            result = {'version': self.catalog_config.save(scope, body['proposal'], body['proposal_digest'])}
+        else:
+            raise ServiceError('INVALID_CATALOG_CONFIG', 'Invalid configuration payload', 422)
+        return HTTPStatus.OK, result, False
 
     def _trace_id(self) -> str:
         return self.headers.get("X-Request-Id") or "tr_" + uuid.uuid4().hex
@@ -100,6 +122,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(error.status, error.as_dict(trace_id=trace_id))
 
     def do_POST(self) -> None:  # noqa: N802
+        catalog_match = CATALOG_PATH.fullmatch(self.path)
+        if catalog_match and catalog_match.group(2):
+            self._run(lambda: self._catalog_action(catalog_match, True))
+            return
         draft_match = DRAFT_PATH.fullmatch(self.path)
         feedback_match = FEEDBACK_PATH.fullmatch(self.path)
         suggestion_match = FEEDBACK_SUGGESTION_PATH.fullmatch(self.path)
@@ -201,6 +227,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         path = parsed.path
+        if path == '/catalog':
+            self._asset('text/html', CATALOG_HTML)
+            return
+        if path == '/catalog.js':
+            self._asset('text/javascript', CATALOG_JS)
+            return
+        catalog_match = CATALOG_PATH.fullmatch(path)
+        if catalog_match and catalog_match.group(2) is None:
+            self._run(lambda: self._catalog_action(catalog_match))
+            return
         if path == "/":
             self._asset("text/html", CHAT_HTML)
             return
@@ -313,7 +349,7 @@ class Handler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
 
-def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None) -> type[Handler]:
+def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None, catalog_config=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
@@ -321,6 +357,7 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.service = service
     BoundHandler.result_reader = result_reader
     BoundHandler.model_runtime = model_runtime or ModelRuntime()
+    BoundHandler.catalog_config = catalog_config
     return BoundHandler
 
 
@@ -330,11 +367,18 @@ def main() -> None:
     parser.add_argument("--demo-project", action="store_true", help="grant tenant-a/user-a access to demo/default")
     parser.add_argument("--ledger", help="local SQLite ledger path; omitted means in-memory storage")
     parser.add_argument('--model-config', help='trusted model profile JSON path; keys are environment references')
+    parser.add_argument('--catalog-source', help='trusted local existing-index inventory and explicit grants JSON')
+    parser.add_argument('--catalog-ledger', help='independent local SQLite configuration file')
     args = parser.parse_args()
+    if bool(args.catalog_source) != bool(args.catalog_ledger):
+        parser.error('--catalog-source and --catalog-ledger must be supplied together')
+    if args.catalog_ledger and args.ledger and Path(args.catalog_ledger).resolve() == Path(args.ledger).resolve():
+        parser.error('catalog ledger must be independent from task ledger')
     grants = [("tenant-a", "user-a", "demo", "default")] if args.demo_project else []
     repository = SQLiteTaskRepository(Path(args.ledger)) if args.ledger else InMemoryTaskRepository()
     runtime = load_model_runtime(args.model_config) if args.model_config else ModelRuntime()
-    handler = create_handler(TaskService(repository, LocalProjectAccess(grants)), model_runtime=runtime)
+    catalog = build_local_catalog(args.catalog_source, args.catalog_ledger, runtime) if args.catalog_source else None
+    handler = create_handler(TaskService(repository, LocalProjectAccess(grants)), model_runtime=runtime, catalog_config=catalog)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
