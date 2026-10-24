@@ -4,7 +4,7 @@
 
 ## 当前快照
 
-- 2026-10-24：READY_FOR_REVIEW（本地首次检索 1–5），独立 `codex/first-search-local`，任务卡 first-search-local.json，基线 f18caee。显式选库/整组确认/有界 HTTP tick/授权原始候选列表已接通；25 项定向、624 项完整工作包门禁、JavaScript 语法和 8084 双索引两批页面冒烟 PASS。缺映射候选失败关闭，原始命中不计为有效清洗数量。真实 Milvus/embedding/媒体缩略图/清洗有效数量仍 NOT_RUN；不得标为真实端到端完成。
+- 2026-10-24：ACCEPTED（本地首次检索 1–5），独立 `codex/first-search-local`，任务卡 first-search-local.json，基线 f18caee，实施提交 327ec3b 已合并主线。显式选库/整组确认/有界 HTTP tick/授权原始候选列表已接通；25 项定向、624 项完整工作包门禁、JavaScript 语法和 8084 双索引两批页面冒烟 PASS。缺映射候选失败关闭，原始命中不计为有效清洗数量。真实 Milvus/embedding/媒体缩略图/清洗有效数量仍 NOT_RUN；不得标为真实端到端完成。
 - 2026-10-24：READY_FOR_REVIEW（R06 只读进度 HTTP 切片），独立 `codex/r06-progress-api` 工作包，基线 e43355f3dee2fe7b31f060792dd40f7e79051b8a。已实现已批准整组的授权 SQLite 进度投影及本地 demo 显式装配；7 项定向测试、603 项完整工作包门禁 PASS。HTTP 派发和真实向量网关仍未接入，8081/8082 运行服务未重启。
 - 2026-10-24：READY_FOR_REVIEW（前端界面优化），A integration，任务卡 frontend-ui-optimization.json，实施基线 de1331562c2238178c7f47ab228241f0dc4dd1c8。当前 Chat 采用左历史 / 中对话 / 右侧新建与模型设置三栏；历史 Chat 可恢复续聊并本地重命名，API/密钥配置仅页面内存暂存，五节点以流水线展示已有结果或明确空态。最新 24 项 UI 定向、JavaScript 语法、差异格式及约 740px 浏览器验收 PASS；按用户要求未对本轮纯前端变化重复完整回归。此前同任务状态的 589 项完整回归与 integration 门禁证据仍保留，但不作为本轮新增交互的验证。真实模型/检索/自动清洗仍 NOT_RUN。
 - 2026-10-24：READY_FOR_REVIEW（R06 本地协调切片），A integration 整组已批准计划的有界预留/请求/回传/重试已实现；B/core 只读恢复接口已提交 afaa09e。真实 SQLite 的独立进程恢复、跨分支游标、重试和撤权测试 9 项 PASS；core 与最终 integration 角色门禁各 588 项 PASS。真实检索网关、自动执行策略和生产租约仍 TODO，不改 8081/8082 服务或用户账本。
