@@ -42,6 +42,18 @@ class ChatUiTest(unittest.TestCase):
         self.assertNotIn("http://", combined)
         self.assertNotIn("innerHTML", CHAT_JS)
 
+    def test_local_first_search_requires_separate_choice_confirmation_and_tick(self):
+        self.assertIn('id="first-search"', CHAT_HTML)
+        self.assertIn('id="first-search-candidates"', CHAT_HTML)
+        self.assertIn('本地首次检索（需确认）', CHAT_HTML)
+        self.assertIn('type=\'checkbox\'', CHAT_JS)
+        self.assertIn('生成检索确认卡', CHAT_JS)
+        self.assertIn('确认整组检索方案', CHAT_JS)
+        self.assertIn('执行下一批', CHAT_JS)
+        self.assertIn('非合格结果', CHAT_JS)
+        self.assertIn('未接授权媒体网关', CHAT_JS)
+        self.assertNotIn('innerHTML', CHAT_JS)
+
     def test_page_exposes_model_roles_and_accessible_structure(self):
         self.assertIn('id="main-content"', CHAT_HTML)
         self.assertIn('class="skip-link"', CHAT_HTML)

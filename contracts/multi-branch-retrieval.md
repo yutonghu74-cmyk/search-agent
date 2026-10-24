@@ -30,3 +30,9 @@ commit_page 必须验证预留 operation 归属、集合摘要/epoch、成员 pl
 `GET /v1/retrieval/tasks/{task_id}/retrieval-progress` 只从当前已批准整组账本读取。先认证任务发起人和项目，再由账本在同一读取事务中复验当前 task/revision/generation/plan 和所有成员库的现行搜索授权。无批准时返回 `status=unapproved`；已批准时返回摘要、epoch、任务版本及每成员 `plan_id/branch_id/library_id/binding_id/index_version/committed_pages/status/stop_reason`。状态仅为 `not_started/pending/more_available/stopped`；`pending` 表示已预留但未提交，不能区分正在请求与需要重试。`pagination_stopped` 只指已批准检索分页停止，不等于有效素材数达标或任务完成。响应不含向量、原始命中、游标、内部 operation ID 或媒体地址。
 
 未装配账本返回 503，非发起人 404，撤权 403，旧 generation/版本冲突 409；不允许查询参数。现有本地服务默认关闭，可用 `--plan-set-progress` 显式开启，必须同时指定独立 SQLite 任务账本、受信本地目录源与 `--demo-project`，并沿用单一 `demo/default` 项目授权。此入口仅供本地试验，不代替 W3、生产授权或真实索引连接。没有 POST 派发接口；HTTP 请求重放还缺持久请求级幂等及执行预算，不能把 GET 状态投影当成可安全自动执行的依据。
+
+## 本地首次检索显式入口
+
+仅 `--local-first-search-fixture` 启用时，`GET /v1/retrieval/tasks/{id}/first-search` 返回当前授权路由选择；`POST .../prepare` 接收路由摘要和明确的 `(branch_id,binding_id,batch_size)` 列表，后端重验后存待确认整组；`POST .../confirm` 要求摘要、期望任务版本、`action=confirm` 与幂等键；`POST .../tick` 有界执行当前已批准集合。确认与执行分离，不能由预览或准备自动触发。`GET .../candidates` 读取当前集合已提交的页链并重新授权映射，仅返回绑定、主键、分数、映射状态与可公开的素材标识，不返回向量、过滤模板、游标或私有媒体引用；展示上限 200 条，`accepted_count=null`。
+
+本地 fixture 的内容摘要绑定进服务端过滤模板引用；更换向量、映射或配置后旧计划返回 `INDEX_SNAPSHOT_EXPIRED`，不从第一页静默重查。SQLite `list_committed_pages` 在授权读取和当前集合版本校验下投影已提交页，仍不是正式候选发布或媒体访问凭证。此入口只用于本地单操作者手动 tick；没有生产租约、持久尝试/费用账本、真实缩略图或自动清洗，不能宣称真实 Milvus 联测。

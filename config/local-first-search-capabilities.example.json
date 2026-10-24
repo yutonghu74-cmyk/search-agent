@@ -1,0 +1,7 @@
+{
+  "schema": "text-query-capabilities@1",
+  "items": [
+    {"binding": {"binding_id": "dog-v1", "library_id": "dogs", "index_version": "local-dog-v1", "encoder_ref": "local-dog-encoder-v1", "vector_dimension": 2, "metric": "COSINE"}, "media_type": "image", "filter_template_ref": "demo-public", "max_batch_size": 2},
+    {"binding": {"binding_id": "cat-v1", "library_id": "cats", "index_version": "local-cat-v1", "encoder_ref": "local-cat-encoder-v1", "vector_dimension": 2, "metric": "L2"}, "media_type": "image", "filter_template_ref": "demo-public", "max_batch_size": 2}
+  ]
+}

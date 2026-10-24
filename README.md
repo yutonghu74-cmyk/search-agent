@@ -136,6 +136,25 @@ PYTHONPATH=src python3 -m dsh_retrieval.api --demo-project --ledger var/chat-dem
 
 该页面只监听 loopback，使用可伪造的本地身份和固定 demo 项目授权。反馈文本会进入新的完整需求快照，但尚未编译成真实清洗规则，也不会启动真实检索、DJ、补数或交付。不要将服务暴露到局域网或公网。
 
+### 本地首次检索体验（显式启用）
+
+此模式使用固定测试向量进行实际相似度排序，支持两索引选择、整组确认、手动逐批检索和授权后的原始候选列表；不是 Milvus、学习型 embedding、真实缩略图或清洗结果。先在当前终端设置私有且重启保持不变的 `DSH_LOCAL_CURSOR_SECRET`（至少 32 字节，勿写入仓库），然后在仓库根目录运行：
+
+```bash
+mkdir -p var/first-search-local/dsh
+DSH_HOME="$PWD/var/first-search-local/dsh" PYTHONPATH=src python3 -m dsh_retrieval.api \
+  --demo-project --port 8084 \
+  --ledger var/first-search-local/tasks.sqlite3 \
+  --catalog-source config/local-first-search-catalog.example.json \
+  --catalog-ledger var/first-search-local/catalog.sqlite3 \
+  --query-capabilities config/local-first-search-capabilities.example.json \
+  --local-first-search-fixture config/local-first-search.example.json
+```
+
+打开 `http://127.0.0.1:8084/`，用“找动物图片”提单并确认，再点击“本地首次检索（需确认）”：勾选狗、猫两个索引，生成并确认整组检索卡，最后显式执行下一批。列表展示来源绑定、向量主键、素材映射状态；同 ID 跨库保持隔离，缺失映射不计有效数。固定示例允许在没有模型配置时使用受信本地目录，且不会替用户保存索引配置或批准检索。重启时保留同一任务账本、目录夹具和游标密钥，才能安全续页；夹具变化会拒绝旧计划。
+
+本地身份头可伪造，服务只监听 loopback；不要接真实素材、内网凭据或生产账本。页面不提供图片内容，原始命中不是合格素材，`accepted_count` 仍未知。真实 Milvus/模型/授权媒体接入须单独验收。
+
 ## 目录
 
 - `src/dsh_retrieval/`：领域契约、状态机、应用服务和最小 HTTP 适配器。

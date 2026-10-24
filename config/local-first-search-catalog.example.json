@@ -1,0 +1,14 @@
+{
+  "schema": "local-catalog@1",
+  "libraries": [
+    {"library_id": "dogs", "description": "找动物图片；找狗图片", "media_type": "image", "bindings": [
+      {"binding_id": "dog-v1", "library_id": "dogs", "index_version": "local-dog-v1", "encoder_ref": "local-dog-encoder-v1", "vector_dimension": 2, "metric": "COSINE"}
+    ]},
+    {"library_id": "cats", "description": "找动物图片；找猫图片", "media_type": "image", "bindings": [
+      {"binding_id": "cat-v1", "library_id": "cats", "index_version": "local-cat-v1", "encoder_ref": "local-cat-encoder-v1", "vector_dimension": 2, "metric": "L2"}
+    ]}
+  ],
+  "grants": [
+    {"tenant_id": "tenant-a", "owner_id": "user-a", "project_id": "demo", "library_ids": ["dogs", "cats"], "can_configure": true}
+  ]
+}

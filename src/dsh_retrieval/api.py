@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 import argparse
@@ -27,6 +28,7 @@ from .text_catalog_config import CatalogConfigScope
 from .local_catalog import build_local_catalog
 from .routing_preview import LocalRoutingPreview
 from .retrieval_progress import build_local_demo_progress_repository, read_retrieval_progress
+from .first_search_local import LocalFirstSearch
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -46,6 +48,8 @@ MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
 CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
 ROUTING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-routing$")
 RETRIEVAL_PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/retrieval-progress$")
+FIRST_SEARCH_GET_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search(?:/(candidates))?$")
+FIRST_SEARCH_POST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search/(prepare|confirm|tick)$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -56,6 +60,7 @@ class Handler(BaseHTTPRequestHandler):
     catalog_config: Any = None
     routing_preview: Any = None
     plan_set_repository: Any = None
+    first_search: Any = None
 
     def _catalog_action(self, match, post=False):
         actor = self._actor()
@@ -128,6 +133,25 @@ class Handler(BaseHTTPRequestHandler):
             self._json(error.status, error.as_dict(trace_id=trace_id))
 
     def do_POST(self) -> None:  # noqa: N802
+        first_search_match = FIRST_SEARCH_POST_PATH.fullmatch(self.path)
+        if first_search_match:
+            def first_search_action():
+                actor = self._actor()
+                task_id, action = first_search_match.groups()
+                if self.first_search is None:
+                    raise ServiceError('LOCAL_SEARCH_NOT_CONFIGURED', 'Local first search is not enabled', 503)
+                body = self._body()
+                if action == 'prepare' and set(body) == {'routing_digest', 'choices'}:
+                    return HTTPStatus.OK, self.first_search.prepare(actor, task_id, **body), False
+                if action == 'confirm' and set(body) == {'proposal_digest', 'expected_task_version', 'action'}:
+                    result, replay = self.first_search.confirm(actor, task_id,
+                        key=self.headers.get('Idempotency-Key', ''), **body)
+                    return HTTPStatus.OK, result, replay
+                if action == 'tick' and set(body) == {'max_requests'}:
+                    return HTTPStatus.OK, self.first_search.tick(actor, task_id, **body), False
+                raise ServiceError('INVALID_SEARCH_REQUEST', 'Invalid local search action payload', 422)
+            self._run(first_search_action)
+            return
         catalog_match = CATALOG_PATH.fullmatch(self.path)
         if catalog_match and catalog_match.group(2):
             self._run(lambda: self._catalog_action(catalog_match, True))
@@ -233,6 +257,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         path = parsed.path
+        first_search_match = FIRST_SEARCH_GET_PATH.fullmatch(path)
+        if first_search_match:
+            def first_search_action():
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Local search view has no query parameters', 422)
+                if self.first_search is None:
+                    raise ServiceError('LOCAL_SEARCH_NOT_CONFIGURED', 'Local first search is not enabled', 503)
+                actor = self._actor()
+                task_id, view = first_search_match.groups()
+                result = (self.first_search.candidates(actor, task_id) if view == 'candidates'
+                          else self.first_search.preview(actor, task_id))
+                return HTTPStatus.OK, result, False
+            self._run(first_search_action)
+            return
         routing_match = ROUTING_PATH.fullmatch(path)
         if routing_match:
             def routing_action():
@@ -388,7 +426,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None, catalog_config=None,
-                   routing_preview=None, plan_set_repository=None) -> type[Handler]:
+                   routing_preview=None, plan_set_repository=None, first_search=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
@@ -399,6 +437,7 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.catalog_config = catalog_config
     BoundHandler.routing_preview = routing_preview
     BoundHandler.plan_set_repository = plan_set_repository
+    BoundHandler.first_search = first_search
     return BoundHandler
 
 
@@ -410,9 +449,11 @@ def main() -> None:
     parser.add_argument('--model-config', help='trusted model profile JSON path; keys are environment references')
     parser.add_argument('--catalog-source', help='trusted local existing-index inventory and explicit grants JSON')
     parser.add_argument('--catalog-ledger', help='independent local SQLite configuration file')
-    parser.add_argument('--query-capabilities', help='trusted exact text-to-image index capability JSON; preview only')
+    parser.add_argument('--query-capabilities', help='trusted exact text-to-image index capability JSON')
     parser.add_argument('--plan-set-progress', action='store_true',
                         help='enable read-only approved-plan progress for local demo tasks')
+    parser.add_argument('--local-first-search-fixture',
+                        help='opt-in trusted local exact-vector fixture; requires DSH_LOCAL_CURSOR_SECRET')
     args = parser.parse_args()
     if bool(args.catalog_source) != bool(args.catalog_ledger):
         parser.error('--catalog-source and --catalog-ledger must be supplied together')
@@ -422,6 +463,10 @@ def main() -> None:
         parser.error('catalog ledger must be independent from task ledger')
     if args.plan_set_progress and not (args.ledger and args.catalog_source and args.demo_project):
         parser.error('--plan-set-progress requires --ledger, --catalog-source and --demo-project')
+    if args.local_first_search_fixture and not (args.ledger and args.catalog_source
+            and args.catalog_ledger and args.query_capabilities and args.demo_project):
+        parser.error('--local-first-search-fixture requires --ledger, --catalog-source, '
+                     '--catalog-ledger, --query-capabilities and --demo-project')
     grants = [("tenant-a", "user-a", "demo", "default")] if args.demo_project else []
     repository = SQLiteTaskRepository(Path(args.ledger)) if args.ledger else InMemoryTaskRepository()
     runtime = load_model_runtime(args.model_config) if args.model_config else ModelRuntime()
@@ -430,8 +475,18 @@ def main() -> None:
     routing = LocalRoutingPreview(service, catalog, args.catalog_source, args.query_capabilities) if args.query_capabilities else None
     plan_sets = build_local_demo_progress_repository(Path(args.ledger), projects=service.projects,
         source_path=args.catalog_source) if args.plan_set_progress else None
+    first_search = None
+    if args.local_first_search_fixture:
+        secret = os.environ.get('DSH_LOCAL_CURSOR_SECRET', '').encode()
+        if len(secret) < 32:
+            parser.error('DSH_LOCAL_CURSOR_SECRET must contain at least 32 bytes')
+        first_search = LocalFirstSearch(service, catalog, ledger_path=Path(args.ledger),
+            source_path=args.catalog_source, capabilities_path=args.query_capabilities,
+            fixture_path=args.local_first_search_fixture, cursor_secret=secret)
+        plan_sets = first_search.repository
     handler = create_handler(service, model_runtime=runtime, catalog_config=catalog,
-                             routing_preview=routing, plan_set_repository=plan_sets)
+                             routing_preview=routing, plan_set_repository=plan_sets,
+                             first_search=first_search)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)

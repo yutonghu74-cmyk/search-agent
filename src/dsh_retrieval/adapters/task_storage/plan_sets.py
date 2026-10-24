@@ -239,6 +239,53 @@ class SQLitePlanSetApprovalRepository:
             return tuple(result)
         return self._transaction(False, read)
 
+    def list_committed_pages(self, actor, approved):
+        """Local read projection for candidate mapping, never a media grant.
+
+        Reuse the validated chain head and return only committed pages of the
+        current approved set. A concurrent change between reads fails closed.
+        """
+        heads = self.get_progress(actor, approved)
+
+        def read(memory, state):
+            task = self._authorize(memory, actor, approved.scope.task_id, approved)
+            if state['current'].get(task.task_id) != approved:
+                raise ServiceError('PLAN_NOT_CURRENT', 'Approved set changed', 409)
+            validate_plan_set(actor, task, approved)
+            result = []
+            for member, head in zip(approved.members, heads):
+                plan_id = member.plan.request.plan_id
+                if head.plan_id != plan_id:
+                    raise ServiceError('STORAGE_CORRUPT', 'Member order changed', 500)
+                chain = {}
+                for saved, saved_plan_id, request, page in state['operations'].values():
+                    if saved == approved and saved_plan_id == plan_id:
+                        if request.cursor in chain:
+                            raise ServiceError('STORAGE_CORRUPT', 'Duplicate page cursor', 500)
+                        chain[request.cursor] = (request, page)
+                cursor, seen = None, set()
+                committed = 0
+                while cursor in chain:
+                    if cursor in seen or len(seen) >= 100:
+                        raise ServiceError('STORAGE_CORRUPT', 'Invalid page chain', 500)
+                    seen.add(cursor)
+                    request, page = chain[cursor]
+                    if page is None:
+                        break
+                    committed += 1
+                    result.append((plan_id, page))
+                    if len(result) > 100:
+                        raise ServiceError('INPUT_LIMIT', 'Too many committed pages', 422)
+                    if page.next_cursor is None:
+                        break
+                    cursor = page.next_cursor
+                if committed != head.committed_pages:
+                    raise ServiceError('REVISION_CONFLICT', 'Page progress changed; reload', 409)
+            self._authorize(memory, actor, task.task_id, approved)
+            return tuple(result)
+
+        return self._transaction(False, read)
+
     def reserve_page(self, actor, approved, *, plan_id, request, key):
         require_key(key)
         fingerprint = digest({'set': approved.proposal_digest, 'member': plan_id, 'request': asdict(request)})
