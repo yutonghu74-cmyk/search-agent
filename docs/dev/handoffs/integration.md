@@ -1,5 +1,14 @@
 # A 总控集成交接
 
+## R02 文本配置后端（2026-10-24，ACCEPTED 后端切片）
+
+- A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 text-catalog-config.json；发布基线 a35d420fae4eb94afd8609f94cba39c45f5f44dc，源基线 40f855ceb104abb60508b66147a2fa7e7f847e87。
+- 用户选择文本描述生成并保存已有库/索引配置。新增独立配置服务，不修改 C 的 CatalogRepository 适配器或 B 任务账本；技术绑定只来自受信目录。契约新增文本预览、摘要确认、按租户/用户/项目隔离的配置版本及配置读取；不改变既有 Library/IndexBinding。
+- 验收：授权过滤、模型输出严格校验、未知索引/目录漂移拒绝、确认幂等/版本冲突/重启恢复；测试 NOT_RUN。后续 C 可按契约装配配置读取，当前不宣称生产目录或页面已接通。
+- 实现里程碑：文本候选生成、受信绑定校验及 SQLite 原子确认已实现；首轮 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_text_catalog_config tests.test_model_runtime tests.test_query_routing -q` 34 项 PASS，`git diff --check` PASS。补充事务内复验和不同提案并发覆盖后再次定向验证；角色门禁待执行。
+- 交付：补充后 `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_text_catalog_config -q` 15 项 PASS；`python3 tools/collab_gate.py check --role integration --base a35d420fae4eb94afd8609f94cba39c45f5f44dc --task docs/dev/tasks/text-catalog-config.json` SCOPE PASS、517 项 PASS、最终 LOCAL GATE PASS，退出码 0。中间 FAIL 为既有门禁负例；门禁外未重复全量回归。持久化测试为关闭连接、重建服务后读回及多连接并发，不是生产故障恢复演练。
+- A 审查：仅修改任务卡文件，复用公共 Library/IndexBinding；模型不提供技术执行参数、配置不触发业务任务或检索。真实模型、ClickHouse/Milvus、真实授权服务 NOT_RUN；页面/API/生产目录适配器未装配，8080/8081 未改动。后续先接受信索引清单和配置管理入口，再接 QueryRoutingService；不能宣称 R02 全项或用户端体验已完成。
+
 ## 后续清单与 R01 查询路由（2026-10-24，ACCEPTED 后端切片）
 
 - A integration / codex/integration；worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 query-routing.json；基线 dd2fd37ec872a4b01109706f45f2c1159af8905a，源基线 0f133b0d8933dfb562afaf0c27a792bef507b2a5。
