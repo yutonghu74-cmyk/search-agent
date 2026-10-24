@@ -85,10 +85,19 @@ class ChatUiTest(unittest.TestCase):
 
     def test_chat_analyzes_each_submitted_utterance_before_draft_write(self):
         self.assertIn('/v1/retrieval/projects/demo/intent-preview', CHAT_JS)
-        self.assertIn('LLM 诉求分析 · 待审阅', CHAT_JS)
-        self.assertIn('await analyzeChatText(text);const expansion=', CHAT_JS)
+        self.assertIn('DSH 助手 · 正在分析', CHAT_JS)
+        self.assertIn('await analyzeChatText(text,{suggestCount:true});count=Number', CHAT_JS)
         self.assertIn("await analyzeChatText(text);state.feedback=", CHAT_JS)
-        self.assertIn('分析只供审阅，不自动改写原文', CHAT_JS)
+        self.assertIn('模型的理解建议，不代表条件已具备自动执行能力', CHAT_JS)
+        self.assertIn('查看逐条引文与能力边界', CHAT_JS)
+        self.assertIn('原文数量 ', CHAT_JS)
+        self.assertIn('state.targetCountTouched', CHAT_JS)
+        self.assertIn("llms.length===1)$('llm-model').value", CHAT_JS)
+        self.assertIn("vlms.length===1)$('vlm-model').value", CHAT_JS)
+        self.assertIn('DSH 助手 · 分析未完成', CHAT_JS)
+        self.assertIn("$('chat-model-badge').textContent", CHAT_JS)
+        self.assertIn("querySelectorAll('button,#llm-model,#vlm-model,#target-count')", CHAT_JS)
+        self.assertIn('密钥不写入浏览器存储', CHAT_HTML)
         self.assertNotIn('innerHTML', CHAT_JS)
 
 
