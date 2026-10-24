@@ -80,6 +80,9 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.assertIsNone(candidates['accepted_count'])
         self.assertEqual({(item['binding_id'], item['vector_id']) for item in candidates['items']},
                          {('dog-v1', 1), ('dog-v1', 2), ('cat-v1', 1), ('cat-v1', 2)})
+        self.assertTrue(all(item['query_text'] == '找动物图片' and item['query_role'] == 'original'
+                            and item['source_term'] == '找动物图片' and item['branch_id'].startswith('branch_')
+                            and item['plan_id'] for item in candidates['items']))
         self.assertNotEqual(next(item for item in candidates['items'] if item['binding_id'] == 'dog-v1')['media_unit_id'],
                             next(item for item in candidates['items'] if item['binding_id'] == 'cat-v1')['media_unit_id'])
         self.assertTrue(all('authorized_media_ref' not in item for item in candidates['items']))

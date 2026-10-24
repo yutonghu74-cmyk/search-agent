@@ -5,7 +5,9 @@ from dsh_retrieval.chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
 
 class ChatUiTest(unittest.TestCase):
     def test_page_has_explicit_confirmation_and_local_limit_copy(self):
-        self.assertIn("生成确认卡", CHAT_HTML)
+        self.assertIn('class="chat-composer panel"', CHAT_HTML)
+        self.assertIn('aria-label="发送消息"', CHAT_HTML)
+        self.assertIn("确认需求与扩词", CHAT_JS)
         self.assertIn("不会启动真实检索", CHAT_HTML)
         self.assertIn("确认提单", CHAT_JS)
         self.assertIn("确认新版本", CHAT_JS)
@@ -30,10 +32,10 @@ class ChatUiTest(unittest.TestCase):
         self.assertIn("权威结果统计", CHAT_JS)
         self.assertIn("preview_status==='unavailable'", CHAT_JS)
         self.assertIn("loadMoreResults", CHAT_JS)
-        self.assertIn("主标签 ·", CHAT_JS)
+        self.assertIn("检索词：", CHAT_JS)
         self.assertIn("辅助检索词", CHAT_JS)
-        self.assertIn("独立打包", CHAT_JS)
-        self.assertIn("同一素材聚合总数只计一次", CHAT_JS)
+        self.assertIn("原始需求也会保留为独立检索分支", CHAT_JS)
+        self.assertIn("原始命中不是合格图片", CHAT_JS)
         self.assertNotIn("完成百分比", CHAT_JS)
 
     def test_assets_do_not_embed_remote_dependencies_or_dynamic_html(self):
@@ -86,9 +88,17 @@ class ChatUiTest(unittest.TestCase):
     def test_chat_analyzes_each_submitted_utterance_before_draft_write(self):
         self.assertIn('/v1/retrieval/projects/demo/intent-preview', CHAT_JS)
         self.assertIn('DSH 助手 · 正在分析', CHAT_JS)
-        self.assertIn('await analyzeChatText(text,{suggestCount:true});count=Number', CHAT_JS)
+        self.assertIn('const analysis=await analyzeChatText(raw)', CHAT_JS)
+        self.assertIn('还差一个信息', CHAT_JS)
+        self.assertIn('async function guidedStartSearch', CHAT_JS)
+        self.assertIn('async function guidedTick', CHAT_JS)
+        self.assertIn('检索词：', CHAT_JS)
+        self.assertIn('每个检索词至少选择一个索引', CHAT_JS)
+        self.assertIn('缺少可用的授权索引或查询编码', CHAT_JS)
+        self.assertIn("item.query_text", CHAT_JS)
+        self.assertIn("event.key==='Enter'&&!event.shiftKey&&!event.isComposing", CHAT_JS)
         self.assertIn("await analyzeChatText(text);state.feedback=", CHAT_JS)
-        self.assertIn('模型的理解建议，不代表条件已具备自动执行能力', CHAT_JS)
+        self.assertIn('模型的理解建议，不代表已执行', CHAT_JS)
         self.assertIn('查看逐条引文与能力边界', CHAT_JS)
         self.assertIn('原文数量 ', CHAT_JS)
         self.assertIn('state.targetCountTouched', CHAT_JS)

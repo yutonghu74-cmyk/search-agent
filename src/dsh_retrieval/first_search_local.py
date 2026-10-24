@@ -240,21 +240,37 @@ class LocalFirstSearch:
         if approved is None:
             raise ServiceError('PLAN_NOT_APPROVED', 'Explicit whole-set approval required', 409)
         pages = self.repository.list_committed_pages(actor, approved)
-        hits = tuple(hit for _, page in pages for hit in page.hits)
+        from .query_branches import compile_query_branches
+        task = self.service.repository.get(actor, task_id)
+        logical = compile_query_branches(json.loads(task.confirmed_proposal_json)['query_spec'])
+        branches = {branch['branch_id']: branch for branch in logical['branches']}
+        members = {member.plan.request.plan_id: member for member in approved.members}
+        sourced_hits = tuple((plan_id, hit) for plan_id, page in pages for hit in page.hits)
+        if any(plan_id not in members or members[plan_id].branch_id not in branches
+               for plan_id, _ in sourced_hits):
+            raise ServiceError('STORAGE_CORRUPT', 'Candidate source branch missing', 500)
+        hits = tuple(hit for _, hit in sourced_hits)
         adapter = self._adapter_for_plan(actor, task_id, approved)
         context = AccessContext(actor, task_id, 'retrieval', 'current')
         resolutions = adapter.resolve_hits(context, hits[:200])
+        if len(resolutions) != min(len(hits), 200):
+            raise ServiceError('STORAGE_CORRUPT', 'Candidate resolution count changed', 500)
         if self.repository.get_current(actor, task_id) != approved:
             raise ServiceError('PLAN_NOT_CURRENT', 'Approved set changed during candidate read', 409)
         return {'schema_version': 'local-first-search-candidates@1', 'task_id': task_id,
                 'mode': 'LOCAL_EXACT', 'raw_hit_count': len(hits), 'returned': len(resolutions),
                 'truncated': len(hits) > 200, 'accepted_count': None,
-                'items': [{'library_id': result.hit.binding.library_id,
+                'items': [{'plan_id': plan_id,
+                           'branch_id': members[plan_id].branch_id,
+                           'query_text': branches[members[plan_id].branch_id]['query_text'],
+                           'query_role': branches[members[plan_id].branch_id]['query_role'],
+                           'source_term': branches[members[plan_id].branch_id]['source_term'],
+                           'library_id': result.hit.binding.library_id,
                            'binding_id': result.hit.binding.binding_id,
                            'index_version': result.hit.binding.index_version,
                            'vector_id': result.hit.vector_id, 'score': result.hit.score,
                            'metric': result.hit.binding.metric, 'status': result.status,
                            'media_unit_id': result.media.media_unit_id if result.media else None,
                            'asset_version': result.media.asset_version if result.media else None,
-                           'preview_status': 'unavailable'} for result in resolutions],
+                           'preview_status': 'unavailable'} for (plan_id, _), result in zip(sourced_hits, resolutions)],
                 'note': '仅授权后的原始候选；没有缩略图或清洗判定，不能作为有效素材数量。'}
