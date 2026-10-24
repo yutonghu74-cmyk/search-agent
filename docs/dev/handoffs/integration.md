@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 后续清单与 R01 查询路由（2026-10-24，ACCEPTED 后端切片）
+
+- A integration / codex/integration；worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 query-routing.json；基线 dd2fd37ec872a4b01109706f45f2c1159af8905a，源基线 0f133b0d8933dfb562afaf0c27a792bef507b2a5。
+- 新增 R01–R29 顺序清单，注明既有基础、实现缺口、角色、依赖和验收。R01 复用单分支物理准备和整组计划契约；范围限 A 文件，不改其他角色存储/连接器。
+- 新增 QueryRoutingService.discover/prepare，候选路由摘要覆盖完整索引/能力/版本，预检全部选择后编码，最后复查所有库权限及目录；复用 RetrievalPlanSet，不写任务账本、不授予批准。测试验证狗/猫不同编码器/维度、同分支多库、越权隐藏、授权故障、前后目录/任务漂移、重复/非法输入。
+- `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_query_routing tests.test_physical_query_preparation tests.test_multi_branch_contracts -q`：24 项 PASS。`python3 tools/collab_gate.py check --role integration --base dd2fd37ec872a4b01109706f45f2c1159af8905a --task docs/dev/tasks/query-routing.json`：范围及 502 项 PASS，最终 LOCAL GATE PASS、退出码 0；中间 LOCAL GATE FAIL 为既有负例。门禁外未跑全量回归。
+- 真实库/元数据/素材/embedding 环境待提供，真实联测 NOT_RUN；下一项 R02。页面/API/真实检索未装配，8080/8081 服务未重启。目录端口无 catalog_version，当前使用可见候选/能力摘要核验；不宣称目录事务快照或完整 v1.9 路由质量达标。
+
 ## 反馈清洗建议预览（2026-10-24，ACCEPTED）
 
 - A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `feedback-cleaning-suggestion.json`；发布基线 `32ce770be55c7c07279319aeabd860b14231e262`，源基线 `81cd04692466e9849647db49bd852a62a9e50dd1`。

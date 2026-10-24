@@ -4,6 +4,7 @@
 
 ## 当前快照
 
+- 2026-10-24：ACCEPTED（R01 后端切片），后续总清单见 `remaining-roadmap.md`（R01–R29）。A integration / codex/integration，任务卡 query-routing.json，基线 dd2fd37ec872a4b01109706f45f2c1159af8905a；授权索引发现和整组路由准备已实现，24 项定向/502 项角色门禁 PASS。不同库按各自编码器准备计划；无权限、陈旧/混合版本和重复路由失败关闭。真实目录、向量库与编码器资料待提供；下一项 R02，当前无新页面入口或真实向量搜索。
 - 2026-10-24：ACCEPTED（反馈清洗建议预览），任务卡 feedback-cleaning-suggestion.json，A integration / codex/integration，发布基线 32ce770be55c7c07279319aeabd860b14231e262。已实现当前反馈草稿的 LLM→候选 VLM 指令建议、调用前后版本复验与 Chat 独立建议卡；含并发确认在内的 16 项定向测试、JS 语法及 491 项角色门禁 PASS。建议不属于反馈确认摘要，不创建清洗管线；8081 旧进程未在本切片重启。
 - 2026-10-24：ACCEPTED（已批准 VLM 检测器切片），任务卡 vlm-approved-detector.json，发布基线 7004ee9b0721ec7a355afd16a511311ad3d81e8f，A integration 独立 worktree。已实现任务需求/模型配置发布绑定、VLM 三态判定映射和失败关闭；模拟批准工作器三态链路测试 29 项定向 PASS，489 项角色门禁 PASS。此切片不自动批准 Chat 草稿，不代表真实检索/清洗端到端。
 - 2026-10-23：ACCEPTED（模型稳定性切片），model-live-reliability.json / da5ee05ad8166dbb77d798591a5519a692ede618。百度图片真实测试 40 张（狗/猫各 20，JPEG 内容去重后 38 张）；gpt-4o-mini VLM 初轮狗图 12 pass/1 fail/1 unknown/6 error，猫图 0 pass/12 fail/0 unknown/8 error。抽查发现上游 429 限流，已加入最多 2 次有界重试；8 项定向测试、482 项角色门禁 PASS，6 张此前失败图片复测均得到判定，其中 1 张用到第二次请求。结果不是权威清洗计数；Chat 真实 LLM 生成两组待确认卡，未代用户确认。当前真实检索和清洗 worker 仍未接通。
