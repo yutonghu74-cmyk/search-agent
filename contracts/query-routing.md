@@ -21,3 +21,11 @@
 目录可选暴露 `configuration_digest(context)`。路由预览增加 `catalog_config_digest`，摘要 schema 升为 query-routing@2，绑定配置版本和已确认摘要；发现前后、准备前后均复验。即使索引集合不变，重存配置也使旧预览失效。旧内存预览须重新发现；未实现此可选方法的原有目录继续支持，但没有配置版本栅栏。没有新增批准/执行权或跨系统事务保证。
 
 本包仅后端组合与模拟端到端测试；本地配置页面尚未调用该路由、真实 embedding/向量搜索仍待接入，不自动更新现有服务进程。
+
+## 只读路由入口（后续切片）
+
+GET `/v1/retrieval/tasks/{task_id}/query-routing`：仅任务发起人及有项目权限者可读；返回 `QueryRoutingPreview.to_view()`、`execution_enabled:false` 和执行边界说明。可重复指定 `branch_id` 选择最多 64 个分支，须含原始查询；不传则预览所有分支（超过上限明确拒绝）。其他查询参数拒绝，不接受客户端索引能力或权限版本。未装配返回 ROUTING_NOT_CONFIGURED，不启动任何任务。Chat 确认提单后提供“查看选库结果（未执行）”，按分支展示索引/版本/编码器/维度/批次上限，无匹配显式说明。
+
+本地启动在 catalog-source/catalog-ledger 外显式传 `--query-capabilities <受信文件>`。文件结构：`{"schema":"text-query-capabilities@1","items":[{"binding":完整IndexBinding,"media_type":"image","filter_template_ref":"受信模板ID","max_batch_size":20}]}`。每个绑定 ID 唯一，完整绑定包括 library_id/index_version/encoder_ref/vector_dimension/metric；不根据已有库维度自动生成查询能力。最多 256 个注册项，空 items 表示无能力而不是全库可用。文件不包含模型密钥/物理地址，连接和编码器仍另行接入。
+
+`LocalRoutingPreview` 每次请求重新加载能力和本地目录/授权；发现前后检测变化，配置摘要仍由 ConfiguredCatalog 校验。权限适配仅为本地模拟环境，不能替代 W3。未注册/不匹配能力不进入选项；返回 available 仅证明配置匹配，不证明模型端点或向量库健康。内部禁用编码器，即使意外调用也报 QUERY_EXECUTION_DISABLED；没有准备/批准/执行 POST 入口。

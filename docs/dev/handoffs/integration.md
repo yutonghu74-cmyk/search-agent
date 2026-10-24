@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 选库预览 API/UI（2026-10-24，ACCEPTED 本地切片）
+
+- A integration / codex/integration，独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 routing-preview-ui.json，基线 c5a1e17dcc17a914f33998aaaf312b829496ef13，源基线 47c47d043fa2b0390f59900fa9858064a8c34ed2。
+- 本包新增只读 GET 查询分支选库预览、Chat 按钮、显式已有索引能力配置；任务与目录授权先行，未配置不模拟成功。不调用模型编码/搜索，不批准任务。测试 NOT_RUN。
+- 实现里程碑：API/UI、受信能力文件加载和目录/授权/能力前后复验完成。`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_routing_preview tests.test_configured_catalog tests.test_query_routing tests.test_api tests.test_chat_ui -q` 36 项 PASS；包含新增 9 项 HTTP/加载/漂移/JS 语法与交互测试。`git diff --check` PASS，角色门禁 RUNNING。
+- 交付：`python3 tools/collab_gate.py check --role integration --base c5a1e17dcc17a914f33998aaaf312b829496ef13 --task docs/dev/tasks/routing-preview-ui.json` SCOPE PASS、543 项 PASS、最终 LOCAL GATE PASS，退出码 0；中间 FAIL 为既有负例，门禁外未重复完整回归。A 审查权限/精确绑定/只读边界后接受。
+- 本地界面发布：核实原 8082 PID 78928 为无模型密钥的本地服务，以 SIGINT 正常退出；按相同账本和独立 DSH_HOME 重启新版，HTTP 首页包含新按钮，/catalog HTTP 200。8081 未改动，无新业务任务写入。真实目录、编码器、向量搜索联测及浏览器视觉验收 NOT_RUN；8082 未配置真实清单和查询能力，按钮目前明确返回未配置。下一步需真实资料与编码器接入，不能把模拟 HTTP 测试视为真实检索。
+
 ## 配置到查询路由（2026-10-24，ACCEPTED 后端切片）
 
 - A integration / codex/integration，独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 configured-routing.json，基线 449b64cc88892321ab35c3558ca0699daa1f40d4，源基线 ccaa62a4981a250691347f39a56573c15c82b88b。

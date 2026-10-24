@@ -25,6 +25,7 @@ from .query_spec import digest
 from .catalog_ui import CATALOG_HTML, CATALOG_JS
 from .text_catalog_config import CatalogConfigScope
 from .local_catalog import build_local_catalog
+from .routing_preview import LocalRoutingPreview
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -42,6 +43,7 @@ EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
 QUERY_BRANCHES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-branches$")
 MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
 CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
+ROUTING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-routing$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -50,6 +52,7 @@ class Handler(BaseHTTPRequestHandler):
     result_reader: Any = None
     model_runtime: Any = None
     catalog_config: Any = None
+    routing_preview: Any = None
 
     def _catalog_action(self, match, post=False):
         actor = self._actor()
@@ -227,6 +230,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         path = parsed.path
+        routing_match = ROUTING_PATH.fullmatch(path)
+        if routing_match:
+            def routing_action():
+                actor = self._actor()
+                self.service.get_task(actor, routing_match.group(1))
+                if self.routing_preview is None:
+                    raise ServiceError('ROUTING_NOT_CONFIGURED', '选库预览尚未配置目录及查询能力', 503)
+                try:
+                    params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+                    if set(params) - {'branch_id'}:
+                        raise ValueError()
+                    branches = tuple(params['branch_id']) if 'branch_id' in params else None
+                except ValueError:
+                    raise ServiceError('INVALID_ROUTE_SELECTION', 'Only branch_id query parameters supported', 422) from None
+                return HTTPStatus.OK, self.routing_preview.preview(actor, routing_match.group(1), branches), False
+            self._run(routing_action)
+            return
         if path == '/catalog':
             self._asset('text/html', CATALOG_HTML)
             return
@@ -349,7 +369,8 @@ class Handler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
 
-def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None, catalog_config=None) -> type[Handler]:
+def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None, catalog_config=None,
+                   routing_preview=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
@@ -358,6 +379,7 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.result_reader = result_reader
     BoundHandler.model_runtime = model_runtime or ModelRuntime()
     BoundHandler.catalog_config = catalog_config
+    BoundHandler.routing_preview = routing_preview
     return BoundHandler
 
 
@@ -369,16 +391,21 @@ def main() -> None:
     parser.add_argument('--model-config', help='trusted model profile JSON path; keys are environment references')
     parser.add_argument('--catalog-source', help='trusted local existing-index inventory and explicit grants JSON')
     parser.add_argument('--catalog-ledger', help='independent local SQLite configuration file')
+    parser.add_argument('--query-capabilities', help='trusted exact text-to-image index capability JSON; preview only')
     args = parser.parse_args()
     if bool(args.catalog_source) != bool(args.catalog_ledger):
         parser.error('--catalog-source and --catalog-ledger must be supplied together')
+    if args.query_capabilities and not args.catalog_source:
+        parser.error('--query-capabilities requires --catalog-source and --catalog-ledger')
     if args.catalog_ledger and args.ledger and Path(args.catalog_ledger).resolve() == Path(args.ledger).resolve():
         parser.error('catalog ledger must be independent from task ledger')
     grants = [("tenant-a", "user-a", "demo", "default")] if args.demo_project else []
     repository = SQLiteTaskRepository(Path(args.ledger)) if args.ledger else InMemoryTaskRepository()
     runtime = load_model_runtime(args.model_config) if args.model_config else ModelRuntime()
     catalog = build_local_catalog(args.catalog_source, args.catalog_ledger, runtime) if args.catalog_source else None
-    handler = create_handler(TaskService(repository, LocalProjectAccess(grants)), model_runtime=runtime, catalog_config=catalog)
+    service = TaskService(repository, LocalProjectAccess(grants))
+    routing = LocalRoutingPreview(service, catalog, args.catalog_source, args.query_capabilities) if args.query_capabilities else None
+    handler = create_handler(service, model_runtime=runtime, catalog_config=catalog, routing_preview=routing)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
