@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 配置到查询路由（2026-10-24，ACCEPTED 后端切片）
+
+- A integration / codex/integration，独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 configured-routing.json，基线 449b64cc88892321ab35c3558ca0699daa1f40d4，源基线 ccaa62a4981a250691347f39a56573c15c82b88b。
+- 接口变更：为路由预览增加可选配置摘要，升级摘要 schema；旧内存预览须重新发现。新增 A 组合层复用配置服务、CatalogRepository 形状和 PhysicalQueryPreparer，不修改 C 连接器；不改业务批准账本。验收双库不同编码器、配置版本变化和授权失败；测试 NOT_RUN。
+- 实现里程碑：授权后字面匹配、配置摘要栅栏及受信装配函数完成。`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_configured_catalog tests.test_query_routing tests.test_physical_query_preparation -q` 28 项 PASS（新增配置接线 10 项）；真实库与编码器未调用，角色门禁待执行。
+- 交付：`python3 tools/collab_gate.py check --role integration --base 449b64cc88892321ab35c3558ca0699daa1f40d4 --task docs/dev/tasks/configured-routing.json` SCOPE PASS、534 项 PASS、最终 LOCAL GATE PASS，退出码 0；中间 FAIL 来自既有负例。`git diff --check` PASS。门禁外未重复全量回归。A 审查仅修改允许范围、原有目录兼容、配置/权限变化失败关闭后接受。
+- 未验证：真实 LLM/embedding/Milvus/ClickHouse/W3、生产召回质量和浏览器新路由入口均 NOT_RUN；当前匹配是有限字面召回，不是语义理解。已启动 8082 仍保留原配置页面，未重启 8081/8082，未改用户账本或自动批准任务。后续提供受信编码器/能力配置并接路由 API/UI。
+
 ## 索引配置入口（2026-10-24，ACCEPTED 本地切片）
 
 - A integration / codex/integration，独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 catalog-config-ui.json，基线 ef6d8f7d80f52bf3eb3749c17a164fb4e88a5670，源基线 e3d500e35762a592ad7fea5e6d15e924a11919d7。

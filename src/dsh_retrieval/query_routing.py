@@ -28,16 +28,18 @@ class QueryRoutingPreview:
     logical_preview_digest: str
     authorization_version: str
     routes: tuple[QueryRoute, ...]
+    catalog_config_digest: str | None = None
 
     @property
     def routing_digest(self):
-        return digest({'schema_version': 'query-routing@1', **asdict(self)})
+        return digest({'schema_version': 'query-routing@2', **asdict(self)})
 
     def to_view(self):
         return {
             'task_id': self.scope.task_id, 'revision': self.scope.revision,
             'task_version': self.scope.task_version, 'generation': self.scope.generation,
             'routing_digest': self.routing_digest, 'status': 'unapproved',
+            'catalog_config_digest': self.catalog_config_digest,
             'routes': [{'branch_id': route.branch_id, 'query_text': route.query_text,
                 'options': [{**asdict(option.binding), 'max_batch_size': option.max_batch_size}
                             for option in route.options],
@@ -71,6 +73,15 @@ class QueryRoutingService:
         for action in ('discover', 'search'):
             self.preparer.authorization.require_access(context, 'library:' + library_id, action)
 
+    def _configuration_digest(self, context):
+        reader = getattr(self.preparer.catalog, 'configuration_digest', None)
+        if reader is None:
+            return None
+        value = reader(context)
+        if not isinstance(value, str) or not value.startswith('sha256:') or len(value) != 71:
+            raise ServiceError('CATALOG_INVALID', 'Invalid catalog configuration digest', 502)
+        return value
+
     def discover(self, actor, task_id, *, expected_scope, authorization_version,
                  branch_ids=None):
         task = self._task(actor, task_id, expected_scope)
@@ -94,6 +105,7 @@ class QueryRoutingService:
         if original not in branch_ids:
             raise ServiceError('ORIGINAL_QUERY_REQUIRED', 'Original query branch must be retained', 422)
         context = AccessContext(actor, task_id, 'search', authorization_version)
+        config_digest = self._configuration_digest(context)
         routes, bindings = [], {}
         for branch_id in branch_ids:
             branch = all_branches[branch_id]
@@ -138,7 +150,10 @@ class QueryRoutingService:
         self._task(actor, task_id, expected_scope)
         for library_id in sorted({option.binding.library_id for route in routes for option in route.options}):
             self._authorize(context, library_id)
-        return QueryRoutingPreview(expected_scope, logical['preview_digest'], authorization_version, tuple(routes))
+        if self._configuration_digest(context) != config_digest:
+            raise ServiceError('CATALOG_CHANGED', 'Configuration changed during discovery', 409)
+        return QueryRoutingPreview(expected_scope, logical['preview_digest'], authorization_version,
+                                   tuple(routes), config_digest)
 
     def prepare(self, actor, task_id, *, preview, choices, epoch):
         if (type(preview) is not QueryRoutingPreview or type(choices) is not tuple
