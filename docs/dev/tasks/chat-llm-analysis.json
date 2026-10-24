@@ -1,0 +1,23 @@
+{
+  "role": "integration",
+  "branch": "codex/chat-llm-analysis",
+  "source_base": "5335d785a4fa86c98d3a1366e1875914e10496d6",
+  "files": [
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/chat_ui.py",
+    "src/dsh_retrieval/model_runtime.py",
+    "tests/test_chat_intent.py",
+    "tests/test_chat_ui.py",
+    "config/chat-models.example.json",
+    "README.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/chat-llm-analysis.md"
+  ],
+  "acceptance": "按 v1.9 5.1、5.2、12.10.1，为本地 Chat 的新诉求和反馈提供经授权、明确选定 LLM 的逐条意图分析预览；服务端校验模型输出引文和歧义，不让分析结果自动写入正式 QuerySpec 或批准执行；无模型时明确保持模板模式。模型配置只引用环境变量，不在页面/仓库存储密钥。HTTP/UI、越权、错误失败关闭及模型输出校验定向测试；真实模型在得到模型 ID 和私有环境密钥后另行联测，不把模拟调用称真实联测。",
+  "handoff": "docs/dev/handoffs/chat-llm-analysis.md",
+  "tests": {
+    "mode": "full",
+    "targets": [],
+    "reason": "新增面向用户的模型调用和权限边界、模型输出校验及确认流程，属于高风险后端/UI 组合；交付运行一次完整工作包门禁。"
+  }
+}
