@@ -1,5 +1,13 @@
 # A 总控集成交接
 
+## 物理索引注册表（2026-10-24，ACCEPTED 公共配置切片）
+
+- A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 physical-index-registry.json，发布基线 949226583fae5e24dc29c54786f3932ade39d25a，源基线 4c3f2128e26587b53d30f62a7eaa10dcbff38187。中断恢复时工作区干净，未重复发布任务卡。
+- 新增公共配置模型及解析，不改变已有 IndexBinding；为 C 后续真实连接器提供完整物理绑定、模型/预处理身份和命中定位键。A 不修改 C 驱动，不安装依赖。验收配置冲突/目标漂移/跨库主键隔离和缓存范围；测试 NOT_RUN，真实连接仍待资料。
+- 实现里程碑：注册表/严格 JSON/完整绑定解析、物理配置摘要、类型化主键定位键、授权范围查询缓存键完成；更新路线图 R02/R03/R07 的已实现与未验证边界。`PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_physical_index_registry tests.test_physical_query_preparation -q` 19 项 PASS（新增 12 项）；角色门禁待执行。没有读写缓存、调用数据库或探测模型。
+- 交付：`python3 tools/collab_gate.py check --role integration --base 949226583fae5e24dc29c54786f3932ade39d25a --task docs/dev/tasks/physical-index-registry.json` SCOPE PASS、555 项 PASS、最终 LOCAL GATE PASS，退出码 0（中间 FAIL 为既有负例）。`git diff --check` PASS，门禁外未重复全量回归。A 审查公共模型复用、完整摘要与保守失效边界后接受。
+- 未验证：真实 embedding、Milvus/其他向量库、版本化元数据映射和撤权服务仍 NOT_RUN；此注册表不是连接健康探测或授权证据，未接现有 HTTP/启动/执行。现有 8081/8082 服务及用户账本未改，真实连接器需在 C 范围消费契约并有实际环境资料。
+
 ## 选库预览 API/UI（2026-10-24，ACCEPTED 本地切片）
 
 - A integration / codex/integration，独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 routing-preview-ui.json，基线 c5a1e17dcc17a914f33998aaaf312b829496ef13，源基线 47c47d043fa2b0390f59900fa9858064a8c34ed2。
