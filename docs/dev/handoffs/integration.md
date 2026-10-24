@@ -1,5 +1,12 @@
 # A 总控集成交接
 
+## 反馈清洗建议预览（2026-10-24，ACCEPTED）
+
+- A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `feedback-cleaning-suggestion.json`；发布基线 `32ce770be55c7c07279319aeabd860b14231e262`，源基线 `81cd04692466e9849647db49bd852a62a9e50dd1`。
+- 复用现有反馈草稿和模型配置，增加严格结构化 LLM 清洗建议及独立只读 API/UI；调用前后复验 owner、草稿摘要、版本，模型选择绑定建议。反馈提案未包含建议，确认旧流程不批准任何检测器或清洗配方。
+- `PYTHONPATH=src:tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_model_runtime tests.test_api tests.test_chat_ui -q`：16 项 PASS，含跨用户拒绝、旧草稿拒绝、模型调用期间确认导致返回冲突、无持久副作用；`node --check`：PASS；`python3 tools/collab_gate.py check --role integration --base 32ce770be55c7c07279319aeabd860b14231e262 --task docs/dev/tasks/feedback-cleaning-suggestion.json`：SCOPE PASS、491 项 PASS、LOCAL GATE PASS，退出码 0；中间 LOCAL GATE FAIL 是既有负向夹具。角色门禁之外未重复完整回归。真实模型调用、授权素材及清洗执行 NOT_RUN；8081 旧进程未重启，浏览器体验 NOT_RUN。
+- 下一步：完成并发/页面测试、角色门禁和审查；后续需要结构化规则编辑与发起人确认后才能把建议编译为受信 CleaningRecipe。
+
 ## 已批准 VLM 检测器（2026-10-24，ACCEPTED）
 
 - A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `vlm-approved-detector.json`；发布基线 `7004ee9b0721ec7a355afd16a511311ad3d81e8f`，源基线 `9c46943a6c7139b003c2dd35b5e8b5cca3f21ef9`。

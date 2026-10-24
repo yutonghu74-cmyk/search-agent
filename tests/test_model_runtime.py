@@ -96,6 +96,96 @@ class ModelRuntimeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_grouped_expansion(changed)
 
+    def test_feedback_cleaning_suggestion_is_advisory_and_bounded(self):
+        runtime = self.runtime([{'requirement': '必须是狗，且没有可见文字',
+                                 'rationale': '保留原主体并加入反馈排除项',
+                                 'needs_clarification': False}])
+        suggestion = runtime.suggest_cleaning('寻找狗', '去掉文字', 'text', 'vision')
+        self.assertEqual(suggestion['requirement'], '必须是狗，且没有可见文字')
+        self.assertEqual(suggestion['model_binding'], runtime.binding('text', 'vision'))
+        self.assertFalse(suggestion['needs_clarification'])
+        self.assertEqual(self.transport.calls[0]['model'], 'text-v1')
+        self.assertNotIn('secret', json.dumps(suggestion))
+        for invalid in ({'requirement': '狗', 'rationale': '说明'},
+                        {'requirement': '', 'rationale': '说明', 'needs_clarification': False},
+                        {'requirement': '狗', 'rationale': '说明', 'needs_clarification': 'false'},
+                        {'requirement': '狗', 'rationale': '说明', 'needs_clarification': False, 'execute': True}):
+            runtime = self.runtime([invalid])
+            with self.assertRaises(ServiceError) as caught:
+                runtime.suggest_cleaning('寻找狗', '去掉文字', 'text', 'vision')
+            self.assertEqual(caught.exception.code, 'MODEL_OUTPUT_INVALID')
+
+    def test_feedback_suggestion_http_requires_current_owner_draft(self):
+        from http.server import ThreadingHTTPServer
+        import threading
+        from urllib.request import Request, urlopen
+        from dsh_retrieval.api import create_handler
+        from dsh_retrieval.service import InMemoryTaskRepository
+        from draft_helpers import BODY, make_service
+        runtime = self.runtime([{'requirement': '狗且无文字', 'rationale': '排除文字',
+                                 'needs_clarification': False}])
+        service = make_service(InMemoryTaskRepository())
+        server = ThreadingHTTPServer(('127.0.0.1', 0), create_handler(service, model_runtime=runtime))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def call(path, body=None, *, owner='owner', key='test'):
+            headers = {'X-Tenant-Id': 'tenant', 'X-User-Id': owner,
+                       'Content-Type': 'application/json', 'Idempotency-Key': key}
+            data = json.dumps(body).encode() if body is not None else None
+            try:
+                with urlopen(Request(f'http://127.0.0.1:{server.server_port}' + path,
+                                     data=data, headers=headers)) as response:
+                    return response.status, json.load(response)
+            except HTTPError as error:
+                return error.code, json.load(error)
+        try:
+            _, draft = call('/v1/retrieval/projects/demo/drafts', deepcopy(BODY), key='draft')
+            _, task = call('/v1/retrieval/tasks', {'draft_id': draft['draft_id'],
+                'expected_draft_version': draft['draft_version'],
+                'proposal_digest': draft['proposal_digest'], 'action': 'confirm'}, key='task')
+            task_id = task['task_id']
+            _, feedback = call(f'/v1/retrieval/tasks/{task_id}/feedback', {
+                'text': '去掉文字', 'scope': 'all', 'expected_revision': 1,
+                'expected_task_version': task['task_version']}, key='feedback')
+            body = {'draft_id': feedback['draft_id'],
+                    'expected_draft_version': feedback['draft_version'],
+                    'proposal_digest': feedback['proposal_digest'],
+                    'model_selection': {'llm': 'text', 'vlm': 'vision'}}
+            path = f'/v1/retrieval/tasks/{task_id}/feedback-suggestions'
+            status, foreign = call(path, body, owner='intruder')
+            self.assertEqual(status, 404)
+            self.assertEqual(len(self.transport.calls), 0)
+            status, suggested = call(path, body)
+            self.assertEqual((status, suggested['status']), (200, 'advisory_only'))
+            self.assertEqual(suggested['draft_id'], feedback['draft_id'])
+            self.assertEqual(suggested['proposal_digest'], feedback['proposal_digest'])
+            self.assertEqual(len(self.transport.calls), 1)
+            current_status, current = call(f'/v1/retrieval/tasks/{task_id}')
+            self.assertEqual((current_status, current['confirmed_revision']), (200, 1))
+            self.assertEqual(current['pending_draft']['draft_id'], feedback['draft_id'])
+            status, rejected = call(path, dict(body, expected_draft_version=99))
+            self.assertEqual((status, rejected['code']), (409, 'REVISION_CONFLICT'))
+            self.assertEqual(len(self.transport.calls), 1)
+            def concurrent_confirm(*args):
+                confirmed_status, _ = call(f'/v1/retrieval/tasks/{task_id}/confirmations', {
+                    'draft_id': feedback['draft_id'],
+                    'expected_draft_version': feedback['draft_version'],
+                    'proposal_digest': feedback['proposal_digest'],
+                    'expected_task_version': feedback['base_task_version'],
+                    'action': 'confirm'}, key='confirm-during-model')
+                self.assertEqual(confirmed_status, 202)
+                return {'requirement': '狗且无文字', 'rationale': '排除文字',
+                        'needs_clarification': False}
+            with patch.object(runtime, '_request', side_effect=concurrent_confirm):
+                status, stale = call(path, body)
+            self.assertEqual((status, stale['code']), (409, 'REVISION_CONFLICT'))
+            status, current = call(f'/v1/retrieval/tasks/{task_id}')
+            self.assertEqual((status, current['confirmed_revision']), (200, 2))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_wrong_capability_or_missing_model_never_calls_transport(self):
         runtime = self.runtime([])
         for ids in (('vision', 'text'), ('missing', 'vision')):

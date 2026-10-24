@@ -21,11 +21,13 @@ from .result_views import ResultCursorError, build_result_page
 from .expansion_models import preview_grouped_expansion, preview_edited_groups
 from .query_branches import build_query_branch_view
 from .model_runtime import ModelRuntime, load_model_runtime
+from .query_spec import digest
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
 DRAFT_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/drafts(?:/([^/]+))?$")
 FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$")
+FEEDBACK_SUGGESTION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback-suggestions$")
 CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
 REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
 PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/progress$")
@@ -100,15 +102,56 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         draft_match = DRAFT_PATH.fullmatch(self.path)
         feedback_match = FEEDBACK_PATH.fullmatch(self.path)
+        suggestion_match = FEEDBACK_SUGGESTION_PATH.fullmatch(self.path)
         confirmation_match = CONFIRMATION_PATH.fullmatch(self.path)
         expansion_match = EXPANSIONS_PATH.fullmatch(self.path)
         if (self.path != "/v1/retrieval/tasks" and draft_match is None
                 and not (feedback_match and feedback_match.group(2) is None)
-                and confirmation_match is None and expansion_match is None):
+                and suggestion_match is None and confirmation_match is None and expansion_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
         def action() -> tuple[int, dict[str, Any], bool]:
+            if suggestion_match:
+                actor = self._actor()
+                body = self._body()
+                if (set(body) != {'draft_id', 'expected_draft_version', 'proposal_digest', 'model_selection'}
+                        or not isinstance(body['model_selection'], dict)
+                        or set(body['model_selection']) != {'llm', 'vlm'}
+                        or not isinstance(body['draft_id'], str)
+                        or type(body['expected_draft_version']) is not int
+                        or not isinstance(body['proposal_digest'], str)):
+                    raise ServiceError('INVALID_SPEC', 'Bound feedback suggestion request required', 422)
+                task_id = suggestion_match.group(1)
+                draft = self.service.get_feedback(actor, task_id, body['draft_id'])
+                task = self.service.get_task(actor, task_id)
+                if (draft['status'] != 'ready' or draft['draft_version'] != body['expected_draft_version']
+                        or draft['proposal_digest'] != body['proposal_digest']
+                        or draft['base_revision'] != task['confirmed_revision']
+                        or draft['base_task_version'] != task['task_version']):
+                    raise ServiceError('REVISION_CONFLICT', 'Feedback draft changed; reload', 409)
+                revisions = self.service.list_revisions(actor, task_id)
+                base = next((item['proposal']['query_spec']['raw_request'] for item in revisions
+                             if item['revision'] == draft['base_revision']), None)
+                if not isinstance(base, str):
+                    raise ServiceError('STORAGE_CORRUPT', 'Confirmed request unavailable', 500)
+                selection = body['model_selection']
+                suggestion = self.model_runtime.suggest_cleaning(base, draft['feedback_text'],
+                                                                  selection['llm'], selection['vlm'])
+                current_draft = self.service.get_feedback(actor, task_id, body['draft_id'])
+                current_task = self.service.get_task(actor, task_id)
+                if (current_draft != draft or current_task['confirmed_revision'] != task['confirmed_revision']
+                        or current_task['task_version'] != task['task_version']):
+                    raise ServiceError('REVISION_CONFLICT', 'Feedback draft changed during suggestion', 409)
+                result = {'schema_version': 'feedback-cleaning-suggestion@1',
+                          'task_id': task_id, 'base_revision': draft['base_revision'],
+                          'base_task_version': draft['base_task_version'],
+                          'draft_id': draft['draft_id'], 'draft_version': draft['draft_version'],
+                          'proposal_digest': draft['proposal_digest'], **suggestion,
+                          'status': 'advisory_only',
+                          'note': '仅供审阅；不在反馈确认摘要内，不能创建或运行清洗管线。'}
+                result['suggestion_digest'] = digest(result)
+                return HTTPStatus.OK, result, False
             if expansion_match:
                 actor = self._actor()
                 body = self._body()
