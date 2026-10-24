@@ -1,0 +1,21 @@
+{
+  "role": "integration",
+  "branch": "codex/r06-progress-api",
+  "source_base": "a0a50e868c7c3b8162d410a8ba2d0ef0925e93e7",
+  "files": [
+    "src/dsh_retrieval/api.py",
+    "src/dsh_retrieval/retrieval_progress.py",
+    "tests/test_retrieval_progress_api.py",
+    "contracts/multi-branch-retrieval.md",
+    "docs/dev/remaining-roadmap.md",
+    "docs/dev/progress.md",
+    "docs/dev/handoffs/r06-progress-api.md"
+  ],
+  "acceptance": "新增只读 HTTP 接口读取当前已批准整组检索计划及每成员真实 SQLite 恢复水位；仅输出分支页数、待重试与停止原因，不输出向量、原始命中、游标或内部操作 ID，不把页数当有效素材数。未装配返回 503、无批准返回明确未批准、非发起人及撤权拒绝、旧 generation 失败关闭；接口无执行或自动确认副作用。用独立临时账本和真实 HTTP 测试验证身份、授权、版本、只读及恢复。记录真实与未验证边界。",
+  "handoff": "docs/dev/handoffs/r06-progress-api.md",
+  "tests": {
+    "mode": "full",
+    "targets": [],
+    "reason": "HTTP 权限投影读取任务与多库账本，权限或版本错误可能泄漏跨任务状态；交付时执行完整回归。"
+  }
+}
