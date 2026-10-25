@@ -22,10 +22,19 @@ VLM 图像评分仍是独立直接模型算子，不属于第二套 Agent loop�
 每次推理在 principal 哈希目录下新建随机运行目录、DSH_HOME 和 session；使用服务端
 选择的当前会话摘要续聊，不直接恢复其他 DSH 会话。audit 关联请求、路由和已授权
 dialogue/session version；首轮 session 尚未创建，使用请求 trace 关联。现阶段不把
-DSH session 当作业务账本，也未完成正式任务/revision 的全套持久 session 映射。
+DSH session 当作业务账本。
 运行目录仅本机用户可读；原始 DSH JSONL 含对话数据，不应上传或公开。
 
-外层整个进程树限时 120 秒，超时终止 worker/native runtime/MCP 并拒收结果；
+运行索引（2026-10-25）：`DSH_HOME/runs.sqlite3`（0600）为每轮记录 run_id、租户哈希、
+principal 哈希、project/task/revision/generation/task_version 或 dialogue session/version、
+路由、模型 profile ID、状态、错误码和起止时间，不含原文、提示或提案。
+`GET /v1/retrieval/tasks/{id}/agent-runs` 先做任务读权限校验，再按同租户返回该任务
+最近 200 轮的上述标识与状态（direct 模式 `items` 为空）；这是审计映射，不是任务状态源。
+服务启动时把索引中仍为 running 的轮次及旧版 `audit.json` 中的 running 记录标为
+`interrupted / SERVICE_RESTARTED`；仅当记录的 pid 当前确为本 worker 模块时才终止其
+进程组，pid 已被复用则不发信号。中断轮次不续跑、不接收晚到提案，用户重发即新轮次。
+
+外层整个进程树默认限时 120 秒，超时终止 worker/native runtime/MCP 并拒收结果；
 上游重试由 DSH 负责（最多 1 次），业务 schema 修复仍最多 1 次，二者不混为执行重试。
 限流/认证/额度/超时仅返回白名单错误码和固定说明，不回传上游正文。
 模型绑定摘要额外包含 DSH 版本、受限配置及固定业务指令摘要；迁移前旧绑定不可冒充新绑定。
@@ -42,6 +51,14 @@ DSH session 当作业务账本，也未完成正式任务/revision 的全套持�
   {"id":"vision","kind":"vlm","provider":"your-provider","model":"your-vision-model","base_url":"https://example.invalid/v1","api_key_env":"DSH_VLM_KEY"}
 ]}
 ```
+
+每行还可选三项请求参数（缺省保持原行为）：`max_tokens`（256–32768；直接调用缺省
+3000，DSH 缺省 8000，DSH 经 patch 同步到 provider 模型上限）、`temperature`（0–2，
+缺省 0；写 `null` 则不发送该字段，用于拒绝 temperature 的模型）、
+`request_timeout_seconds`（5–300；直接调用缺省 60，DSH 单次请求缺省 90，显式配置时
+整轮限时至少为该值 +30 秒、不超过 300 秒）。其他键仍拒绝。非缺省参数进入模型绑定
+摘要，修改后旧绑定需重新确认；缺省参数不改变既有摘要。DSH provider 当前不发送
+temperature。推理型模型较慢、输出长，应实测后再调大这些值。
 
 实际地址与密钥不得入库；配置仅引用环境变量。只接受受信 HTTPS 服务。DSH 协议要求见上节，直接 VLM/旧版诊断入口沿用 `/chat/completions` JSON 输出，VLM 要支持 image_url data URI。不是所有服务均兼容，必须实测。直接调用不跟随重定向；单次超时 60 秒，响应上限 1 MB。HTTP 429/502/503/504 和临时连接故障最多重试 2 次，等待 1、2 秒起，数字型 Retry-After 最多尊重到 5 秒；其他 HTTP 错误不重试，不切换模型。无效扩词 JSON 可进行一次业务修复，非对象响应直接拒绝。端点、凭据及上游错误正文不进入目录/结果。DSH provider 的出口重定向策略尚未单独验收，生产需受控出口。
 

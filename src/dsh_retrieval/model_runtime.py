@@ -120,7 +120,8 @@ class ModelRuntime:
         return {'llm': llm_id, 'vlm': vlm_id, 'prompt_version': PROMPT_VERSION,
                 'config_digest': digest([{'id': p.profile_id, 'kind': p.kind,
                     'provider': p.config.provider, 'model': p.config.model,
-                'endpoint': p.config.base_url} for p in selected])}
+                'endpoint': p.config.base_url} | ({'options': p.config.options()} if p.config.options() else {})
+                    for p in selected])}
 
     def analyze_request(self, raw_request, llm_id):
         """Review one Chat utterance; never turn model output into a task."""
@@ -229,7 +230,7 @@ class ModelRuntime:
         return value
 
     def _request(self, profile, system, content, *, conversation=None):
-        body = {'model': profile.config.model, 'temperature': 0, 'max_tokens': 3000,
+        body = {'model': profile.config.model, **profile.config.sampling(3000),
                 'messages': [{'role': 'system', 'content': system}] + (conversation or []) +
                             [{'role': 'user', 'content': content}],
                 'response_format': {'type': 'json_object'}}
@@ -238,7 +239,7 @@ class ModelRuntime:
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + profile.config.api_key})
         for attempt in range(3):
             try:
-                with self.opener.open(request, timeout=60) as response:
+                with self.opener.open(request, timeout=profile.config.request_timeout_seconds or 60) as response:
                     raw = response.read(1_000_001)
                 break
             except urllib.error.HTTPError as error:
@@ -541,13 +542,16 @@ def load_model_runtime(path):
         if set(data) != {'models'} or not isinstance(data['models'], list) or len(data['models']) > 30:
             raise ValueError()
         profiles = []
+        required = {'id', 'kind', 'provider', 'model', 'base_url', 'api_key_env'}
+        optional = {'max_tokens', 'temperature', 'request_timeout_seconds'}
         for row in data['models']:
-            if set(row) != {'id', 'kind', 'provider', 'model', 'base_url', 'api_key_env'}:
+            if not required <= set(row) <= required | optional:
                 raise ValueError()
             if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', row['api_key_env']):
                 raise ValueError()
             profiles.append(ModelProfile(row['id'], row['kind'], ModelConfig(
-                row['provider'], row['model'], row['base_url'], os.environ[row['api_key_env']])))
+                row['provider'], row['model'], row['base_url'], os.environ[row['api_key_env']],
+                **{key: row[key] for key in optional if key in row})))
         return ModelRuntime(profiles)
     except Exception:
         raise ServiceError('MODEL_CONFIG_INVALID', 'Cannot load trusted model profiles and environment credentials', 500) from None

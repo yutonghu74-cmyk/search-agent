@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import uuid
 import argparse
 from contextlib import nullcontext
@@ -54,6 +55,7 @@ MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
 CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
 ROUTING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-routing$")
 RETRIEVAL_PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/retrieval-progress$")
+AGENT_RUNS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/agent-runs$")
 FIRST_SEARCH_GET_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search(?:/(candidates|progress))?$")
 FIRST_SEARCH_POST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search/(prepare|confirm|tick)$")
 
@@ -446,6 +448,20 @@ class Handler(BaseHTTPRequestHandler):
                     self.plan_set_repository, actor, task_id), False
             self._run(retrieval_progress_action)
             return
+        agent_runs_match = AGENT_RUNS_PATH.fullmatch(path)
+        if agent_runs_match:
+            def agent_runs_action():
+                actor = self._actor()
+                task_id = agent_runs_match.group(1)
+                self.service.get_task(actor, task_id)
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Agent runs have no query parameters', 422)
+                # Identifiers and status only; DSH sessions are audit records, not task state.
+                runs = getattr(self.model_runtime, 'agent_runs', None)
+                return HTTPStatus.OK, {'engine': self.model_runtime.status().get('engine'),
+                                       'items': runs(actor.tenant_id, task_id) if runs else []}, False
+            self._run(agent_runs_action)
+            return
         if path == '/catalog':
             self._asset('text/html', CATALOG_HTML)
             return
@@ -630,6 +646,10 @@ def main() -> None:
             parser.error('DSH requires --dsh-python and --dsh-home (or explicit DSH_HOME)')
         runtime = DshModelRuntime(runtime.profiles.values(), python=args.dsh_python, home=home)
         runtime.check_installation()
+        recovered = runtime.recover()
+        if any(recovered.values()):
+            print(f"DSH recovery: closed {recovered['runs']} indexed and {recovered['audits']} "
+                  "audited run(s) as interrupted", file=sys.stderr)
     catalog = build_local_catalog(args.catalog_source, args.catalog_ledger, runtime) if args.catalog_source else None
     service = TaskService(repository, LocalProjectAccess(grants))
     dialogue = DialogueCoordinator(DialogueStore(Path(args.dialogue_ledger) if args.dialogue_ledger else None),

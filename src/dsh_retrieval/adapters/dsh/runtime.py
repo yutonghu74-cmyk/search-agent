@@ -13,6 +13,7 @@ from ...errors import ServiceError
 from ...intent_model import IntentModelClient, SYSTEM_PROMPT
 from ...model_runtime import ModelRuntime
 from ...query_spec import digest
+from .runs import RunIndex
 
 _scope = ContextVar('dsh_request_scope', default=None)
 
@@ -26,6 +27,13 @@ class DshModelRuntime(ModelRuntime):
         if not 1 <= timeout <= 300:
             raise ValueError('DSH timeout must be 1–300 seconds')
         self.timeout = timeout
+        self.runs = RunIndex(self.home / 'runs.sqlite3')
+
+    def recover(self):
+        return self.runs.recover(self.home)
+
+    def agent_runs(self, tenant_id, task_id):
+        return self.runs.for_task(tenant_id, task_id)
 
     def status(self):
         return {'engine': 'dsh', 'version': '0.2.1rc2', 'profile': 'sdk-minimal',
@@ -102,8 +110,11 @@ class DshModelRuntime(ModelRuntime):
         root.mkdir(parents=True, mode=0o700)
         os.chmod(root.parent, 0o700)
         context = {'messages': (conversation or []) + [{'role': 'user', 'content': content}]}
+        request_timeout = profile.config.request_timeout_seconds or 90
         request = {'run_id': run_id, 'turn_dir': str(root), 'model': profile.config.model,
                    'base_url': profile.config.base_url, 'api_key': profile.config.api_key,
+                   'max_tokens': profile.config.max_tokens or 8000,
+                   'request_timeout_seconds': request_timeout,
                    'system': system, 'context': context}
         metadata = {'run_id': run_id, 'principal_digest': principal, 'engine': 'dsh',
                     'runtime_version': '0.2.1rc2', 'status': 'running',
@@ -113,6 +124,8 @@ class DshModelRuntime(ModelRuntime):
              'revision', 'generation') if key in scope}
         audit = root / 'audit.json'
         audit.write_text(json.dumps(metadata))
+        self.runs.start(run_id, principal=principal, tenant=scope['tenant_id'], scope=scope,
+                        model_profile=profile.profile_id)
         proc = None
         try:
             payload = json.dumps(request, ensure_ascii=False, allow_nan=False).encode()
@@ -122,7 +135,12 @@ class DshModelRuntime(ModelRuntime):
             proc = subprocess.Popen([self.python, '-m', 'dsh_retrieval.adapters.dsh.worker'],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 cwd=root, env=env, start_new_session=True)
-            stdout, _ = proc.communicate(payload, timeout=self.timeout)
+            self.runs.attach_process(run_id, proc.pid)
+            # A model configured with a slower request budget extends, never shortens, the turn budget.
+            budget = self.timeout
+            if profile.config.request_timeout_seconds:
+                budget = max(budget, min(300, request_timeout + 30))
+            stdout, _ = proc.communicate(payload, timeout=budget)
             if len(stdout) > 200_000:
                 raise ValueError()
             result = json.loads(stdout)
@@ -158,6 +176,7 @@ class DshModelRuntime(ModelRuntime):
             if proc is not None:
                 self._terminate(proc)
             audit.write_text(json.dumps(metadata))
+            self.runs.finish(run_id, metadata['status'], metadata.get('error_code'))
 
     def analyze_request(self, raw_request, llm_id):
         profile = self.select(llm_id, 'llm')

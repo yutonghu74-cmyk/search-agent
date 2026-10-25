@@ -107,6 +107,12 @@ class ApiTest(unittest.TestCase):
             f"/v1/retrieval/conversations/{draft['conversation_id']}")
         self.assertEqual([item["kind"] for item in conversation["messages"]], ["request", "feedback"])
         self.assertEqual([item["revision"] for item in conversation["confirmations"]], [1, 2])
+        status, runs, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/agent-runs")
+        self.assertEqual((status, runs["engine"], runs["items"]), (200, "unconfigured", []))
+        status, _, _ = self.request("/v1/retrieval/tasks/missing/agent-runs")
+        self.assertEqual(status, 404)
+        status, _, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/agent-runs", identity=False)
+        self.assertIn(status, (400, 401, 403))
 
         status, progress, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/progress")
         self.assertEqual(status, 200)

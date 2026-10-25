@@ -33,14 +33,18 @@ def run(request):
     from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig
     root = Path(request['turn_dir'])
     (root / 'context.json').write_text(json.dumps(request['context'], ensure_ascii=False))
+    # The worker runs from the source tree on every turn; a service started before
+    # per-model options existed omits them, so keep its former fixed values.
+    max_tokens = request.get('max_tokens', 8000)
     config = DeepSeekHarnessConfig(
-        provider='retrieval-gateway', model=request['model'], max_tokens=8000,
+        provider='retrieval-gateway', model=request['model'], max_tokens=max_tokens,
         profile='sdk-minimal', dsh_home=str(root / 'home'), cwd=str(root),
         patches=(str(Path(__file__).with_name('retrieval.patch.yml')),),
-        initialize_timeout_seconds=25, request_timeout_seconds=90,
+        initialize_timeout_seconds=25, request_timeout_seconds=request.get('request_timeout_seconds', 90),
         env={'RETRIEVAL_MODEL_KEY': request['api_key'],
              'RETRIEVAL_MODEL_URL': request['base_url'],
              'RETRIEVAL_MODEL_ID': request['model'],
+             'RETRIEVAL_MAX_TOKENS': str(max_tokens),
              'RETRIEVAL_PYTHON': sys.executable,
              'RETRIEVAL_TURN_DIR': str(root),
              'DSH_SYSTEM_PROMPT': SKILL + '\nTask-specific proposal schema:\n' + request['system']},

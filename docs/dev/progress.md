@@ -4,6 +4,18 @@
 
 ## 当前快照
 
+- 2026-10-25：READY_FOR_REVIEW（DSH 运行索引/重启恢复 + 按模型请求参数，`codex/dsh-runtime`）。
+  先以 704 项完整回归 PASS 提交此前 DSH 运行入口（71cc730）。新增 `DSH_HOME/runs.sqlite3`
+  记录每轮 run 与 task/revision/generation/task_version 或对话 session 的映射、路由、模型
+  profile 与状态（无原文/提案），`GET /v1/retrieval/tasks/{id}/agent-runs` 校验任务权限后
+  按租户返回；启动时把遗留 running 轮次（含旧 audit）关为 `interrupted/SERVICE_RESTARTED`，
+  仅终止确认为本 worker 的孤儿进程组，不续跑。模型配置每行可选 `max_tokens`、
+  `temperature`（null 不发送）、`request_timeout_seconds`，非缺省值进入绑定摘要；DSH 经
+  patch 环境变量下发 max_tokens，native 测试确认 provider 收到配置值且不发 temperature。
+  worker 对未传新参数的旧父进程保持 8000/90 缺省（native 实测）。完整 709 项 PASS（含
+  native DSH），`git diff --check` PASS。8094 未重启：仍运行旧父进程代码，新索引/端点/参数
+  需受控重启后生效；patch 摘要变化会使旧未确认绑定需重新确认。真实模型新参数 NOT_RUN。
+
 - 2026-10-24：DSH 运行入口接入（独立 `codex/dsh-runtime`，尚未合并）。真实 SDK/native
   `0.2.1rc2` 执行文本推理和两项受限 MCP 工具；对话/扩词/建议不再直连绕过 DSH，
   VLM 保留独立算子调用。已验证实际工具允许列表、失败关闭、版本绑定以及缺数量不猜数。

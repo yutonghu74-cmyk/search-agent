@@ -47,7 +47,7 @@ class ProposalToolTest(unittest.TestCase):
 class RuntimeTest(unittest.TestCase):
     def test_rate_limit_is_retryable_and_sanitized(self):
         from unittest.mock import Mock
-        process = Mock(returncode=1)
+        process = Mock(returncode=1, pid=os.getpid())
         process.communicate.return_value = (b'{"error":"RATE_LIMIT"}', None)
         with tempfile.TemporaryDirectory() as home:
             profile = ModelProfile('text', 'llm', ModelConfig('test', 'test', 'https://example.invalid/v1', 'fake-key'))
@@ -64,7 +64,7 @@ class RuntimeTest(unittest.TestCase):
         from unittest.mock import Mock
         launches = []
         def launch(*args, **kwargs):
-            process = Mock(returncode=0)
+            process = Mock(returncode=0, pid=os.getpid())
             def communicate(payload, timeout):
                 request = json.loads(payload)
                 launches.append(request)
@@ -88,7 +88,7 @@ class RuntimeTest(unittest.TestCase):
 
     def test_timeout_cancels_process_tree_and_does_not_accept_late_output(self):
         from unittest.mock import Mock
-        process = Mock()
+        process = Mock(pid=os.getpid())
         process.communicate.side_effect = subprocess.TimeoutExpired('worker', 1)
         with tempfile.TemporaryDirectory() as home:
             profile = ModelProfile('text', 'llm', ModelConfig('test', 'test', 'https://example.invalid/v1', 'fake'))
@@ -144,6 +144,94 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(audit['status'], 'failed')
             self.assertNotIn('fake', json.dumps(audit))
 
+    @staticmethod
+    def _completing_launch(launches):
+        from unittest.mock import Mock
+        def launch(*args, **kwargs):
+            process = Mock(returncode=0, pid=os.getpid())
+            def communicate(payload, timeout):
+                request = json.loads(payload)
+                launches.append((request, timeout))
+                return json.dumps({'session_id': request['run_id'], 'runtime_version': '0.2.1rc2',
+                    'proposal': {}, 'finish_reason': 'completed', 'event_types': []}).encode(), None
+            process.communicate.side_effect = communicate
+            return process
+        return launch
+
+    def test_per_model_options_reach_worker_and_extend_turn_budget(self):
+        launches = []
+        default = ModelProfile('text', 'llm', ModelConfig('test', 'test', 'https://example.invalid/v1', 'fake'))
+        slow = ModelProfile('slow', 'llm', ModelConfig('test', 'reasoner', 'https://example.invalid/v1', 'fake',
+                                                       max_tokens=16000, request_timeout_seconds=180))
+        with tempfile.TemporaryDirectory() as home:
+            runtime = DshModelRuntime([default, slow], python=sys.executable, home=home)
+            with patch('dsh_retrieval.adapters.dsh.runtime.subprocess.Popen',
+                       side_effect=self._completing_launch(launches)), patch.object(runtime, '_terminate'):
+                runtime._request(default, 'system', 'a')
+                runtime._request(slow, 'system', 'b')
+        (first, first_timeout), (second, second_timeout) = launches
+        self.assertEqual((first['max_tokens'], first['request_timeout_seconds'], first_timeout), (8000, 90, 120))
+        self.assertEqual((second['max_tokens'], second['request_timeout_seconds'], second_timeout), (16000, 180, 210))
+
+    def test_runs_map_to_task_revision_and_stay_tenant_scoped(self):
+        launches = []
+        with tempfile.TemporaryDirectory() as home:
+            profile = ModelProfile('text', 'llm', ModelConfig('test', 'test', 'https://example.invalid/v1', 'fake'))
+            runtime = DshModelRuntime([profile], python=sys.executable, home=home)
+            with patch('dsh_retrieval.adapters.dsh.runtime.subprocess.Popen',
+                       side_effect=self._completing_launch(launches)), patch.object(runtime, '_terminate'):
+                with runtime.request_scope('tenant-a', 'user-a', 'trace-1', '/followup'):
+                    with runtime.business_scope(project_id='demo', task_id='task-1', task_version=3,
+                                                revision=2, generation=1):
+                        runtime._request(profile, 'system', '保密的用户原文')
+                    runtime._request(profile, 'system', 'no task binding')
+            rows = runtime.agent_runs('tenant-a', 'task-1')
+            self.assertEqual(len(rows), 1)
+            self.assertEqual({key: rows[0][key] for key in ('run_id', 'revision', 'generation', 'task_version',
+                                                             'status', 'model_profile', 'route')},
+                             {'run_id': launches[0][0]['run_id'], 'revision': 2, 'generation': 1,
+                              'task_version': 3, 'status': 'proposal_received', 'model_profile': 'text',
+                              'route': '/followup'})
+            self.assertNotIn('保密', json.dumps(rows, ensure_ascii=False))
+            self.assertEqual(runtime.agent_runs('tenant-b', 'task-1'), [])
+            # Reopening the index (service restart) keeps the mapping.
+            self.assertEqual(DshModelRuntime([profile], python=sys.executable, home=home)
+                             .agent_runs('tenant-a', 'task-1')[0]['run_id'], rows[0]['run_id'])
+
+    def test_restart_recovery_closes_orphaned_runs_without_killing_foreign_pids(self):
+        with tempfile.TemporaryDirectory() as home:
+            runtime = DshModelRuntime(python=sys.executable, home=home)
+            runtime.runs.start('retrieval-orphan', principal='p', tenant='tenant-a',
+                               scope={'task_id': 'task-1', 'revision': 1}, model_profile='text')
+            # Our own pid is not a DSH worker; recovery must not signal it.
+            runtime.runs.attach_process('retrieval-orphan', os.getpid())
+            legacy = Path(home) / 'p' / 'retrieval-legacy'
+            legacy.mkdir(parents=True)
+            (legacy / 'audit.json').write_text(json.dumps({'run_id': 'retrieval-legacy', 'status': 'running'}))
+            done = Path(home) / 'p' / 'retrieval-done'
+            done.mkdir()
+            (done / 'audit.json').write_text(json.dumps({'status': 'proposal_received'}))
+            with patch('dsh_retrieval.adapters.dsh.runs.os.killpg') as kill:
+                restarted = DshModelRuntime(python=sys.executable, home=home)
+                self.assertEqual(restarted.recover(), {'runs': 1, 'audits': 1})
+            kill.assert_not_called()
+            row, = restarted.agent_runs('tenant-a', 'task-1')
+            self.assertEqual((row['status'], row['error_code']), ('interrupted', 'SERVICE_RESTARTED'))
+            self.assertEqual(json.loads((legacy / 'audit.json').read_text())['status'], 'interrupted')
+            self.assertEqual(json.loads((done / 'audit.json').read_text())['status'], 'proposal_received')
+            self.assertEqual(restarted.recover(), {'runs': 0, 'audits': 0})
+
+    def test_recovery_stops_an_orphaned_worker_process_group(self):
+        with tempfile.TemporaryDirectory() as home:
+            runtime = DshModelRuntime(python=sys.executable, home=home)
+            runtime.runs.start('retrieval-orphan', principal='p', tenant='t', scope={}, model_profile='text')
+            runtime.runs.attach_process('retrieval-orphan', 4242)
+            with patch('dsh_retrieval.adapters.dsh.runs._is_worker', return_value=True), \
+                    patch('dsh_retrieval.adapters.dsh.runs.os.killpg') as kill:
+                runtime.recover()
+            kill.assert_called_once()
+            self.assertEqual(kill.call_args.args[0], 4242)
+
 
 @unittest.skipUnless(os.environ.get('DSH_TEST_PYTHON'), 'opt-in pinned native DSH integration')
 class NativeRuntimeTest(unittest.TestCase):
@@ -185,7 +273,8 @@ class NativeRuntimeTest(unittest.TestCase):
         thread.start()
         try:
             with tempfile.TemporaryDirectory() as home:
-                config = ModelConfig('test', 'test', 'https://example.invalid/v1', 'fake-not-a-secret')
+                config = ModelConfig('test', 'test', 'https://example.invalid/v1', 'fake-not-a-secret',
+                                     max_tokens=12000)
                 # Local deterministic fixture only; production still requires HTTPS.
                 object.__setattr__(config, 'base_url', f'http://127.0.0.1:{server.server_port}/v1')
                 profile = ModelProfile('text', 'llm', config)
@@ -194,6 +283,9 @@ class NativeRuntimeTest(unittest.TestCase):
                 result = runtime._request(profile, 'Return action, question and reply JSON.', '找猫图片')
                 self.assertEqual(result, proposal)
                 self.assertEqual(len(calls), 3)
+                # Per-model output budget reaches the provider request through the patch.
+                self.assertEqual(calls[0].get('max_tokens'), 12000)
+                self.assertNotIn('temperature', calls[0])
                 names = {item['function']['name'] for item in calls[0]['tools']}
                 self.assertEqual(names, {'mcp__retrieval__get_context', 'mcp__retrieval__submit_proposal'})
                 self.assertNotIn('dsh_session_log', calls[0])

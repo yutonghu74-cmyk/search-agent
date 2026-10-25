@@ -40,7 +40,7 @@
             models:
               - id: !!js process.env.RETRIEVAL_MODEL_ID
                 contextWindow: 128000
-                maxTokens: 8000
+                maxTokens: !!js Number(process.env.RETRIEVAL_MAX_TOKENS)
                 reasoningEfforts: false
             compat:
               supportsDeveloperRole: false
