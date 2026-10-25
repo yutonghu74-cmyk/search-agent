@@ -1,5 +1,56 @@
 # A 总控集成交接
 
+## 2026-10-24 DSH 运行入口落地
+
+- 主责 A 总控；用户本轮确认独立 worktree、`codex/dsh-runtime` 分支和真实 DSH 验证。
+- worktree：`/Users/hw-edit/.codex/worktrees/dsh-runtime/search-agent`；基线
+  `8440baef467e14e68bcd8b8adc86815ac2a770e5` + 开工时原工作区未提交快照。
+  快照通过 tracked diff + 7 个未跟踪源文件复制，不提交、不推送、不改原工作区。
+- 修改范围：DSH adapter/受限 MCP/固定配置、API 装配、对话运行绑定、模型校验、
+  模型状态小标签、对应测试、包资源声明及文档。继承的其他修改不属于本包新成果。
+- 规格：v1.9 §9.1–9.6、§10.4、§15.5；仅本地单用户推理入口切片，
+  A15/A25 的完整生产恢复/身份隔离，以及所有内网真实检索清洗验收仍 NOT_RUN。
+- 实现：使用 native DSH Agent loop，禁用默认 shell/fs/MCP resource 工具及上传扩展；
+  两个业务 MCP 工具读当前上下文/写一次候选，实际工具清单经 mock provider 的真实
+  DSH 进程测试断言。必须有成功工具事件和 completed 才接收候选，无直接模型 fallback。
+- 会话：principal 哈希目录 + 随机 session/home；每次推理重建当前已授权业务摘要。
+  audit 关联 trace、dialogue version；正式任务跟进/清洗建议关联 task/revision/generation。
+  业务 SQLite 仍为权威，DSH 未提供任务批准权。旧模型绑定因 DSH 配置摘要改变需重新确认。
+- 边界：VLM 是直接图像算子；两项工具不是 §9.3 全套执行工具，也没有完成 Skill 审批发布平台。
+  超时杀整个进程组；错误白名单脱敏；RATE_LIMIT 明确可重试。取消目前是运行超时/进程终止，
+  尚无面向用户的独立取消 API；OS 沙箱/出口重定向策略/并发费用预算/日志保留仍需生产加固。
+- 锁定：SDK/runtime `0.2.1rc2`；本机 macOS arm64 SDK runtime 二进制 SHA-256：
+  `b5ed16a1edfef5824d96820b20b4d6d333e714210c5653f6ececeb45b213d275`。
+  其他平台不能据此宣称构建摘要一致。
+- 验证策略 full：改动包含公共运行装配、绑定摘要、对话数量校验和构建包资源。
+  定向 70 项 PASS；修复后第一轮完整 702 项 PASS（含真实 native DSH + 本地模拟 provider）。
+  初次全量 699 项有 3 个扩词旧契约失败，原工作区同样可复现；未删除/改写原测试，
+  已修复非对象输出重试、旧式明确词数错误码和重复词表重试提示的兼容性。
+- 真实模型首次两轮确经 DSH 通过；发现“一些”被模型虚构成 5 张，新增绝对 count_edits
+  原文依据检查。修复后实测已返回“需要多少张图片？”且 target_count=null。
+  中间一次上游 RATE_LIMIT 已失败关闭，没有更新用户需求或调用直连 fallback。
+- 本地预览 `http://127.0.0.1:8094/` 使用独立账本备份及 `var/dsh-live-preview/dsh`；
+  原 8085 和原账本未改动，不代表 8085 已部署新运行时。不代用户确认/启动检索。
+- 角色门禁：`python3 tools/collab_gate.py check --role retrieval --base 8440baef467e14e68bcd8b8adc86815ac2a770e5`
+  退出 1：旧检查器要求 `codex/retrieval-adapters`，与用户确认的 A 总控 `codex/dsh-runtime`
+  工作包不匹配。未改检查器/责任表/分支去伪造通过，未用 baseline 模式替代。
+  工程测试与角色门禁分别报告；正式角色交付/合并仍需总控协调匹配的任务基线。
+- 最终验证：`DSH_TEST_PYTHON=/Users/hw-edit/Documents/ChatGPT/search-agent/.venv-dsh/bin/python python3 tools/run_tests.py --all`
+  退出 0，704 项 PASS，含 10 项 DSH 适配/工具测试和实际 native runtime 测试；
+  日志 `var/dsh-live-preview/regression-final.log`（本地忽略目录）。`git diff --check` 退出 0。
+  早期定向命令缺少 tests 导入路径导致导入失败，补为 `PYTHONPATH=src:tests` 后
+  `python3 -m unittest tests.test_api tests.test_model_runtime tests.test_dialogue tests.test_intent_model tests.retrieval.test_dsh_runtime -q`
+  为 70 项 PASS；最终完整命令覆盖之后新增测试，无须重复同组定向。
+  一次 `tools/run_tests.py --all -q` 因不支持 -q 退出 2，已用上述正确命令完成，不算测试通过。
+- 最终真实模型验证：补齐 20 张 → 更新需求 → “是的” → terms → DSH 扩词提案成功；
+  最后三轮 DSH 均有 completed 和成功工具事件，session/audit 保存在隔离目录。
+  中间模型把补数量误标成 confirm，业务校验拒绝后补充固定指令正反例，重测成功。
+  这只证明真实推理与业务接入链路，不证明扩词内容质量已达业务指标（仍需离线评测）。
+- 浏览器验收：8094 显示“DSH · 模型已就绪”，新建 Chat 可进入输入态；原 8085 保留。
+  本轮产生的运行文件凭据扫描 PASS（仅扫描本地隔离运行目录，未发现密钥落盘）。
+- 状态：READY_FOR_REVIEW（工程实现与验证）；正式角色门禁 BLOCKED，未提交/合并/生产发布。
+
+
 ## 前端界面优化（2026-10-24，READY_FOR_REVIEW）
 
 - A integration / codex/integration；独立 worktree `/Users/hw-edit/Documents/ChatGPT/search-agent/var/worktrees/integration`；任务卡 `frontend-ui-optimization.json`，任务源基线 f0da9a6f55598cb6ee7b6a96f9ae02f67c1cf342，实施基线 de1331562c2238178c7f47ab228241f0dc4dd1c8。

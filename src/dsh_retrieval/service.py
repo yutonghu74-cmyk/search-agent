@@ -106,7 +106,11 @@ class TaskService:
         require_key(key)
         fields = {"text", "scope", "expected_revision", "expected_task_version"}
         update_fields = fields | {"expected_draft_version"}
-        if not isinstance(body, dict) or set(body) != (update_fields if draft_id else fields):
+        required = update_fields if draft_id else fields
+        optional = {"grouped_expansion", "target_count"}
+        if (not isinstance(body, dict) or not required <= set(body)
+                or set(body) - required - optional
+                or ("target_count" in body) != ("grouped_expansion" in body)):
             raise invalid("feedback requires text, scope, expected_revision and expected_task_version")
         require_positive(body["expected_revision"], "expected_revision")
         require_positive(body["expected_task_version"], "expected_task_version")
@@ -131,6 +135,10 @@ class TaskService:
         if not isinstance(current, str) or not current:
             raise ServiceError("STORAGE_CORRUPT", "confirmed proposal is invalid", 500)
         proposal["query_spec"]["raw_request"] = current + "\n追加反馈：" + text.strip()
+        if "grouped_expansion" in body:
+            proposal["query_spec"]["grouped_expansion"] = body["grouped_expansion"]
+            proposal["query_spec"]["target_count"] = body["target_count"]
+            proposal["query_spec"]["refill_policy"]["target_count"] = body["target_count"]
         normalized = normalize_proposal(proposal)
         proposal_json = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
         feedback_draft_id = draft_id

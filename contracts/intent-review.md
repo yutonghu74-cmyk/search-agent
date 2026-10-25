@@ -47,7 +47,9 @@ PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 python3 tools/intent_review.py --reques
 
 命令 `PYTHONPATH=src python3 tools/intent_model.py --run-live --profile <本地profile路径> --credentials <私有凭据路径> --yaml-python <已安装YAML的解释器路径> --request <可外发需求>` 显式联网，输出到终端，不保存原文/凭据。不要把机密业务内容放入命令行。需要可用的既有 YAML 运行时，不自动安装依赖。
 
-请求仅含系统提示和用户原文；凭据仅在认证头。禁重定向、禁自动重试；网络超时上限 60 秒（urllib 套接字操作超时，并非整体截止时间），响应上限 1 MB。上游错误脱敏。模型只提供原文 quote/occurrence，后端定位字符坐标并做已有校验；没有正式任务/HTTP入口/持久草稿或清洗派发。
+请求仅含系统提示和用户原文；凭据仅在认证头。禁重定向、禁自动重试；网络超时上限 60 秒（urllib 套接字操作超时，并非整体截止时间），响应上限 1 MB。上游错误脱敏。模型只提供原文 quote/occurrence，后端定位字符坐标并做已有校验；此预览不创建正式任务或派发清洗。
+
+Chat `intent-preview` 若收到模型改写或伪造的 quote/occurrence，或模型返回不在 `image/video/text/null` 内的媒体类型，服务端绝不修补或接受该解释，而是整体丢弃模型条目，返回 `mode=SAFE_CLARIFICATION`：唯一解释项覆盖完整用户原文，`kind=unresolved`、`media_type=null`、`execution_allowed=false`。调用方只能留在澄清态：用户仅回复“是/图片”时，把图片类型作为补充重新分析；用户完整重述时替换旧诉求。无论哪种，必须等新的 review 明确 `media_type=image` 且主体、数量齐备后才可扩词或提单，不得从失败模型结果补全，也不能因反复回复“是”循环自动推进。其他模型错误仍按原失败关闭。后续可另行迁移为服务端先生成片段 ID、模型仅引用 ID 的协议；本兼容回退不等于该协议已实现。
 
 2026-10-22：现有 qwen3.7-plus 的一条合成需求真实调用成功，数量、文字/水印否定、横图软偏好和完整性澄清可见；此前一次连接失败，不把本次成功视为稳定性验证。默认能力目录仍为空，不能执行。模型未覆盖的功能词/标点仍保守列入待澄清，用户体验需后续改进，不静默忽略。
 

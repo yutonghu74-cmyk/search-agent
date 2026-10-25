@@ -18,8 +18,9 @@ python3 tools/run_tests.py core.test_counting.CountingTest
 python3 tools/run_tests.py tests/test_query_routing.py
 ```
 
-协作交付仍以任务卡规定的 `tools/collab_gate.py package`（旧任务为角色 `check`）
-为准；统一入口不能替代范围检查或把定向测试表述为完整回归。
+普通开发用上述入口执行与改动风险相称的测试，不要求任务卡或协作门禁。
+已发布的旧协作任务若约定了 `tools/collab_gate.py package` 或 `check --role`，
+仍按其约定执行；定向测试不能表述为完整回归。
 
 ## 真实依赖测试分层
 

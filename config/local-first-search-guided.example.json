@@ -1,0 +1,22 @@
+{
+  "schema": "local-first-search@1",
+  "max_depth": 10,
+  "filter_templates": {"demo-public": ["public"]},
+  "query_vectors": [
+    {"binding_id": "dog-v1", "text": "找动物图片", "values": [1.0, 0.0]},
+    {"binding_id": "cat-v1", "text": "找动物图片", "values": [0.0, 1.0]},
+    {"binding_id": "dog-v1", "text": "找狗图片", "values": [1.0, 0.0]},
+    {"binding_id": "cat-v1", "text": "找猫图片", "values": [0.0, 1.0]}
+  ],
+  "query_rules": [
+    {"binding_id": "dog-v1", "tokens": ["狗", "犬", "动物"], "values": [1.0, 0.0]},
+    {"binding_id": "cat-v1", "tokens": ["猫", "动物"], "values": [0.0, 1.0]}
+  ],
+  "records": [
+    {"binding_id": "dog-v1", "vector_id": 1, "values": [1.0, 0.0], "scope": "public", "media": [{"media_unit_id": "dog-1", "asset_version": "v1", "source_namespace": "local", "source_asset_id": "dog-a", "authorized_media_ref": "media:dog-1", "content_digest": null}]},
+    {"binding_id": "dog-v1", "vector_id": 2, "values": [0.9, 0.1], "scope": "public", "media": [{"media_unit_id": "dog-2", "asset_version": "v1", "source_namespace": "local", "source_asset_id": "dog-b", "authorized_media_ref": "media:dog-2", "content_digest": null}]},
+    {"binding_id": "dog-v1", "vector_id": 3, "values": [0.7, 0.3], "scope": "public", "media": []},
+    {"binding_id": "cat-v1", "vector_id": 1, "values": [0.0, 1.0], "scope": "public", "media": [{"media_unit_id": "cat-1", "asset_version": "v1", "source_namespace": "local", "source_asset_id": "cat-a", "authorized_media_ref": "media:cat-1", "content_digest": null}]},
+    {"binding_id": "cat-v1", "vector_id": 2, "values": [0.3, 0.7], "scope": "public", "media": [{"media_unit_id": "cat-2", "asset_version": "v1", "source_namespace": "local", "source_asset_id": "cat-b", "authorized_media_ref": "media:cat-2", "content_digest": null}]}
+  ]
+}

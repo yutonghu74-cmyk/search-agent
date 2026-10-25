@@ -1,7 +1,7 @@
 """Small, exact-search development connector for the existing retrieval ports.
 
-This is not Milvus or a learned embedding service. Trusted setup supplies query
-vectors and immutable test records; the connector actually ranks vectors and
+This is not Milvus or a learned embedding service. Trusted setup supplies exact
+query vectors or explicit word rules and immutable test records; it ranks vectors and
 pages the resulting authorized scope. Never expose setup as an approval API.
 """
 from __future__ import annotations
@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import math
+import unicodedata
 
 from ...errors import ServiceError
 from ...integration_models import (
@@ -48,7 +49,8 @@ class LocalVectorRetrieval(SimulatedRetrieval):
                  approved: tuple[ApprovedFixture, ...],
                  records: tuple[LocalVectorRecord, ...],
                  filter_templates: dict[str, frozenset[str]],
-                 cursor_secret: bytes):
+                 cursor_secret: bytes,
+                 query_rules: tuple[tuple[IndexBinding, tuple[str, ...], QueryVector], ...] = ()):
         if not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32:
             raise ValueError("stable cursor_secret must contain at least 32 bytes")
         if not filter_templates or any(not isinstance(key, str) or not key
@@ -79,6 +81,17 @@ class LocalVectorRetrieval(SimulatedRetrieval):
         super().__init__(authorization, libraries=libraries, vectors=query_vectors,
                          approved=tuple(replace(fixture, hits=()) for fixture in approved),
                          mappings=mappings)
+        for binding, tokens, vector in query_rules:
+            if (binding not in bindings or not tokens or any(not isinstance(token, str) or not token
+                    for token in tokens)):
+                raise ValueError("invalid local query rule")
+            try:
+                self._vector(binding, vector)
+            except ServiceError as error:
+                raise ValueError("invalid local query rule vector") from error
+            if binding.metric == "COSINE" and not any(value != 0 for value in vector.values):
+                raise ValueError("zero-norm local query rule")
+        self._query_rules = query_rules
         self._records = tuple(records)
         self._templates = dict(filter_templates)
         self._cursor_secret = cursor_secret
@@ -89,6 +102,29 @@ class LocalVectorRetrieval(SimulatedRetrieval):
                          for record in records)),
         )
         self._snapshot = "local:" + hashlib.sha256(repr(snapshot_data).encode()).hexdigest()
+
+    def encode_query(self, context: AccessContext, text: str, binding: IndexBinding) -> QueryVector:
+        self._access(context, binding.library_id, "search")
+        self._binding(binding)
+        exact = self._vectors.get((binding, text))
+        if exact is not None:
+            self._vector(binding, exact)
+            return exact
+        normalized = unicodedata.normalize("NFKC", text).casefold()
+        matches = {vector for rule_binding, tokens, vector in self._query_rules
+                   if rule_binding == binding and any(token in normalized for token in tokens)}
+        if len(matches) != 1:
+            raise ServiceError("QUERY_UNSUPPORTED", "No unambiguous local query rule", 422)
+        return matches.pop()
+
+    def can_encode_query(self, context: AccessContext, text: str, binding: IndexBinding) -> bool:
+        try:
+            self.encode_query(context, text, binding)
+            return True
+        except ServiceError as error:
+            if error.code == "QUERY_UNSUPPORTED":
+                return False
+            raise
 
     @staticmethod
     def _score(metric: str, query: tuple[float, ...], item: tuple[float, ...]) -> float:

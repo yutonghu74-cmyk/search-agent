@@ -33,6 +33,6 @@ commit_page 必须验证预留 operation 归属、集合摘要/epoch、成员 pl
 
 ## 本地首次检索显式入口
 
-仅 `--local-first-search-fixture` 启用时，`GET /v1/retrieval/tasks/{id}/first-search` 返回当前授权路由选择；`POST .../prepare` 接收路由摘要和明确的 `(branch_id,binding_id,batch_size)` 列表，后端重验后存待确认整组；`POST .../confirm` 要求摘要、期望任务版本、`action=confirm` 与幂等键；`POST .../tick` 有界执行当前已批准集合。确认与执行分离，不能由预览或准备自动触发。`GET .../candidates` 读取当前集合已提交的页链并重新授权映射，仅返回绑定、主键、分数、映射状态与可公开的素材标识，不返回向量、过滤模板、游标或私有媒体引用；展示上限 200 条，`accepted_count=null`。
+仅 `--local-first-search-fixture` 启用时，`GET /v1/retrieval/tasks/{id}/first-search` 返回当前授权路由选择；`POST .../prepare` 接收路由摘要和明确的 `(branch_id,binding_id,batch_size)` 列表，后端重验后存待确认整组；`POST .../confirm` 要求摘要、期望任务版本、`action=confirm` 与幂等键；`POST .../tick` 有界执行当前已批准集合。确认与执行分离，不能由预览或准备自动触发。`GET .../progress` 为同一受信本地账本的只读状态，用于页面重开后区分未批准、未完成和已结束的分支；不触发检索。`GET .../candidates` 读取当前集合已提交的页链并重新授权映射，仅返回绑定、主键、分数、映射状态与可公开的素材标识，不返回向量、过滤模板、游标或私有媒体引用；展示上限 200 条，`accepted_count=null`。
 
 本地 fixture 的内容摘要绑定进服务端过滤模板引用；更换向量、映射或配置后旧计划返回 `INDEX_SNAPSHOT_EXPIRED`，不从第一页静默重查。SQLite `list_committed_pages` 在授权读取和当前集合版本校验下投影已提交页，仍不是正式候选发布或媒体访问凭证。此入口只用于本地单操作者手动 tick；没有生产租约、持久尝试/费用账本、真实缩略图或自动清洗，不能宣称真实 Milvus 联测。

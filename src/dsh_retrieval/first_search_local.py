@@ -1,10 +1,11 @@
-"""Opt-in local first-search flow. No Milvus, learned embedding or media bytes."""
+"""Opt-in local first-search flow. Explicit word rules are not learned embeddings."""
 from __future__ import annotations
 
 from dataclasses import asdict
 import hashlib
 import json
 from pathlib import Path
+import unicodedata
 
 from .adapters.retrieval.local_vector import LocalVectorRecord, LocalVectorRetrieval
 from .adapters.retrieval.simulated import ApprovedFixture
@@ -18,6 +19,7 @@ from .query_routing import QueryRouteChoice
 from .query_spec import digest
 from .retrieval_contracts import RetrievalScope
 from .retrieval_coordinator import RetrievalCoordinator
+from .retrieval_progress import read_retrieval_progress
 from .routing_preview import load_capabilities
 from .text_catalog_config import CatalogConfigScope
 
@@ -29,7 +31,6 @@ class LocalFirstSearch:
             raise ValueError('Local cursor secret must contain at least 32 bytes')
         self.service, self.configs = service, configs
         self.source = LocalCatalogSource(source_path)
-        self.local_configs = self._local_configs()
         self.capabilities_path = capabilities_path
         self.fixture_path = Path(fixture_path)
         self.cursor_secret = cursor_secret
@@ -43,9 +44,11 @@ class LocalFirstSearch:
             if len(raw) > 1_000_000:
                 raise ValueError('fixture too large')
             value = json.loads(raw)
-            if (set(value) != {'schema', 'query_vectors', 'records', 'filter_templates', 'max_depth'}
+            if (set(value) not in ({'schema', 'query_vectors', 'records', 'filter_templates', 'max_depth'},
+                                   {'schema', 'query_vectors', 'query_rules', 'records', 'filter_templates', 'max_depth'})
                     or value['schema'] != 'local-first-search@1'
                     or not isinstance(value['query_vectors'], list) or len(value['query_vectors']) > 512
+                    or not isinstance(value.get('query_rules', []), list) or len(value.get('query_rules', [])) > 64
                     or not isinstance(value['records'], list) or len(value['records']) > 1000
                     or not isinstance(value['filter_templates'], dict)
                     or type(value['max_depth']) is not int or not 1 <= value['max_depth'] <= 1000):
@@ -63,6 +66,20 @@ class LocalFirstSearch:
                 if key in vectors:
                     raise ValueError('duplicate query vector')
                 vectors[key] = QueryVector(binding.encoder_ref, tuple(item['values']))
+            rules, aliases = [], {library.library_id: set() for library in libraries}
+            for item in value.get('query_rules', []):
+                if (set(item) != {'binding_id', 'tokens', 'values'} or item['binding_id'] not in bindings
+                        or not isinstance(item['tokens'], list) or not 1 <= len(item['tokens']) <= 64
+                        or not isinstance(item['values'], list)):
+                    raise ValueError('invalid query rule')
+                binding = bindings[item['binding_id']]
+                tokens = tuple(unicodedata.normalize('NFKC', token).casefold().strip()
+                               for token in item['tokens'] if isinstance(token, str))
+                if (len(tokens) != len(item['tokens']) or any(not token or len(token) > 80 for token in tokens)
+                        or len(set(tokens)) != len(tokens)):
+                    raise ValueError('invalid query rule tokens')
+                rules.append((binding, tokens, QueryVector(binding.encoder_ref, tuple(item['values']))))
+                aliases[binding.library_id].update(tokens)
             records = []
             for item in value['records']:
                 if (set(item) != {'binding_id', 'vector_id', 'values', 'scope', 'media'}
@@ -92,8 +109,10 @@ class LocalFirstSearch:
                 cap.filter_template_ref + '@' + version, cap.max_batch_size) for cap in capabilities)
             adapter = LocalVectorRetrieval(self._authority(), libraries=libraries,
                 query_vectors=vectors, approved=(), records=tuple(records),
-                filter_templates=templates, cursor_secret=self.cursor_secret)
-            return libraries, vectors, tuple(records), templates, value['max_depth'], capabilities, adapter
+                filter_templates=templates, cursor_secret=self.cursor_secret,
+                query_rules=tuple(rules))
+            return (libraries, vectors, tuple(records), templates, value['max_depth'],
+                    capabilities, adapter, aliases, tuple(rules))
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             raise ServiceError('LOCAL_SEARCH_UNAVAILABLE', 'Trusted local search fixture invalid', 503) from None
 
@@ -127,7 +146,7 @@ class LocalFirstSearch:
 
         return Authority()
 
-    def _local_configs(self):
+    def _local_configs(self, aliases):
         """Use saved configuration when present; otherwise expose only local grants.
 
         The fallback is confined to the explicit LOCAL_EXACT mode and never
@@ -143,7 +162,7 @@ class LocalFirstSearch:
                 libraries = tuple(lib for lib in source.inventory(scope)
                                   if source.authorize(scope, 'search', lib.library_id))
                 entries = [{'library_id': lib.library_id, 'description': lib.description,
-                            'aliases': [lib.library_id]} for lib in libraries]
+                            'aliases': sorted({lib.library_id, *aliases[lib.library_id]})} for lib in libraries]
                 source_digest = digest([asdict(lib) for lib in libraries])
                 return {'version': 1, 'proposal_digest': source_digest,
                         'catalog_digest': source_digest, 'entries': entries}
@@ -157,11 +176,11 @@ class LocalFirstSearch:
         return Configs()
 
     def _router(self):
-        libraries, vectors, records, templates, depth, capabilities, adapter = self._fixture()
+        libraries, vectors, records, templates, depth, capabilities, adapter, aliases, rules = self._fixture()
         router = build_configured_routing(tasks=self.service.repository,
-            projects=self.service.projects, configs=self.local_configs,
+            projects=self.service.projects, configs=self._local_configs(aliases),
             authorization=self._authority(), embeddings=adapter, capabilities=capabilities)
-        return router, (libraries, vectors, records, templates, depth)
+        return router, (libraries, vectors, records, templates, depth, adapter, rules)
 
     def _source_digest(self):
         libraries, grants = self.source.load()
@@ -181,9 +200,18 @@ class LocalFirstSearch:
         return router, fixture, preview
 
     def preview(self, actor, task_id):
-        _, _, preview = self._preview(actor, task_id)
-        return {**preview.to_view(), 'execution_enabled': True, 'mode': 'LOCAL_EXACT',
-                'note': '仅本地测试向量；未批准、未执行、未接真实 Milvus/模型/图片。'}
+        _, fixture, preview = self._preview(actor, task_id)
+        adapter = fixture[5]
+        context = AccessContext(actor, task_id, 'search', preview.authorization_version)
+        view = preview.to_view()
+        for route, row in zip(preview.routes, view['routes']):
+            row['options'] = [option for option, capability in zip(row['options'], route.options)
+                              if adapter.can_encode_query(context, route.query_text, capability.binding)]
+            row['availability'] = ('available' if row['options'] else
+                                   'query_encoding_unavailable' if route.options else
+                                   'no_available_index')
+        return {**view, 'execution_enabled': True, 'mode': 'LOCAL_EXACT',
+                'note': '仅本地显式词规则和测试向量；未批准、未执行、未接真实 Milvus/模型/图片。'}
 
     def prepare(self, actor, task_id, *, routing_digest, choices):
         router, _, preview = self._preview(actor, task_id)
@@ -193,6 +221,8 @@ class LocalFirstSearch:
             selected = tuple(QueryRouteChoice(**choice) for choice in choices)
         except (TypeError, KeyError):
             raise ServiceError('INVALID_ROUTE_SELECTION', 'Invalid route choices', 422) from None
+        if {choice.branch_id for choice in selected} != {route.branch_id for route in preview.routes}:
+            raise ServiceError('BRANCH_SELECTION_INCOMPLETE', 'Select an index for every query term', 422)
         current = self.repository.get_current(actor, task_id)
         epoch = 1 if current is None else current.epoch + 1
         plan = router.prepare(actor, task_id, preview=preview, choices=selected, epoch=epoch)
@@ -216,14 +246,15 @@ class LocalFirstSearch:
                 'note': '已确认整组计划；尚未执行检索，需显式启动。'}, replay
 
     def _adapter_for_plan(self, actor, task_id, approved):
-        libraries, vectors, records, templates, depth, _, _ = self._fixture()
+        libraries, vectors, records, templates, depth, _, _, _, rules = self._fixture()
         if any(member.plan.request.filter_template_ref not in templates for member in approved.members):
             raise ServiceError('INDEX_SNAPSHOT_EXPIRED', 'Local fixture changed since approval', 409)
         context = AccessContext(actor, task_id, 'retrieval', 'current')
         return LocalVectorRetrieval(self._authority(), libraries=libraries, query_vectors=vectors,
             approved=tuple(ApprovedFixture(context, member.plan.request, (), depth)
                            for member in approved.members), records=records,
-            filter_templates=templates, cursor_secret=self.cursor_secret)
+            filter_templates=templates, cursor_secret=self.cursor_secret,
+            query_rules=rules)
 
     def tick(self, actor, task_id, *, max_requests):
         approved = self.repository.get_current(actor, task_id)
@@ -234,6 +265,10 @@ class LocalFirstSearch:
             max_requests=max_requests)
         return {**result, 'mode': 'LOCAL_EXACT',
                 'note': '仅记录原始检索页；未清洗、未计算有效素材数。'}
+
+    def progress(self, actor, task_id):
+        self.service.get_task(actor, task_id)
+        return read_retrieval_progress(self.repository, actor, task_id)
 
     def candidates(self, actor, task_id):
         approved = self.repository.get_current(actor, task_id)
