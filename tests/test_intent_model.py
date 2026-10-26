@@ -27,8 +27,8 @@ def item(quote="不要文字", **changes):
     return result | changes
 
 
-def response(items=None, reason="stop"):
-    content = {"media_type": "image", "items": [item()] if items is None else items}
+def response(items=None, reason="stop", media_type="image"):
+    content = {"media_type": media_type, "items": [item()] if items is None else items}
     return json.dumps({"choices": [{"finish_reason": reason, "message": {"content": json.dumps(content)}}]}).encode()
 
 
@@ -67,8 +67,25 @@ class IntentModelTest(unittest.TestCase):
         self.assertEqual(result["interpretation"]["items"][0]["start"], 5)
         self.assertTrue(result["review"]["has_blockers"])
 
-    def test_hallucinated_quote_rejected(self):
-        self.assert_code("MODEL_GROUNDING_FAILED", lambda: self.client(Opener(response([item("完全不同")]))).interpret("不要文字"))
+    def test_hallucinated_quote_falls_back_to_unresolved_original(self):
+        raw = "100个盒马各种各样的姿势"
+        result = self.client(Opener(response([item("100张"), item("各种各样的姿势")]))).interpret(raw)
+        self.assertEqual(result["mode"], "SAFE_CLARIFICATION")
+        self.assertEqual(result["interpretation"]["items"][0]["quote"], raw)
+        self.assertEqual(result["review"]["items"][0]["quote"], raw)
+        self.assertEqual(result["review"]["items"][0]["kind"], "unresolved")
+        self.assertIsNone(result["review"]["media_type"])
+        self.assertTrue(result["review"]["has_blockers"])
+        self.assertFalse(result["review"]["execution_allowed"])
+        self.assertNotIn("100张", json.dumps(result, ensure_ascii=False))
+
+    def test_invalid_model_media_type_falls_back_without_client_spec_error(self):
+        raw = "100个盒马各种各样的姿势\n图片"
+        result = self.client(Opener(response([item(raw)], media_type="unknown"))).interpret(raw)
+        self.assertEqual(result["mode"], "SAFE_CLARIFICATION")
+        self.assertIsNone(result["review"]["media_type"])
+        self.assertEqual(result["review"]["items"][0]["quote"], raw)
+        self.assertFalse(result["review"]["execution_allowed"])
 
     def test_model_cannot_inject_approval_or_offsets(self):
         for key in ("execution_allowed", "start", "tenant_id", "script"):

@@ -4,6 +4,7 @@ import unittest
 
 from dsh_retrieval.adapters.task_storage.sqlite import SQLiteTaskRepository
 from dsh_retrieval.errors import ServiceError
+from dsh_retrieval.expansion_models import preview_edited_groups
 from dsh_retrieval.models import Actor
 from dsh_retrieval.service import InMemoryTaskRepository
 from draft_helpers import confirmation, make_service
@@ -79,6 +80,26 @@ class FeedbackTest(unittest.TestCase):
             self.actor, self.task_id, "apply", self.confirmation_body(draft))
         self.assertTrue(replayed)
         self.assertEqual(replay, result)
+
+    def test_expansion_feedback_updates_terms_and_target_only_after_confirmation(self):
+        plan = preview_edited_groups(None, [{'primary_label': '狗', 'auxiliary_terms': [
+            '狗在草地奔跑', '狗接飞盘', '狗在公园散步', '狗与主人玩耍', '狗在户外训练']}])['plan']
+        draft, _ = self.save(text='只需要5张图，要五个召回词，主体是狗，不是狗的情绪',
+                             grouped_expansion=plan, target_count=5)
+        before = self.service.list_revisions(self.actor, self.task_id)[-1]['proposal']['query_spec']
+        self.assertNotEqual(before['target_count'], 5)
+        self.assertEqual(draft['proposal']['query_spec']['target_count'], 5)
+        self.assertEqual(len(draft['proposal']['query_spec']['grouped_expansion']['groups'][0]['auxiliary_terms']), 5)
+        result, _ = self.service.confirm_feedback(self.actor, self.task_id, 'apply-expansion',
+                                                  self.confirmation_body(draft))
+        self.assertEqual(result['task']['task_id'], self.task_id)
+        confirmed = self.service.list_revisions(self.actor, self.task_id)[-1]['proposal']['query_spec']
+        self.assertEqual(confirmed['target_count'], 5)
+        self.assertEqual(confirmed['refill_policy']['target_count'], 5)
+        self.assertEqual(confirmed['grouped_expansion']['groups'][0]['primary_label'], '狗')
+
+    def test_expansion_feedback_requires_plan_and_target_together(self):
+        self.assert_code('INVALID_SPEC', lambda: self.save(target_count=5))
 
     def test_reject_does_not_change_task(self):
         draft, _ = self.save()

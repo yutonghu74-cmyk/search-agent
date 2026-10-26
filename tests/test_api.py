@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 from dsh_retrieval.adapters.projects import LocalProjectAccess
 from dsh_retrieval.api import create_handler
 from dsh_retrieval.errors import ServiceError
+from dsh_retrieval.expansion_models import preview_edited_groups
 from dsh_retrieval.service import InMemoryTaskRepository, TaskService
 from draft_helpers import BODY
 
@@ -106,6 +107,7 @@ class ApiTest(unittest.TestCase):
             f"/v1/retrieval/conversations/{draft['conversation_id']}")
         self.assertEqual([item["kind"] for item in conversation["messages"]], ["request", "feedback"])
         self.assertEqual([item["revision"] for item in conversation["confirmations"]], [1, 2])
+
         status, progress, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/progress")
         self.assertEqual(status, 200)
         self.assertEqual(progress["revision"], 2)
@@ -141,6 +143,31 @@ class ApiTest(unittest.TestCase):
             f"/v1/retrieval/tasks/{task['task_id']}/results?view=accepted&limit=1&cursor={first['next_cursor']}")
         self.assertEqual(second["items"][0]["candidate_id"], "asset-b")
         self.assertIsNone(second["next_cursor"])
+
+    def test_existing_feedback_draft_can_be_revised_with_expansion(self):
+        status, draft, _ = self.request('/v1/retrieval/projects/demo/drafts', body=BODY, key='revise-draft')
+        self.assertEqual(status, 200)
+        status, task, _ = self.request('/v1/retrieval/tasks', key='revise-task', body={
+            'draft_id': draft['draft_id'], 'expected_draft_version': draft['draft_version'],
+            'proposal_digest': draft['proposal_digest'], 'action': 'confirm'})
+        self.assertEqual(status, 202)
+        task_id = task['task_id']
+        status, pending, _ = self.request(f'/v1/retrieval/tasks/{task_id}/feedback', key='old-feedback', body={
+            'text': '要五个召回词', 'scope': 'all', 'expected_revision': 1,
+            'expected_task_version': task['task_version']})
+        self.assertEqual(status, 200)
+        plan = preview_edited_groups(None, [{'primary_label': '狗', 'auxiliary_terms': [
+            '狗在草地奔跑', '狗接飞盘', '狗在公园散步', '狗与主人玩耍', '狗在户外训练']}])['plan']
+        status, revised, _ = self.request(
+            f"/v1/retrieval/tasks/{task_id}/feedback/{pending['draft_id']}", key='revised-feedback', body={
+                'text': '只需要5张图，要五个召回词，主体是狗，不是狗的情绪',
+                'scope': 'all', 'expected_revision': 1, 'expected_task_version': task['task_version'],
+                'expected_draft_version': pending['draft_version'],
+                'target_count': 5, 'grouped_expansion': plan})
+        self.assertEqual(status, 200)
+        self.assertEqual(revised['draft_id'], pending['draft_id'])
+        self.assertEqual(revised['draft_version'], pending['draft_version'] + 1)
+        self.assertEqual(revised['proposal']['query_spec']['target_count'], 5)
 
     def test_feedback_requires_identity_and_idempotency_key(self):
         status, body, _ = self.request("/v1/retrieval/tasks/missing/feedback", body={}, identity=False)

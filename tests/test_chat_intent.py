@@ -75,11 +75,28 @@ class ChatIntentTest(unittest.TestCase):
         self.assertEqual(self.call(dict(body, extra=True))[0], 422)
         self.assertEqual(self.transport.calls, [])
 
-    def test_model_quote_must_match_original(self):
-        self.transport.result['items'][0]['quote'] = '猫'
-        status, data = self.call({'raw_request': '找狗图', 'dimension_id': 'default', 'llm_id': 'text'})
-        self.assertEqual(status, 502)
-        self.assertEqual(data['code'], 'MODEL_GROUNDING_FAILED')
+    def test_model_quote_mismatch_returns_safe_clarification(self):
+        raw = '100个盒马各种各样的姿势'
+        self.transport.result['items'][0]['quote'] = '100张'
+        status, data = self.call({'raw_request': raw, 'dimension_id': 'default', 'llm_id': 'text'})
+        self.assertEqual(status, 200)
+        self.assertEqual(data['mode'], 'SAFE_CLARIFICATION')
+        self.assertEqual(data['review']['items'][0]['quote'], raw)
+        self.assertEqual(data['review']['items'][0]['kind'], 'unresolved')
+        self.assertFalse(data['review']['execution_allowed'])
+        self.assertFalse(data['review']['creates_task'])
+        self.assertNotIn('100张', json.dumps(data, ensure_ascii=False))
+
+    def test_invalid_model_media_type_is_not_an_invalid_user_spec(self):
+        raw = '100个盒马各种各样的姿势\n图片'
+        self.transport.result['media_type'] = 'unknown'
+        self.transport.result['items'][0]['quote'] = raw
+        status, data = self.call({'raw_request': raw, 'dimension_id': 'default', 'llm_id': 'text'})
+        self.assertEqual(status, 200)
+        self.assertEqual(data['mode'], 'SAFE_CLARIFICATION')
+        self.assertIsNone(data['review']['media_type'])
+        self.assertFalse(data['review']['execution_allowed'])
+        self.assertFalse(data['review']['creates_task'])
 
 
 if __name__ == '__main__':

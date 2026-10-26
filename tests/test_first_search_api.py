@@ -45,6 +45,7 @@ class FirstSearchApiTest(unittest.TestCase):
             return response.status, json.loads(response.read()), dict(response.headers)
 
     def test_explicit_choice_confirmation_execution_and_safe_candidates(self):
+        self.assertEqual(self.request('/progress')[1]['status'], 'unapproved')
         status, preview, _ = self.request()
         self.assertEqual((status, preview['mode'], preview['status']), (200, 'LOCAL_EXACT', 'unapproved'))
         route = preview['routes'][0]
@@ -62,6 +63,7 @@ class FirstSearchApiTest(unittest.TestCase):
             'proposal_digest': proposal['proposal_digest'],
             'expected_task_version': proposal['expected_task_version'], 'action': 'confirm'})
         self.assertEqual((status, approved['status']), (200, 'approved'))
+        self.assertFalse(self.request('/progress')[1]['pagination_stopped'])
         replay = self.request('/confirm', method='POST', key='approve', body={
             'proposal_digest': proposal['proposal_digest'],
             'expected_task_version': proposal['expected_task_version'], 'action': 'confirm'})
@@ -70,11 +72,13 @@ class FirstSearchApiTest(unittest.TestCase):
         self.assertEqual((status, batch['network_attempts']), (200, 2))
         status, candidates, _ = self.request('/candidates')
         self.assertEqual((status, candidates['raw_hit_count']), (200, 4))
+        self.assertEqual(self.request('/progress')[1]['task_id'], self.fixture.task_id)
         self.assertIsNone(candidates['accepted_count'])
         raw = json.dumps(candidates)
         for secret in ('authorized_media_ref', 'media:dog-1', 'filter_template_ref', 'cursor_secret'):
             self.assertNotIn(secret, raw)
         self.assertEqual(self.request('/candidates', user='other')[0], 404)
+        self.assertEqual(self.request('/progress', user='other')[0], 404)
 
     def test_disabled_invalid_and_unauthenticated_requests(self):
         self.assertEqual(self.request(user=None)[0], 401)

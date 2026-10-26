@@ -10,6 +10,7 @@ import unittest
 from dsh_retrieval.adapters.projects import LocalProjectAccess
 from dsh_retrieval.adapters.task_storage.sqlite import SQLiteTaskRepository, dump
 from dsh_retrieval.errors import ServiceError
+from dsh_retrieval.expansion_models import preview_edited_groups
 from dsh_retrieval.first_search_local import LocalFirstSearch
 from dsh_retrieval.local_catalog import build_local_catalog
 from dsh_retrieval.model_runtime import ModelRuntime
@@ -30,7 +31,7 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.source = self.root / 'catalog.json'
         shutil.copyfile(CONFIG / 'local-first-search-catalog.example.json', self.source)
         self.fixture_path = self.root / 'fixture.json'
-        shutil.copyfile(CONFIG / 'local-first-search.example.json', self.fixture_path)
+        shutil.copyfile(CONFIG / 'local-first-search-guided.example.json', self.fixture_path)
         self.ledger = self.root / 'ledger.sqlite3'
         self.config_ledger = self.root / 'config.sqlite3'
         self.actor = Actor('tenant-a', 'user-a')
@@ -70,8 +71,10 @@ class FirstSearchLocalTest(unittest.TestCase):
         return proposed
 
     def test_two_index_first_batch_restart_and_candidate_mapping(self):
+        self.assertEqual(self.local.progress(self.actor, self.task_id)['status'], 'unapproved')
         proposed = self.select_and_approve()
         self.assertEqual(len(proposed['members']), 2)
+        self.assertFalse(self.local.progress(self.actor, self.task_id)['pagination_stopped'])
         first = self.local.tick(self.actor, self.task_id, max_requests=2)
         self.assertEqual(first['network_attempts'], 2)
         self.assertEqual({row['status'] for row in first['outcomes']}, {'committed'})
@@ -90,6 +93,8 @@ class FirstSearchLocalTest(unittest.TestCase):
         last = restarted.tick(self.actor, self.task_id, max_requests=2)
         self.assertEqual(last['network_attempts'], 1)
         self.assertTrue(last['pagination_stopped'])
+        self.assertTrue(restarted.progress(self.actor, self.task_id)['pagination_stopped'])
+        self.assertEqual(restarted.progress(self.actor, self.task_id)['task_id'], self.task_id)
         all_candidates = restarted.candidates(self.actor, self.task_id)
         self.assertEqual(all_candidates['raw_hit_count'], 5)
         self.assertEqual([item['status'] for item in all_candidates['items']].count('mapping_missing'), 1)
@@ -104,6 +109,60 @@ class FirstSearchLocalTest(unittest.TestCase):
             self.local.prepare(self.actor, self.task_id, routing_digest='changed', choices=[])
         self.assertEqual(error.exception.code, 'ROUTING_CHANGED')
         self.assertFalse(preview['status'] == 'approved')
+
+    def test_guided_terms_use_registered_local_rules_and_keep_source_labels(self):
+        body = json.loads(json.dumps(BODY))
+        body['query_spec']['raw_request'] = '找狗图片\n3张'
+        body['query_spec']['grouped_expansion'] = preview_edited_groups(None, [
+            {'primary_label': '狗', 'auxiliary_terms': ['柯基', '金毛', '宠物狗']}])['plan']
+        created, _ = self.tasks.create_task(self.actor, 'guided-task',
+            confirmation(self.tasks, self.actor, key='guided-draft', body=body))
+        task_id = created['task_id']
+        preview = self.local.preview(self.actor, task_id)
+        self.assertEqual(len(preview['routes']), 5)
+        self.assertTrue(all(route['availability'] == 'available' and
+                            [option['binding_id'] for option in route['options']] == ['dog-v1']
+                            for route in preview['routes']))
+        choices = [{'branch_id': route['branch_id'], 'binding_id': 'dog-v1', 'batch_size': 2}
+                   for route in preview['routes']]
+        with self.assertRaises(ServiceError) as error:
+            self.local.prepare(self.actor, task_id, routing_digest=preview['routing_digest'],
+                               choices=choices[:-1])
+        self.assertEqual(error.exception.code, 'BRANCH_SELECTION_INCOMPLETE')
+        proposed = self.local.prepare(self.actor, task_id,
+            routing_digest=preview['routing_digest'], choices=choices)
+        self.local.confirm(self.actor, task_id, proposal_digest=proposed['proposal_digest'],
+            expected_task_version=proposed['expected_task_version'], action='confirm', key='guided-approve')
+        self.local.tick(self.actor, task_id, max_requests=5)
+        candidates = self.local.candidates(self.actor, task_id)
+        self.assertEqual(candidates['raw_hit_count'], 10)
+        self.assertEqual({item['query_text'] for item in candidates['items']},
+                         {'找狗图片 3张', '狗', '狗 柯基', '狗 金毛', '狗 宠物狗'})
+        self.assertTrue(all(item['binding_id'] == 'dog-v1' for item in candidates['items']))
+
+    def test_preview_distinguishes_missing_index_from_missing_query_encoding(self):
+        for index, (raw, expected) in enumerate((
+                ('城市风景', 'no_available_index'), ('dogs', 'query_encoding_unavailable'))):
+            body = json.loads(json.dumps(BODY))
+            body['query_spec']['raw_request'] = raw
+            created, _ = self.tasks.create_task(self.actor, f'unavailable-{index}',
+                confirmation(self.tasks, self.actor, key=f'unavailable-draft-{index}', body=body))
+            preview = self.local.preview(self.actor, created['task_id'])
+            self.assertEqual(preview['routes'][0]['availability'], expected)
+            self.assertEqual(preview['routes'][0]['options'], [])
+
+    def test_legacy_fixture_stays_readable_and_bad_rule_fails_startup(self):
+        data = json.loads(self.fixture_path.read_text())
+        rules = data.pop('query_rules')
+        self.fixture_path.write_text(json.dumps(data))
+        legacy = self.make_local()
+        self.assertEqual(legacy.preview(self.actor, self.task_id)['routes'][0]['availability'], 'available')
+        data['query_rules'] = rules
+        data['query_rules'][0]['values'] = [1.0]
+        self.fixture_path.write_text(json.dumps(data))
+        with self.assertRaises(ServiceError) as error:
+            self.make_local()
+        self.assertEqual(error.exception.code, 'LOCAL_SEARCH_UNAVAILABLE')
 
     def test_revocation_blocks_candidate_read(self):
         self.select_and_approve()

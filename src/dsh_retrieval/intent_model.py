@@ -164,9 +164,29 @@ class IntentModelClient:
             fail("MODEL_UNAVAILABLE", "Configured model connection failed; no automatic retry")
         except (ValueError, TypeError, KeyError, IndexError, AttributeError):
             fail("MODEL_RESPONSE_INVALID", "Model did not return valid interpretation JSON")
-        proposal = self._ground(raw_request, parsed)
+        try:
+            proposal = self._ground(raw_request, parsed)
+        except ServiceError as error:
+            if error.code not in ("MODEL_GROUNDING_FAILED", "MODEL_MEDIA_INVALID"):
+                raise
+            return self._safe_clarification(raw_request)
         report = self.reviewer.review(raw_request, proposal)
         return {"mode": "LIVE_MODEL_INTERPRETATION", "provider": self.config.provider,
+                "model": self.config.model, "interpretation": proposal, "review": report}
+
+    def _safe_clarification(self, raw_request):
+        # Never repair or accept a model-mutated quote or invalid media type.
+        # Drop the entire interpretation; only the original text is retained.
+        proposal = {"schema_version": "intent-interpretation@1",
+                    "raw_digest": digest({"raw_request": raw_request}),
+                    "media_type": None,
+                    "items": [{"item_id": "r1", "start": 0, "end": len(raw_request),
+                               "quote": raw_request, "kind": "unresolved",
+                               "hardness": "unspecified", "predicate_ref": None,
+                               "operator": None, "value": None,
+                               "question": "请重新说明需要的图片内容和数量。"}]}
+        report = self.reviewer.review(raw_request, proposal)
+        return {"mode": "SAFE_CLARIFICATION", "provider": self.config.provider,
                 "model": self.config.model, "interpretation": proposal, "review": report}
 
     @staticmethod
@@ -175,6 +195,8 @@ class IntentModelClient:
         if (not isinstance(parsed, dict) or set(parsed) != {"media_type", "items"}
                 or not isinstance(parsed["items"], list) or len(parsed["items"]) > 100):
             fail("MODEL_INTERPRETATION_INVALID", "Unexpected interpretation schema")
+        if parsed["media_type"] not in (None, "image", "video", "text"):
+            fail("MODEL_MEDIA_INVALID", "Unexpected model media type")
         rows = []
         for index, item in enumerate(parsed["items"]):
             if not isinstance(item, dict) or set(item) != fields:

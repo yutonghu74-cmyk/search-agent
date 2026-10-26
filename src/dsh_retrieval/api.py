@@ -29,12 +29,14 @@ from .local_catalog import build_local_catalog
 from .routing_preview import LocalRoutingPreview
 from .retrieval_progress import build_local_demo_progress_repository, read_retrieval_progress
 from .first_search_local import LocalFirstSearch
+from .dialogue import DialogueStore, DialogueCoordinator
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
 DRAFT_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/drafts(?:/([^/]+))?$")
 FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$")
 FEEDBACK_SUGGESTION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback-suggestions$")
+FOLLOWUP_INTENT_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/followup-intent$")
 CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
 REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
 PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/progress$")
@@ -44,12 +46,14 @@ PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conver
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
 INTENT_PREVIEW_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/intent-preview$")
+DIALOGUE_TURN_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-turn$")
+DIALOGUE_SESSION_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)$")
 QUERY_BRANCHES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-branches$")
 MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
 CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
 ROUTING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-routing$")
 RETRIEVAL_PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/retrieval-progress$")
-FIRST_SEARCH_GET_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search(?:/(candidates))?$")
+FIRST_SEARCH_GET_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search(?:/(candidates|progress))?$")
 FIRST_SEARCH_POST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search/(prepare|confirm|tick)$")
 
 
@@ -62,6 +66,7 @@ class Handler(BaseHTTPRequestHandler):
     routing_preview: Any = None
     plan_set_repository: Any = None
     first_search: Any = None
+    dialogue: Any = None
 
     def _catalog_action(self, match, post=False):
         actor = self._actor()
@@ -134,6 +139,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(error.status, error.as_dict(trace_id=trace_id))
 
     def do_POST(self) -> None:  # noqa: N802
+        dialogue_match = DIALOGUE_TURN_PATH.fullmatch(self.path)
+        if dialogue_match:
+            def dialogue_action():
+                if self.dialogue is None:
+                    raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
+                return HTTPStatus.OK, self.dialogue.turn(self._actor(), dialogue_match.group(1), self._body()), False
+            self._run(dialogue_action)
+            return
         first_search_match = FIRST_SEARCH_POST_PATH.fullmatch(self.path)
         if first_search_match:
             def first_search_action():
@@ -160,17 +173,97 @@ class Handler(BaseHTTPRequestHandler):
         draft_match = DRAFT_PATH.fullmatch(self.path)
         feedback_match = FEEDBACK_PATH.fullmatch(self.path)
         suggestion_match = FEEDBACK_SUGGESTION_PATH.fullmatch(self.path)
+        followup_match = FOLLOWUP_INTENT_PATH.fullmatch(self.path)
         confirmation_match = CONFIRMATION_PATH.fullmatch(self.path)
         expansion_match = EXPANSIONS_PATH.fullmatch(self.path)
         intent_match = INTENT_PREVIEW_PATH.fullmatch(self.path)
         if (self.path != "/v1/retrieval/tasks" and draft_match is None
-                and not (feedback_match and feedback_match.group(2) is None)
-                and suggestion_match is None and confirmation_match is None
+                and feedback_match is None
+                and suggestion_match is None and followup_match is None and confirmation_match is None
                 and expansion_match is None and intent_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
 
         def action() -> tuple[int, dict[str, Any], bool]:
+            if followup_match:
+                actor = self._actor()
+                body = self._body()
+                required = {'text', 'llm_id', 'expected_revision', 'expected_task_version'}
+                if (not required <= set(body) or set(body) - required - {'draft_preview', 'recent_messages'}
+                        or not isinstance(body['text'], str) or not isinstance(body['llm_id'], str)
+                        or type(body['expected_revision']) is not int
+                        or type(body['expected_task_version']) is not int):
+                    raise ServiceError('INVALID_SPEC', 'Bound follow-up classification request required', 422)
+                task_id = followup_match.group(1)
+                task = self.service.get_task(actor, task_id)
+                if (task['confirmed_revision'] != body['expected_revision']
+                        or task['task_version'] != body['expected_task_version']):
+                    raise ServiceError('REVISION_CONFLICT', 'Task changed; reload before classifying', 409)
+                revisions = self.service.list_revisions(actor, task_id)
+                revision = next((item for item in revisions
+                                 if item['revision'] == task['confirmed_revision']), None)
+                spec = revision['proposal']['query_spec'] if revision else None
+                if not spec:
+                    raise ServiceError('STORAGE_CORRUPT', 'Confirmed request unavailable', 500)
+                groups = (spec.get('grouped_expansion') or {}).get('groups', [])
+                current = [{'primary_label': group['primary_label'],
+                            'auxiliary_terms': group['auxiliary_terms']} for group in groups]
+                target_count = spec['target_count']
+                preview = body.get('draft_preview')
+                if preview is not None:
+                    try:
+                        if (not isinstance(preview, dict) or set(preview) != {'groups', 'target_count'}
+                                or type(preview['target_count']) is not int or not 1 <= preview['target_count'] <= 10000):
+                            raise ValueError('invalid preview')
+                        preview_edited_groups(None, preview['groups'])
+                    except ValueError:
+                        raise ServiceError('INVALID_SPEC', 'Invalid unconfirmed preview', 422) from None
+                    current, target_count = preview['groups'], preview['target_count']
+                messages = body.get('recent_messages', [])
+                if (not isinstance(messages, list) or len(messages) > 20 or any(
+                        not isinstance(item, dict) or set(item) != {'role', 'text'}
+                        or item['role'] not in ('user', 'assistant') or not isinstance(item['text'], str)
+                        or len(item['text']) > 2000 for item in messages)):
+                    raise ServiceError('INVALID_SPEC', 'Invalid conversation context', 422)
+                if self.dialogue is not None:
+                    messages = self.dialogue.store.task_history(actor, task['project_id'], task_id)
+                retrieval_context = {'status': 'unknown'}
+                if self.first_search is not None:
+                    try:
+                        progress = self.first_search.progress(actor, task_id)
+                        if progress['status'] == 'unapproved':
+                            routes = self.first_search.preview(actor, task_id)['routes']
+                            retrieval_context = {'status': 'unapproved', 'unavailable_queries': [
+                                {'query': row['query_text'], 'reason': row['availability']}
+                                for row in routes if not row['options']][:10]}
+                        elif (progress.get('revision') == task['confirmed_revision']
+                              and progress.get('generation') == task['run_generation']):
+                            members = progress['members']
+                            retrieval_context = {'status': progress['status'],
+                                'pagination_stopped': progress['pagination_stopped'],
+                                'committed_pages': sum(member['committed_pages'] for member in members),
+                                'stop_reasons': sorted({member['stop_reason'] for member in members if member['stop_reason']}),
+                                'mode': 'local_test', 'cleaning_completed': False}
+                    except ServiceError as error:
+                        if error.status in (401, 403, 404):
+                            raise
+                        retrieval_context = {'status': 'unavailable', 'reason': error.code}
+                result = self.model_runtime.classify_followup(
+                    spec['raw_request'], current, body['text'], body['llm_id'],
+                    task_context={'task_id': task_id, 'stage': task['stage'], 'run_status': task['run_status'],
+                                  'target_count': target_count, 'has_unconfirmed_preview': preview is not None,
+                                  'retrieval_progress': retrieval_context},
+                    recent_messages=messages)
+                after = self.service.get_task(actor, task_id)
+                if (after['confirmed_revision'] != task['confirmed_revision']
+                        or after['task_version'] != task['task_version']):
+                    raise ServiceError('REVISION_CONFLICT', 'Task changed during classification', 409)
+                if self.dialogue is not None:
+                    self.dialogue.store.append_task_turn(actor, task['project_id'], task_id, task['task_version'],
+                                                         body['text'], result.get('reply') or '本轮理解：' + result['kind'])
+                return HTTPStatus.OK, {'schema_version': 'followup-intent@1',
+                                       'task_id': task_id, 'base_revision': task['confirmed_revision'],
+                                       'base_task_version': task['task_version'], **result}, False
             if suggestion_match:
                 actor = self._actor()
                 body = self._body()
@@ -224,9 +317,18 @@ class Handler(BaseHTTPRequestHandler):
                 actor = self._actor()
                 body = self._body()
                 selection = body.pop('model_selection', None)
+                target_count = body.pop('target_count', None)
+                feedback_text = body.pop('feedback_text', None)
+                current_groups = body.pop('current_groups', None)
+                requested_terms_per_group = body.pop('requested_terms_per_group', None)
+                count_edits = body.pop('count_edits', None)
+                current_target_count = body.pop('current_target_count', None)
                 if selection is not None and (not isinstance(selection, dict) or set(selection) != {'llm', 'vlm'}):
                     raise ServiceError('INVALID_SPEC', 'Select LLM and VLM profile IDs', 422)
                 edited = set(body) == {"parent_label", "groups", "dimension_id"}
+                if any(value is not None for value in (target_count, feedback_text, current_groups,
+                                                       requested_terms_per_group, count_edits, current_target_count)) and (edited or selection is None):
+                    raise ServiceError('INVALID_SPEC', 'Count or feedback requires model expansion', 422)
                 if not edited and set(body) != {"raw_request", "dimension_id"}:
                     raise ServiceError("INVALID_SPEC", "expansion preview requires raw_request and dimension_id", 422)
                 dimension = body["dimension_id"]
@@ -241,7 +343,12 @@ class Handler(BaseHTTPRequestHandler):
                         if edited:
                             return HTTPStatus.OK, self.model_runtime.bind(
                                 preview_edited_groups(body['parent_label'], body['groups']), binding), False
-                        result = self.model_runtime.expand(body['raw_request'], selection['llm'], selection['vlm'])
+                        result = self.model_runtime.expand(body['raw_request'], selection['llm'], selection['vlm'],
+                                                           target_count=target_count,
+                                                           feedback_text=feedback_text,
+                                                           current_groups=current_groups,
+                                                           requested_terms_per_group=requested_terms_per_group,
+                                                           count_edits=count_edits, current_target_count=current_target_count)
                         self.service.projects.require_access(actor, expansion_match.group(1), dimension, 'create')
                         return HTTPStatus.OK, result, False
                     if edited:
@@ -255,7 +362,8 @@ class Handler(BaseHTTPRequestHandler):
                 return HTTPStatus.OK, result, replayed
             if feedback_match:
                 result, replayed = self.service.save_feedback(
-                    self._actor(), feedback_match.group(1), self.headers.get("Idempotency-Key", ""), self._body())
+                    self._actor(), feedback_match.group(1), self.headers.get("Idempotency-Key", ""),
+                    self._body(), feedback_match.group(2))
                 return HTTPStatus.OK, result, replayed
             if confirmation_match:
                 result, replayed = self.service.confirm_feedback(
@@ -269,6 +377,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         path = parsed.path
+        dialogue_match = DIALOGUE_SESSION_PATH.fullmatch(path)
+        if dialogue_match:
+            def dialogue_action():
+                if parsed.query:
+                    raise ServiceError('INVALID_SPEC', 'Conversation URL has no query parameters', 422)
+                if self.dialogue is None:
+                    raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
+                return HTTPStatus.OK, self.dialogue.snapshot(self._actor(), *dialogue_match.groups()), False
+            self._run(dialogue_action)
+            return
         first_search_match = FIRST_SEARCH_GET_PATH.fullmatch(path)
         if first_search_match:
             def first_search_action():
@@ -279,6 +397,7 @@ class Handler(BaseHTTPRequestHandler):
                 actor = self._actor()
                 task_id, view = first_search_match.groups()
                 result = (self.first_search.candidates(actor, task_id) if view == 'candidates'
+                          else self.first_search.progress(actor, task_id) if view == 'progress'
                           else self.first_search.preview(actor, task_id))
                 return HTTPStatus.OK, result, False
             self._run(first_search_action)
@@ -438,7 +557,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None, catalog_config=None,
-                   routing_preview=None, plan_set_repository=None, first_search=None) -> type[Handler]:
+                   routing_preview=None, plan_set_repository=None, first_search=None, dialogue=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
@@ -450,6 +569,7 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.routing_preview = routing_preview
     BoundHandler.plan_set_repository = plan_set_repository
     BoundHandler.first_search = first_search
+    BoundHandler.dialogue = dialogue
     return BoundHandler
 
 
@@ -458,6 +578,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--demo-project", action="store_true", help="grant tenant-a/user-a access to demo/default")
     parser.add_argument("--ledger", help="local SQLite ledger path; omitted means in-memory storage")
+    parser.add_argument('--dialogue-ledger', help='separate SQLite ledger for unconfirmed conversation turns')
     parser.add_argument('--model-config', help='trusted model profile JSON path; keys are environment references')
     parser.add_argument('--catalog-source', help='trusted local existing-index inventory and explicit grants JSON')
     parser.add_argument('--catalog-ledger', help='independent local SQLite configuration file')
@@ -473,6 +594,9 @@ def main() -> None:
         parser.error('--query-capabilities requires --catalog-source and --catalog-ledger')
     if args.catalog_ledger and args.ledger and Path(args.catalog_ledger).resolve() == Path(args.ledger).resolve():
         parser.error('catalog ledger must be independent from task ledger')
+    if args.dialogue_ledger and any(Path(args.dialogue_ledger).resolve() == Path(path).resolve()
+                                    for path in (args.ledger, args.catalog_ledger) if path):
+        parser.error('dialogue ledger must be independent from task and catalog ledgers')
     if args.plan_set_progress and not (args.ledger and args.catalog_source and args.demo_project):
         parser.error('--plan-set-progress requires --ledger, --catalog-source and --demo-project')
     if args.local_first_search_fixture and not (args.ledger and args.catalog_source
@@ -484,6 +608,8 @@ def main() -> None:
     runtime = load_model_runtime(args.model_config) if args.model_config else ModelRuntime()
     catalog = build_local_catalog(args.catalog_source, args.catalog_ledger, runtime) if args.catalog_source else None
     service = TaskService(repository, LocalProjectAccess(grants))
+    dialogue = DialogueCoordinator(DialogueStore(Path(args.dialogue_ledger) if args.dialogue_ledger else None),
+                                   runtime, service.projects)
     routing = LocalRoutingPreview(service, catalog, args.catalog_source, args.query_capabilities) if args.query_capabilities else None
     plan_sets = build_local_demo_progress_repository(Path(args.ledger), projects=service.projects,
         source_path=args.catalog_source) if args.plan_set_progress else None
@@ -498,7 +624,7 @@ def main() -> None:
         plan_sets = first_search.repository
     handler = create_handler(service, model_runtime=runtime, catalog_config=catalog,
                              routing_preview=routing, plan_set_repository=plan_sets,
-                             first_search=first_search)
+                             first_search=first_search, dialogue=dialogue)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
@@ -508,6 +634,7 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        dialogue.store.close()
 
 
 if __name__ == "__main__":
