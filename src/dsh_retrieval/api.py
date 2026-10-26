@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import uuid
 import argparse
+import subprocess
+from datetime import datetime, timezone
+from contextlib import nullcontext
 from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -53,6 +57,7 @@ MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
 CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
 ROUTING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-routing$")
 RETRIEVAL_PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/retrieval-progress$")
+AGENT_RUNS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/agent-runs$")
 FIRST_SEARCH_GET_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search(?:/(candidates|progress))?$")
 FIRST_SEARCH_POST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search/(prepare|confirm|tick)$")
 
@@ -67,6 +72,7 @@ class Handler(BaseHTTPRequestHandler):
     plan_set_repository: Any = None
     first_search: Any = None
     dialogue: Any = None
+    build_info: dict[str, Any] = {}
 
     def _catalog_action(self, match, post=False):
         actor = self._actor()
@@ -132,7 +138,10 @@ class Handler(BaseHTTPRequestHandler):
     def _run(self, action: Any) -> None:
         trace_id = self._trace_id()
         try:
-            status, body, replayed = action()
+            scope = getattr(self.model_runtime, 'request_scope', None)
+            with (scope(self.headers.get('X-Tenant-Id', ''), self.headers.get('X-User-Id', ''),
+                        trace_id, urlsplit(self.path).path) if scope else nullcontext()):
+                status, body, replayed = action()
             body["trace_id"] = trace_id
             self._json(status, body, replayed=replayed)
         except ServiceError as error:
@@ -248,12 +257,16 @@ class Handler(BaseHTTPRequestHandler):
                         if error.status in (401, 403, 404):
                             raise
                         retrieval_context = {'status': 'unavailable', 'reason': error.code}
-                result = self.model_runtime.classify_followup(
-                    spec['raw_request'], current, body['text'], body['llm_id'],
-                    task_context={'task_id': task_id, 'stage': task['stage'], 'run_status': task['run_status'],
-                                  'target_count': target_count, 'has_unconfirmed_preview': preview is not None,
-                                  'retrieval_progress': retrieval_context},
-                    recent_messages=messages)
+                scope = getattr(self.model_runtime, 'business_scope', None)
+                with (scope(project_id=task['project_id'], task_id=task_id,
+                            task_version=task['task_version'], revision=task['confirmed_revision'],
+                            generation=task['run_generation']) if scope else nullcontext()):
+                    result = self.model_runtime.classify_followup(
+                        spec['raw_request'], current, body['text'], body['llm_id'],
+                        task_context={'task_id': task_id, 'stage': task['stage'], 'run_status': task['run_status'],
+                                      'target_count': target_count, 'has_unconfirmed_preview': preview is not None,
+                                      'retrieval_progress': retrieval_context},
+                        recent_messages=messages)
                 after = self.service.get_task(actor, task_id)
                 if (after['confirmed_revision'] != task['confirmed_revision']
                         or after['task_version'] != task['task_version']):
@@ -288,8 +301,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(base, str):
                     raise ServiceError('STORAGE_CORRUPT', 'Confirmed request unavailable', 500)
                 selection = body['model_selection']
-                suggestion = self.model_runtime.suggest_cleaning(base, draft['feedback_text'],
-                                                                  selection['llm'], selection['vlm'])
+                scope = getattr(self.model_runtime, 'business_scope', None)
+                with (scope(project_id=task['project_id'], task_id=task_id,
+                            task_version=task['task_version'], revision=task['confirmed_revision'],
+                            generation=task['run_generation']) if scope else nullcontext()):
+                    suggestion = self.model_runtime.suggest_cleaning(base, draft['feedback_text'],
+                                                                   selection['llm'], selection['vlm'])
                 current_draft = self.service.get_feedback(actor, task_id, body['draft_id'])
                 current_task = self.service.get_task(actor, task_id)
                 if (current_draft != draft or current_task['confirmed_revision'] != task['confirmed_revision']
@@ -377,6 +394,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         path = parsed.path
+        if path == '/v1/build':
+            if parsed.query:
+                self._json(422, {'code': 'INVALID_SPEC', 'message': 'Build URL has no query parameters'})
+            else:
+                self._json(200, self.build_info)
+            return
         dialogue_match = DIALOGUE_SESSION_PATH.fullmatch(path)
         if dialogue_match:
             def dialogue_action():
@@ -434,6 +457,20 @@ class Handler(BaseHTTPRequestHandler):
                     self.plan_set_repository, actor, task_id), False
             self._run(retrieval_progress_action)
             return
+        agent_runs_match = AGENT_RUNS_PATH.fullmatch(path)
+        if agent_runs_match:
+            def agent_runs_action():
+                actor = self._actor()
+                task_id = agent_runs_match.group(1)
+                self.service.get_task(actor, task_id)
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Agent runs have no query parameters', 422)
+                # Identifiers and status only; DSH sessions are audit records, not task state.
+                runs = getattr(self.model_runtime, 'agent_runs', None)
+                return HTTPStatus.OK, {'engine': self.model_runtime.status().get('engine'),
+                                       'items': runs(actor.tenant_id, task_id) if runs else []}, False
+            self._run(agent_runs_action)
+            return
         if path == '/catalog':
             self._asset('text/html', CATALOG_HTML)
             return
@@ -474,7 +511,8 @@ class Handler(BaseHTTPRequestHandler):
         def action() -> tuple[int, dict[str, Any], bool]:
             if models_match:
                 self.service.projects.require_access(self._actor(), models_match.group(1), 'default', 'read')
-                return HTTPStatus.OK, {'items': self.model_runtime.catalog()}, False
+                return HTTPStatus.OK, {'items': self.model_runtime.catalog(),
+                                      'runtime': self.model_runtime.status()}, False
             if branches_match:
                 actor = self._actor()
                 task_id = branches_match.group(1)
@@ -557,7 +595,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None, catalog_config=None,
-                   routing_preview=None, plan_set_repository=None, first_search=None, dialogue=None) -> type[Handler]:
+                   routing_preview=None, plan_set_repository=None, first_search=None, dialogue=None,
+                   build_info=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
@@ -570,7 +609,20 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.plan_set_repository = plan_set_repository
     BoundHandler.first_search = first_search
     BoundHandler.dialogue = dialogue
+    BoundHandler.build_info = build_info or {}
     return BoundHandler
+
+
+def source_version(root: Path) -> tuple[str | None, bool | None]:
+    """Capture source provenance once at startup; a running process must not follow later edits."""
+    try:
+        commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, capture_output=True,
+                                text=True, timeout=3, check=True).stdout.strip()
+        state = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=normal'], cwd=root,
+                               capture_output=True, text=True, timeout=3, check=True).stdout
+        return commit, not bool(state.strip())
+    except (OSError, subprocess.SubprocessError):
+        return None, None
 
 
 def main() -> None:
@@ -580,6 +632,12 @@ def main() -> None:
     parser.add_argument("--ledger", help="local SQLite ledger path; omitted means in-memory storage")
     parser.add_argument('--dialogue-ledger', help='separate SQLite ledger for unconfirmed conversation turns')
     parser.add_argument('--model-config', help='trusted model profile JSON path; keys are environment references')
+    parser.add_argument('--agent-runtime', choices=('dsh', 'direct'), default='dsh',
+                        help='DSH is the default; direct is an explicit legacy diagnostic mode')
+    parser.add_argument('--require-clean-source', action='store_true',
+                        help='refuse to serve when source is not an unchanged Git commit')
+    parser.add_argument('--dsh-python', help='Python executable with pinned requirements-dsh.lock installed')
+    parser.add_argument('--dsh-home', help='private root for isolated DSH turns (or explicit DSH_HOME)')
     parser.add_argument('--catalog-source', help='trusted local existing-index inventory and explicit grants JSON')
     parser.add_argument('--catalog-ledger', help='independent local SQLite configuration file')
     parser.add_argument('--query-capabilities', help='trusted exact text-to-image index capability JSON')
@@ -606,6 +664,17 @@ def main() -> None:
     grants = [("tenant-a", "user-a", "demo", "default")] if args.demo_project else []
     repository = SQLiteTaskRepository(Path(args.ledger)) if args.ledger else InMemoryTaskRepository()
     runtime = load_model_runtime(args.model_config) if args.model_config else ModelRuntime()
+    if args.model_config and args.agent_runtime == 'dsh':
+        from .adapters.dsh.runtime import DshModelRuntime
+        home = args.dsh_home or os.environ.get('DSH_HOME')
+        if not args.dsh_python or not home:
+            parser.error('DSH requires --dsh-python and --dsh-home (or explicit DSH_HOME)')
+        runtime = DshModelRuntime(runtime.profiles.values(), python=args.dsh_python, home=home)
+        runtime.check_installation()
+        recovered = runtime.recover()
+        if any(recovered.values()):
+            print(f"DSH recovery: closed {recovered['runs']} indexed and {recovered['audits']} "
+                  "audited run(s) as interrupted", file=sys.stderr)
     catalog = build_local_catalog(args.catalog_source, args.catalog_ledger, runtime) if args.catalog_source else None
     service = TaskService(repository, LocalProjectAccess(grants))
     dialogue = DialogueCoordinator(DialogueStore(Path(args.dialogue_ledger) if args.dialogue_ledger else None),
@@ -622,9 +691,17 @@ def main() -> None:
             source_path=args.catalog_source, capabilities_path=args.query_capabilities,
             fixture_path=args.local_first_search_fixture, cursor_secret=secret)
         plan_sets = first_search.repository
+    commit, clean = source_version(Path(__file__).resolve().parents[2])
+    if args.require_clean_source and (not commit or clean is not True):
+        parser.error('--require-clean-source requires a clean Git checkout')
+    build_info = {'commit': commit, 'source_clean': clean,
+                  'started_at': datetime.now(timezone.utc).isoformat(),
+                  'model_engine': runtime.status().get('engine'),
+                  'retrieval_mode': 'local_fixture' if first_search else 'unconfigured',
+                  'identity_mode': 'demo' if args.demo_project else 'external'}
     handler = create_handler(service, model_runtime=runtime, catalog_config=catalog,
                              routing_preview=routing, plan_set_repository=plan_sets,
-                             first_search=first_search, dialogue=dialogue)
+                             first_search=first_search, dialogue=dialogue, build_info=build_info)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)

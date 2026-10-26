@@ -1,5 +1,48 @@
 # LLM/VLM 接入与选择
 
+## DSH 运行入口（2026-10-24）
+
+带 `--model-config` 的 API 启动默认使用 DSH；必须提供 `--dsh-python`（已安装
+`requirements-dsh.lock` 的解释器）以及 `--dsh-home` 或显式 `DSH_HOME`。
+SDK/native runtime 固定 `0.2.1rc2`，`sdk-minimal` + 仓库受限 patch；版本不符启动失败。
+`--agent-runtime direct` 仅为显式旧版诊断模式，DSH 失败绝不自动回退。
+
+对话解析、首次意图解释、扩词、后续意图分类、清洗建议、目录建议均经 DSH 的
+Agent loop + pi-ai OpenAI-compatible provider（流式 Chat Completions 和 tool_calls）。
+VLM 图像评分仍是独立直接模型算子，不属于第二套 Agent loop。
+`GET .../models` 新增 `runtime`，不改变 `items`；不包含地址或凭据。
+
+模型实际可用工具仅 `mcp__retrieval__get_context` 与
+`mcp__retrieval__submit_proposal`。后者只提交当前轮候选 JSON，不能创建、批准、
+启动或完成任务；调用方继续执行原 schema、语义、权限、版本和确认校验。
+工具无任意路径、任务切换或网络参数；不同提案不能覆盖第一次提交。
+必须观察到两项成功工具事件及 DSH `completed`，才读取提案；自由文本不能替代工具回传。
+关闭 shell、文件、工作目录工具、MCP 资源工具和默认会话/插件信息上传扩展。
+
+每次推理在 principal 哈希目录下新建随机运行目录、DSH_HOME 和 session；使用服务端
+选择的当前会话摘要续聊，不直接恢复其他 DSH 会话。audit 关联请求、路由和已授权
+dialogue/session version；首轮 session 尚未创建，使用请求 trace 关联。现阶段不把
+DSH session 当作业务账本。
+运行目录仅本机用户可读；原始 DSH JSONL 含对话数据，不应上传或公开。
+
+运行索引（2026-10-25）：`DSH_HOME/runs.sqlite3`（0600）为每轮记录 run_id、租户哈希、
+principal 哈希、project/task/revision/generation/task_version 或 dialogue session/version、
+路由、模型 profile ID、状态、错误码和起止时间，不含原文、提示或提案。
+`GET /v1/retrieval/tasks/{id}/agent-runs` 先做任务读权限校验，再按同租户返回该任务
+最近 200 轮的上述标识与状态（direct 模式 `items` 为空）；这是审计映射，不是任务状态源。
+服务启动时把索引中仍为 running 的轮次及旧版 `audit.json` 中的 running 记录标为
+`interrupted / SERVICE_RESTARTED`；仅当记录的 pid 当前确为本 worker 模块时才终止其
+进程组，pid 已被复用则不发信号。中断轮次不续跑、不接收晚到提案，用户重发即新轮次。
+
+外层整个进程树默认限时 120 秒，超时终止 worker/native runtime/MCP 并拒收结果；
+上游重试由 DSH 负责（最多 1 次），业务 schema 修复仍最多 1 次，二者不混为执行重试。
+限流/认证/额度/超时仅返回白名单错误码和固定说明，不回传上游正文。
+模型绑定摘要额外包含 DSH 版本、受限配置及固定业务指令摘要；迁移前旧绑定不可冒充新绑定。
+
+本切片是 DSH 推理与受限提案入口落地，不是 v1.9 全量工具、生产认证、真实两库
+检索清洗或 Skill 审批发布平台验收。生产还需容器/网络出口控制、并发预算、日志保留
+与正式身份；进程隔离和移除工具不是完整 OS 沙箱。
+
 启动参数 `--model-config /absolute/private/models.json` 指定服务端 JSON：
 
 ```json
@@ -9,7 +52,15 @@
 ]}
 ```
 
-实际地址与密钥不得入库；配置仅引用环境变量。协议沿用现有聊天兼容协议 `/chat/completions`，要求 JSON 输出，VLM 要支持 image_url data URI。不是所有服务均兼容，必须实测。只接受 HTTPS，不跟随重定向；单次超时 60 秒，响应上限 1 MB。HTTP 429/502/503/504 和临时连接故障最多重试 2 次，等待 1、2 秒起，数字型 Retry-After 最多尊重到 5 秒；其他 HTTP 错误、无效 JSON、截断与 schema 错误不重试，不切换模型。端点、凭据及上游错误正文不进入目录/结果。
+每行还可选三项请求参数（缺省保持原行为）：`max_tokens`（256–32768；直接调用缺省
+3000，DSH 缺省 8000，DSH 经 patch 同步到 provider 模型上限）、`temperature`（0–2，
+缺省 0；写 `null` 则不发送该字段，用于拒绝 temperature 的模型）、
+`request_timeout_seconds`（5–300；直接调用缺省 60，DSH 单次请求缺省 90，显式配置时
+整轮限时至少为该值 +30 秒、不超过 300 秒）。其他键仍拒绝。非缺省参数进入模型绑定
+摘要，修改后旧绑定需重新确认；缺省参数不改变既有摘要。DSH provider 当前不发送
+temperature。推理型模型较慢、输出长，应实测后再调大这些值。
+
+实际地址与密钥不得入库；配置仅引用环境变量。只接受受信 HTTPS 服务。DSH 协议要求见上节，直接 VLM/旧版诊断入口沿用 `/chat/completions` JSON 输出，VLM 要支持 image_url data URI。不是所有服务均兼容，必须实测。直接调用不跟随重定向；单次超时 60 秒，响应上限 1 MB。HTTP 429/502/503/504 和临时连接故障最多重试 2 次，等待 1、2 秒起，数字型 Retry-After 最多尊重到 5 秒；其他 HTTP 错误不重试，不切换模型。无效扩词 JSON 可进行一次业务修复，非对象响应直接拒绝。端点、凭据及上游错误正文不进入目录/结果。DSH provider 的出口重定向策略尚未单独验收，生产需受控出口。
 
 项目授权的 `GET /v1/retrieval/projects/{id}/models` 返回模型 ID、角色、provider/model。无配置返回空目录，界面明确未配置，不提供假模型。当前目录为服务端部署级、已获该项目访问权者可见，不是独立多租户模型授权系统；部署只注册该环境获准发送数据的服务。
 

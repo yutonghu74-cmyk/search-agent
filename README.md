@@ -16,7 +16,7 @@ v1.8 及更早版本保留供追溯。代码仍为 P0 切片，尚未实现新�
 - OpenAPI 3.1、JSON Schema、PostgreSQL DDL；
 - A01、A22、A52、A64 基础测试及 A97/A104/A106 的部分本地测试，非完整验收。
 
-DSH、Milvus 和真实身份系统尚未接入。DJ 已接入内部 CleaningService，并通过合成图片真实联测；尚未开放清洗 HTTP 入口，不会在确认任务时自动执行。
+DSH 文本 Agent 已有独立 SDK 适配，需在启动时显式配置 `--dsh-python` 和 `--dsh-home` 才启用。真实 Milvus、素材授权和身份系统尚未接入。DJ 已接入内部 CleaningService，并通过合成图片真实联测；尚未开放清洗 HTTP 入口，不会在确认任务时自动执行。
 组件通过 `ports.py` 中的端口接入，不能用当前内存实现进入生产。确认后的任务停留在 PLANNING，当前没有调度 Worker。
 
 用户登录已确定对接内部 W3，当前状态为 `NOT_CONNECTED`，本地身份头仍仅供开发。
@@ -28,7 +28,28 @@ DSH、Milvus 和真实身份系统尚未接入。DJ 已接入内部 CleaningServ
 参见 [内网对接约定](docs/p0/internal-integration.md) 和
 [对接配置模板](config/internal-integration.example.json)。模板尚未接入运行时加载。
 
-DSH 的独立开发环境已安装在 `.venv-dsh`。当前冻结候选为 SDK/运行时 `0.2.1rc2`；依赖见 `requirements-dsh.lock`。运行任何 `dsh` 命令都必须显式提供隔离的 `DSH_HOME`，禁止隐式共享用户级目录。
+DSH 的独立开发环境已安装在 `.venv-dsh`。文本 Agent 入口使用固定 SDK/运行时 `0.2.1rc2`；依赖见 `requirements-dsh.lock`。运行任何 `dsh` 命令都必须显式提供隔离的 `DSH_HOME`，禁止隐式共享用户级目录。真实检索/清洗的生产接入状态仍按各模块单独验收。
+
+配置真实模型时，API 默认使用 DSH 推理与受限提案工具。例如在配置所引用的密钥环境变量已提供后：
+
+```bash
+PYTHONPATH=src python3 -m dsh_retrieval.api --demo-project --port 8094 \
+  --model-config /absolute/private/models.json \
+  --dsh-python /absolute/path/to/.venv-dsh/bin/python \
+  --dsh-home "$PWD/var/dsh/preview" \
+  --ledger "$PWD/var/preview/tasks.sqlite3" \
+  --dialogue-ledger "$PWD/var/preview/dialogue.sqlite3"
+```
+
+各 worktree 使用自己的端口、账本和 DSH_HOME。SDK 不必安装进业务服务的 Python；
+`--dsh-python` 启动独立 worker。`--agent-runtime direct` 只用于显式旧版诊断，
+DSH 错误不会自动回退。运行边界见 [模型运行契约](contracts/model-runtime.md)。
+
+体验版只从已提交且干净的 `master` 启动，命令增加 `--require-clean-source`。
+`GET /v1/build` 与页面右侧“体验环境说明”显示启动时的完整提交号、源码状态、模型运行方式和检索模式。
+更新时先完成测试和提交，再重启 8085；任务、对话、目录 SQLite 及独立 `DSH_HOME`
+沿用原路径。服务运行期间修改源码不会改变已加载的 Python 代码，需重启后核对版本号。
+当前本地检索夹具显示为“本地测试索引”，不能当作真实 Milvus 接入。
 
 ## 本地运行
 
@@ -39,7 +60,7 @@ DSH 的独立开发环境已安装在 `.venv-dsh`。当前冻结候选为 SDK/�
 当前开工依赖与接口差距见 [基线就绪检查](docs/dev/baseline-readiness.md)。本地 Data-Juicer
 目录暂不纳入 Git，新的 worktree 仍需独立准备经过校验的清洗依赖。
 
-项目只使用 Python 标准库，要求 Python 3.11+。
+业务服务使用 Python 标准库，要求 Python 3.11+；DSH worker 使用独立锁定的 SDK 环境。
 
 ```bash
 # 测试入口会自行配置 src、仓库根目录与 tests 导入路径

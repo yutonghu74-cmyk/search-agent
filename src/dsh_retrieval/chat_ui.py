@@ -27,7 +27,7 @@ CHAT_HTML = """<!doctype html>
         <button id="save-api-config" type="button">暂存连接</button><p id="api-config-status" class="helper" role="status">此处仅暂存页面信息，不启用后端模型；实际调用使用上方服务端模型。</p>
       </div></details>
     </section>
-    <details class="rail-card"><summary>体验环境说明</summary><p class="helper">当前使用模拟身份和本地账本。测试索引检索不等于真实素材授权或清洗通过；模型建议在确认前不会执行。</p></details>
+    <details class="rail-card"><summary>体验环境说明</summary><p id="build-version" class="helper">正在读取运行版本…</p><p class="helper">当前使用模拟身份和本地账本。测试索引检索不等于真实素材授权或清洗通过；模型建议在确认前不会执行。</p></details>
   </aside></div>
 </main><script src="/chat.js"></script></body></html>"""
 
@@ -502,9 +502,19 @@ async function loadModels(){
     const llms=data.items.filter(model=>model.kind==='llm'),vlms=data.items.filter(model=>model.kind==='vlm');
     if(!state.modelChoiceTouched&&llms.length===1)$('llm-model').value=llms[0].id;
     if(!state.modelChoiceTouched&&vlms.length===1)$('vlm-model').value=vlms[0].id;
-    $('model-status').textContent=llms.length?'模型已就绪':'尚未配置服务端 LLM';
+    $('model-status').textContent=llms.length?(data.runtime?.engine==='dsh'?'DSH · 模型已就绪':'模型已就绪'):'尚未配置服务端 LLM';
     updateModelMode();
   }catch(e){$('model-status').textContent='模型目录加载失败：'+e.message;updateModelMode()}
 }
-(async function initialize(){await loadModels();await refreshHistory();const taskId=localStorage.getItem('dsh-task-id');if(taskId){if(!await openTask(taskId))localStorage.removeItem('dsh-task-id')}else await restoreDialogueSession()})();
+async function loadBuildVersion(){
+  try{
+    const build=await api('/v1/build');
+    const commit=build.commit?build.commit.slice(0,10):'未知';
+    const source=build.source_clean===true?'已提交':build.source_clean===false?'存在未提交修改':'源码状态未知';
+    const engine=build.model_engine==='dsh'?'DSH':build.model_engine==='direct'?'直连模型':'未配置模型';
+    const retrieval=build.retrieval_mode==='local_fixture'?'本地测试索引':'未配置检索';
+    $('build-version').textContent=`版本 ${commit} · ${source} · ${engine} · ${retrieval} · 启动 ${build.started_at||'未知'}`;
+  }catch(error){$('build-version').textContent='运行版本暂不可读';}
+}
+(async function initialize(){await loadBuildVersion();await loadModels();await refreshHistory();const taskId=localStorage.getItem('dsh-task-id');if(taskId){if(!await openTask(taskId))localStorage.removeItem('dsh-task-id')}else await restoreDialogueSession()})();
 """

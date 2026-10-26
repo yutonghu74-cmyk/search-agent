@@ -501,6 +501,45 @@ class ModelRuntimeTest(unittest.TestCase):
             self.assertEqual(runtime.catalog()[0]['id'], 'text')
             self.assertNotIn('test-secret', repr(runtime.profiles))
 
+    def test_per_model_request_options(self):
+        row = {'id': 'text', 'kind': 'llm', 'provider': 'fixture', 'model': 'reasoner',
+               'base_url': 'https://fixture.invalid/v1', 'api_key_env': 'DSH_TEST_MODEL_KEY'}
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'models.json'
+            def load(**options):
+                path.write_text(json.dumps({'models': [row | options]}))
+                with patch.dict(os.environ, {'DSH_TEST_MODEL_KEY': 'test-secret'}):
+                    return load_model_runtime(path)
+            plain = load()
+            # Models rejecting `temperature` get it omitted; budgets are per model.
+            tuned = load(temperature=None, max_tokens=12000, request_timeout_seconds=150)
+            for bad in ({'max_tokens': 10}, {'temperature': True}, {'request_timeout_seconds': 1000},
+                        {'reasoning': 'high'}):
+                with self.assertRaises(ServiceError):
+                    load(**bad)
+        timeouts = []
+        class Recording(Transport):
+            def open(self, request, timeout):
+                timeouts.append(timeout)
+                return super().open(request, timeout)
+        for runtime in (plain, tuned):
+            runtime.opener = Recording([{'ok': True}])
+            runtime._request(runtime.select('text', 'llm'), 'system', 'message')
+            runtime.last_body = runtime.opener.calls[0]
+        self.assertEqual((plain.last_body['temperature'], plain.last_body['max_tokens']), (0, 3000))
+        self.assertNotIn('temperature', tuned.last_body)
+        self.assertEqual(tuned.last_body['max_tokens'], 12000)
+        self.assertEqual(timeouts, [60, 150])
+        # Default options keep existing bindings valid; changed options invalidate them.
+        vision = ModelProfile('vision', 'vlm', ModelConfig('fixture', 'v', 'https://fixture.invalid/v1', 'k'))
+        def binding(config):
+            return ModelRuntime([ModelProfile('text', 'llm', config), vision]).binding('text', 'vision')
+        base = ('fixture', 'reasoner', 'https://fixture.invalid/v1', 'k')
+        self.assertEqual(binding(ModelConfig(*base)), binding(ModelConfig(*base, temperature=0, max_tokens=None)))
+        self.assertNotEqual(binding(ModelConfig(*base)), binding(ModelConfig(*base, temperature=None)))
+        self.assertEqual(tuned.select('text', 'llm').config.options(),
+                         {'max_tokens': 12000, 'temperature': None, 'request_timeout_seconds': 150})
+
 
 if __name__ == '__main__':
     unittest.main()

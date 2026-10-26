@@ -1,0 +1,66 @@
+# Pinned and exercised with deepseek-harness 0.2.1rc2, sdk-minimal.
+# Disable capabilities, not merely their prompt descriptions.
+- id: session-log-deepseek
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: deepseek-llm-api-extensions
+  disabled: true
+- id: llm-deepseek
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+- id: mcp-resources
+  disabled: true
+- id: persistent-bash
+  disabled: true
+- id: persistent-pwsh
+  disabled: true
+- id: terminal-bash
+  disabled: true
+- id: terminal-pwsh
+  disabled: true
+- id: session-title
+  disabled: true
+- id: compaction-basic
+  disabled: true
+- id: image-offload
+  disabled: true
+- insert:
+    - id: retrieval-llm
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          retrieval-gateway:
+            api: openai-completions
+            apiKeyEnv: RETRIEVAL_MODEL_KEY
+            baseURL: !!js process.env.RETRIEVAL_MODEL_URL
+            models:
+              - id: !!js process.env.RETRIEVAL_MODEL_ID
+                contextWindow: 128000
+                maxTokens: !!js Number(process.env.RETRIEVAL_MAX_TOKENS)
+                reasoningEfforts: false
+            compat:
+              supportsDeveloperRole: false
+              maxTokensField: max_tokens
+            retryPolicy:
+              mode: normal
+              maxRetries: 1
+    - id: retrieval-tools
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: retrieval
+        transport: stdio
+        command: !!js process.env.RETRIEVAL_PYTHON
+        args:
+          - '-m'
+          - dsh_retrieval.adapters.dsh.tools_server
+          - !!js process.env.RETRIEVAL_TURN_DIR
+        env:
+          PYTHONPATH: !!js process.env.PYTHONPATH
+        toolCallTimeoutMs: 5000
+        failOnStartupError: true
+        reconnect:
+          enabled: false

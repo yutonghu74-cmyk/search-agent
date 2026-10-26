@@ -24,6 +24,11 @@ class ModelConfig:
     model: str
     base_url: str = field(repr=False)
     api_key: str = field(repr=False)
+    # Per-model request options; None keeps the caller's default. A None
+    # temperature omits the field for models that reject it.
+    max_tokens: int | None = None
+    temperature: float | None = 0
+    request_timeout_seconds: int | None = None
 
     def __post_init__(self):
         if any(not isinstance(v, str) or not v.strip() for v in (self.provider, self.model, self.base_url, self.api_key)):
@@ -32,6 +37,24 @@ class ModelConfig:
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
                 or parsed.query or parsed.fragment or any(c in self.api_key for c in "\r\n")):
             raise ValueError("Invalid model configuration")
+        if (self.max_tokens is not None and (type(self.max_tokens) is not int or not 256 <= self.max_tokens <= 32768)
+                or self.temperature is not None and (type(self.temperature) not in (int, float)
+                                                     or not 0 <= self.temperature <= 2)
+                or self.request_timeout_seconds is not None and (type(self.request_timeout_seconds) is not int
+                                                                 or not 5 <= self.request_timeout_seconds <= 300)):
+            raise ValueError("Invalid model request options")
+
+    def options(self):
+        """Non-default request options; they change model behaviour, so bindings include them."""
+        return {key: value for key, value in (('max_tokens', self.max_tokens), ('temperature', self.temperature),
+                ('request_timeout_seconds', self.request_timeout_seconds))
+                if value != ModelConfig.__dataclass_fields__[key].default}
+
+    def sampling(self, default_max_tokens):
+        body = {"max_tokens": self.max_tokens or default_max_tokens}
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
+        return body
 
 
 def resolve_config(profile, credentials):
@@ -134,7 +157,7 @@ class IntentModelClient:
     def interpret(self, raw_request):
         # Validate input before spending tokens or transmitting it.
         self.reviewer.review(raw_request)
-        body = {"model": self.config.model, "temperature": 0, "max_tokens": 3000,
+        body = {"model": self.config.model, **self.config.sampling(3000),
                 "messages": [{"role": "system", "content": SYSTEM_PROMPT},
                              {"role": "user", "content": json.dumps({"raw_request": raw_request}, ensure_ascii=False)}],
                 "response_format": {"type": "json_object"}}

@@ -6,7 +6,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from dsh_retrieval.adapters.projects import LocalProjectAccess
-from dsh_retrieval.api import create_handler
+from dsh_retrieval.api import create_handler, source_version
 from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.expansion_models import preview_edited_groups
 from dsh_retrieval.service import InMemoryTaskRepository, TaskService
@@ -29,7 +29,9 @@ class ApiTest(unittest.TestCase):
         service = TaskService(InMemoryTaskRepository(), LocalProjectAccess([
             ("tenant-a", "user-a", "demo", "default")]))
         cls.results = ResultReader()
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(service, cls.results))
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), create_handler(
+            service, cls.results, build_info={'commit': 'abc123', 'source_clean': True,
+                                              'model_engine': 'dsh', 'retrieval_mode': 'local_fixture'}))
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
@@ -67,6 +69,20 @@ class ApiTest(unittest.TestCase):
         self.assertIn(b"Chat", body)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+
+    def test_build_reports_process_source_and_runtime_without_identity(self):
+        status, body, _ = self.request('/v1/build', identity=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(body['commit'], 'abc123')
+        self.assertTrue(body['source_clean'])
+        self.assertEqual(body['model_engine'], 'dsh')
+        self.assertEqual(body['retrieval_mode'], 'local_fixture')
+
+    def test_non_git_source_is_unknown(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as directory:
+            self.assertEqual(source_version(Path(directory)), (None, None))
 
     def test_ticket_feedback_confirmation_and_revisions(self):
         status, expansion, _ = self.request("/v1/retrieval/projects/demo/expansions", body={
@@ -107,6 +123,12 @@ class ApiTest(unittest.TestCase):
             f"/v1/retrieval/conversations/{draft['conversation_id']}")
         self.assertEqual([item["kind"] for item in conversation["messages"]], ["request", "feedback"])
         self.assertEqual([item["revision"] for item in conversation["confirmations"]], [1, 2])
+        status, runs, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/agent-runs")
+        self.assertEqual((status, runs["engine"], runs["items"]), (200, "unconfigured", []))
+        status, _, _ = self.request("/v1/retrieval/tasks/missing/agent-runs")
+        self.assertEqual(status, 404)
+        status, _, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/agent-runs", identity=False)
+        self.assertIn(status, (400, 401, 403))
 
         status, progress, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/progress")
         self.assertEqual(status, 200)

@@ -106,6 +106,9 @@ class ModelRuntime:
         return [{'id': p.profile_id, 'kind': p.kind, 'provider': p.config.provider,
                  'model': p.config.model} for p in self.profiles.values()]
 
+    def status(self):
+        return {'engine': 'direct' if self.profiles else 'unconfigured'}
+
     def select(self, profile_id, kind):
         profile = self.profiles.get(profile_id) if isinstance(profile_id, str) else None
         if profile is None or profile.kind != kind:
@@ -117,7 +120,8 @@ class ModelRuntime:
         return {'llm': llm_id, 'vlm': vlm_id, 'prompt_version': PROMPT_VERSION,
                 'config_digest': digest([{'id': p.profile_id, 'kind': p.kind,
                     'provider': p.config.provider, 'model': p.config.model,
-                'endpoint': p.config.base_url} for p in selected])}
+                'endpoint': p.config.base_url} | ({'options': p.config.options()} if p.config.options() else {})
+                    for p in selected])}
 
     def analyze_request(self, raw_request, llm_id):
         """Review one Chat utterance; never turn model output into a task."""
@@ -188,6 +192,20 @@ class ModelRuntime:
                 raise ValueError('Name exactly one affected group per term operation; emit multiple operations for multiple groups. Omit unchanged groups.')
         except ValueError as error:
             raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None
+        # An absolute count in an operation is no more authoritative than the
+        # legacy target_count field. In particular, "some images" is not five.
+        count_pattern = rf'({_NUMBER_WORD})\s*(?:张|幅|个\s*(?:图片|照片|图)|图片|照片|图)'
+        if state.get('question') == 'target_count':
+            count_pattern = rf'({_NUMBER_WORD})(?=\s*(?:张|幅|个|图片|照片|图|$))'
+        explicit_counts = {_number_value(match.group(1)) for match in re.finditer(count_pattern, message)}
+        ungrounded = [edit for edit in edits if edit['target'] == 'images' and edit['operation'] == 'set'
+                      and edit['value'] not in explicit_counts and edit['value'] != count_hint]
+        if ungrounded:
+            edits = [edit for edit in edits if edit not in ungrounded]
+            value['count_edits'] = edits
+            value['target_count'] = None
+            value['expansion_instruction'] = None
+            computed_count, _ = resolve_count_edits(edits, state.get('target_count'), state.get('current_groups'))
         if value['action'] in ('answer', 'clarify', 'confirm', 'confirm_terms') and (
                 edits or any(value.get(field) is not None for field in
                              ('subject', 'target_count', 'media_type', 'constraints', 'expansion_instruction'))):
@@ -212,7 +230,7 @@ class ModelRuntime:
         return value
 
     def _request(self, profile, system, content, *, conversation=None):
-        body = {'model': profile.config.model, 'temperature': 0, 'max_tokens': 3000,
+        body = {'model': profile.config.model, **profile.config.sampling(3000),
                 'messages': [{'role': 'system', 'content': system}] + (conversation or []) +
                             [{'role': 'user', 'content': content}],
                 'response_format': {'type': 'json_object'}}
@@ -221,7 +239,7 @@ class ModelRuntime:
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + profile.config.api_key})
         for attempt in range(3):
             try:
-                with self.opener.open(request, timeout=60) as response:
+                with self.opener.open(request, timeout=profile.config.request_timeout_seconds or 60) as response:
                     raw = response.read(1_000_001)
                 break
             except urllib.error.HTTPError as error:
@@ -244,8 +262,10 @@ class ModelRuntime:
                 raise ValueError('incomplete')
             value = json.loads(choice['message']['content'])
             if not isinstance(value, dict):
-                raise ValueError('not object')
+                raise ServiceError('MODEL_OUTPUT_INVALID', 'Model response must be a JSON object', 502)
             return value
+        except ServiceError:
+            raise
         except Exception:
             # No upstream bodies, addresses or credentials in logs/errors.
             raise ServiceError('MODEL_REQUEST_FAILED', 'Model returned invalid or incomplete JSON', 502) from None
@@ -381,6 +401,7 @@ class ModelRuntime:
             retry_prompt = prompt
             if attempt:
                 retry_prompt += '\n上一版未通过校验。按最后的校验反馈修正，输出完整词表，不能只解释。'
+                retry_prompt += '\n校验反馈：' + str(failure)
                 conversation.append({'role': 'user', 'content': latest})
                 if previous is not None:
                     conversation.append({'role': 'assistant', 'content': json.dumps(previous, ensure_ascii=False)})
@@ -398,8 +419,10 @@ class ModelRuntime:
                 if requested_terms_per_group is not None and any(
                         len(group['auxiliary_terms']) != requested_terms_per_group
                         for group in result['plan']['groups']):
-                    failure_code = 'TERM_COUNT_MISMATCH'
-                    raise ValueError(f'每组最终必须恰好 {requested_terms_per_group} 个词')
+                    # Preserve the legacy explicit-count contract. Relative
+                    # group-count edits below retain their bounded repair loop.
+                    raise ServiceError('MODEL_OUTPUT_INVALID',
+                                       f'每组最终必须恰好 {requested_terms_per_group} 个词', 502)
                 if group_targets is not None and {
                         group['primary_label']: len(group['auxiliary_terms'])
                         for group in result['plan']['groups']} != group_targets:
@@ -519,13 +542,16 @@ def load_model_runtime(path):
         if set(data) != {'models'} or not isinstance(data['models'], list) or len(data['models']) > 30:
             raise ValueError()
         profiles = []
+        required = {'id', 'kind', 'provider', 'model', 'base_url', 'api_key_env'}
+        optional = {'max_tokens', 'temperature', 'request_timeout_seconds'}
         for row in data['models']:
-            if set(row) != {'id', 'kind', 'provider', 'model', 'base_url', 'api_key_env'}:
+            if not required <= set(row) <= required | optional:
                 raise ValueError()
             if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', row['api_key_env']):
                 raise ValueError()
             profiles.append(ModelProfile(row['id'], row['kind'], ModelConfig(
-                row['provider'], row['model'], row['base_url'], os.environ[row['api_key_env']])))
+                row['provider'], row['model'], row['base_url'], os.environ[row['api_key_env']],
+                **{key: row[key] for key in optional if key in row})))
         return ModelRuntime(profiles)
     except Exception:
         raise ServiceError('MODEL_CONFIG_INVALID', 'Cannot load trusted model profiles and environment credentials', 500) from None

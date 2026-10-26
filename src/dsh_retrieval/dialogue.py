@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
 from .errors import ServiceError
@@ -29,6 +30,14 @@ expansion_instruction: a complete Chinese instruction resolving references to ea
 For count_edits, each terms operation must name EXACTLY ONE existing group in labels. To change several groups, emit a separate operation for each affected group. Omit groups the user wants unchanged. Images must use empty labels. Doubling is scale 2; halving scale 0.5; N extra is add N; reducing by N is add -N; exactly N is set N. Apply one operation per affected count. The server computes each group separately and rounds up. Term counts 1–30, image target 1–10000. Do not duplicate a relative image operation in target_count. All promised numeric changes must have a corresponding field or operation.
 Use answer for questions, explanations and conversation without changing fields. Use update to fill/change a request, revise_terms to change a visible word list or its image target, replace only to start a completely new request. An informal change without an exact number can simply use expansion_instruction with no count operation. Use clarify only for genuinely missing or ambiguous information, asking specifically for that information. Do not ask users to repeat a clear request or to follow a fixed sequence.
 For answer, clarify, confirm and confirm_terms, all modification fields must be null and count_edits empty. Confirm is explicit agreement with the latest request summary; confirm_terms is agreement with the visible list, but only the separate confirmation button can approve search. Never claim approval, execution or results. Changed proposals remain for review. Do not invent image quantities.'''
+
+PROMPT += '''
+Critical examples (apply their meaning, not their literal subject):
+- "找一些没有水印的猫图片": action=update, subject="猫", media_type="image", constraints="没有水印", target_count=null, count_edits=[]. "一些" does NOT specify 1 or 5; the backend will ask the quantity.
+- After the assistant asks "需要多少张图片？", "需要20张" fills missing information: action=update, target_count=20, subject=null, media_type=null, constraints=null, question=null, count_edits=[], expansion_instruction=null. This is NEVER confirm or clarify.
+- Only after a complete summary is presented, "是的" means action=confirm with ALL modification fields null and count_edits=[].
+- Never say "请稍等" or promise to start searching now; this is planning only.
+If context contains repair, the previous proposal was rejected. Follow its validation_error/reason; do not resubmit it unchanged.'''
 
 
 _CATEGORY_COUNT = re.compile(r'(?P<count>[1-9][0-9]{0,4})\s*只\s*'
@@ -254,7 +263,10 @@ class DialogueCoordinator:
                 raise ServiceError('INVALID_SPEC', 'Invalid current draft image count', 422)
             prior['target_count'] = count
         try:
-            proposal = self.runtime.interpret_dialogue_turn(prior, message, llm_id, count_hint=count_hint)
+            scope = getattr(self.runtime, 'business_scope', None)
+            with (scope(project_id=project_id, dialogue_session_id=session_id, expected_version=version)
+                  if scope else nullcontext()):
+                proposal = self.runtime.interpret_dialogue_turn(prior, message, llm_id, count_hint=count_hint)
         except ServiceError as error:
             if error.code != 'MODEL_OUTPUT_INVALID':
                 raise
