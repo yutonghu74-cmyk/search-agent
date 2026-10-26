@@ -10,8 +10,10 @@
   检索模式与启动时间；页面“体验环境说明”可直接核对。8085 启动增加
   `--require-clean-source`，拒绝从未提交的代码启动。
   合并后的 `PYTHONPATH=src python3 -m unittest discover -s tests` 为 711 项
-  PASS、1 项 SKIP；Chat JavaScript 语法与 `git diff --check` PASS。体验服务
-  更新及原账本保留情况待部署核对。真实 Milvus、素材授权、身份及清洗仍未验收。
+  PASS、1 项 SKIP；Chat JavaScript 语法与 `git diff --check` PASS。8085 已从
+  统一主线启动 DSH 模式，模型目录 2 项、本地测试索引可读；原 3 条正式任务仍可读。
+  更新前对任务、对话和索引配置三份 SQLite 做在线备份，三份 `integrity_check=ok`；
+  备份在 `var/backups/2026-10-26-unify/`。真实 Milvus、素材授权、身份及清洗仍未验收。
 
 - 2026-10-25：READY_FOR_REVIEW（DSH 运行索引/重启恢复 + 按模型请求参数，`codex/dsh-runtime`）。
   先以 704 项完整回归 PASS 提交此前 DSH 运行入口（71cc730）。新增 `DSH_HOME/runs.sqlite3`
