@@ -294,7 +294,7 @@ async function refreshTaskSidebar(){
   // Auto-refill tasks keep a cursor open, so search never reads as "stopped"
   // and the only confirm button sat in a collapsed node: a real run waited
   // there indefinitely. Say once per version that candidates need the owner.
-  if(currentSearch&&(snapshot.search.pagination_stopped||snapshot.search.initial_window_complete)&&snapshot.candidates?.verified_count&&!state.candidateManifest&&!snapshot.manifest?.confirmed){const identity=[taskId,revision,generation,snapshot.progress.task_version].join(':');state.manifestPrompted=state.manifestPrompted||new Set();if(!state.manifestPrompted.has(identity)){state.manifestPrompted.add(identity);guidedAction(message('assistant','检索候选已就绪',`已校验 ${snapshot.candidates.verified_count} 张候选图片。确认候选清单后才会开始清洗。`),'确认候选清单',showCandidateManifestReview)}}
+  if(currentSearch&&(snapshot.search.pagination_stopped||snapshot.search.initial_window_complete)&&snapshot.candidates?.verified_count&&!state.candidateManifest&&!snapshot.manifest?.confirmed){const identity=[taskId,revision,generation,snapshot.progress.task_version].join(':');state.manifestPrompted=state.manifestPrompted||new Set();if(!state.manifestPrompted.has(identity)){state.manifestPrompted.add(identity);guidedAction(message('assistant','检索候选已就绪',snapshot.manifest?.candidate_count?`已校验 ${snapshot.manifest.candidate_count} 张候选图片。确认候选清单后才会开始清洗。`:'候选图片已校验。确认候选清单后才会开始清洗。'),'确认候选清单',showCandidateManifestReview)}}
  }catch(error){if(same())$('retrieval-live-status').textContent='结果读取失败：'+error.message+'；需求仍已保存。'}
 }
 function showResults(results,taskId,append=false){

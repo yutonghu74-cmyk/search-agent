@@ -554,7 +554,7 @@ const api=async path=>{
   if(path.endsWith('/first-search/progress'))return {status:'approved',revision:1,generation:1,task_version:2,
     pagination_stopped:false,initial_window_complete:true,members:[]};
   if(path.endsWith('/first-search/manifest'))return {confirmed,candidate_count:60,expected_task_version:2};
-  if(path.includes('/first-search/candidates'))return {verified_count:60};
+  if(path.includes('/first-search/candidates'))return {verified_count:1};
   if(path.endsWith('/progress'))return {task_version:2,nodes:[]};
   if(path.includes('/results?'))return {available:false};
   throw Error('unexpected '+path);
@@ -563,9 +563,10 @@ const prompts=[];
 const fields={'task-sidebar-summary':{textContent:''},'retrieval-live-status':{textContent:''}};
 const refresh=new Function('state','api','$','showProgress','searchStatusLabel','searchSummary','message','guidedAction','showCandidateManifestReview',
   process.env.SOURCE+';return refreshTaskSidebar')(state,api,id=>fields[id],()=>{},()=>'检索中',()=>'',
-  (kind,title,text)=>({title,text}),(bubble,label)=>prompts.push([bubble.title,label]),()=>{});
+  (kind,title,text)=>({title,text}),(bubble,label)=>prompts.push([bubble.title,label,bubble.text]),()=>{});
 await refresh();await refresh();
-assert.deepEqual(prompts,[['检索候选已就绪','确认候选清单']]);
+assert.deepEqual(prompts.map(row=>row.slice(0,2)),[['检索候选已就绪','确认候选清单']]);
+assert.match(prompts[0][2],/已校验 60 张/,'the count is the whole proposal, not the limit=1 page');
 confirmed=true;state.task.task_version=2;state.manifestPrompted.clear();await refresh();
 assert.equal(prompts.length,1,'a frozen list is not offered again');
 })().catch(error=>{console.error(error);process.exit(1)});
