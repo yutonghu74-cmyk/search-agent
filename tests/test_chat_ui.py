@@ -540,6 +540,41 @@ assert.equal(calls.manifest-before.manifest,1);
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node required for manifest prompt test')
+    def test_ready_auto_window_prompts_candidate_confirmation_once(self):
+        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(){'):
+                         CHAT_JS.index('function showResults(')]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');
+const state={task:{task_id:'t',confirmed_revision:1,run_generation:1,task_version:2},
+  confirmedRevision:{taskId:'t',revision:1},sidebarReadToken:0};
+let confirmed=false;
+const api=async path=>{
+  if(path.endsWith('/first-search/progress'))return {status:'approved',revision:1,generation:1,task_version:2,
+    pagination_stopped:false,initial_window_complete:true,members:[]};
+  if(path.endsWith('/first-search/manifest'))return {confirmed,candidate_count:60,expected_task_version:2};
+  if(path.includes('/first-search/candidates'))return {verified_count:60};
+  if(path.endsWith('/progress'))return {task_version:2,nodes:[]};
+  if(path.includes('/results?'))return {available:false};
+  throw Error('unexpected '+path);
+};
+const prompts=[];
+const fields={'task-sidebar-summary':{textContent:''},'retrieval-live-status':{textContent:''}};
+const refresh=new Function('state','api','$','showProgress','searchStatusLabel','searchSummary','message','guidedAction','showCandidateManifestReview',
+  process.env.SOURCE+';return refreshTaskSidebar')(state,api,id=>fields[id],()=>{},()=>'检索中',()=>'',
+  (kind,title,text)=>({title,text}),(bubble,label)=>prompts.push([bubble.title,label]),()=>{});
+await refresh();await refresh();
+assert.deepEqual(prompts,[['检索候选已就绪','确认候选清单']]);
+confirmed=true;state.task.task_version=2;state.manifestPrompted.clear();await refresh();
+assert.equal(prompts.length,1,'a frozen list is not offered again');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script],
+                                env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_empty_incremental_manifest_does_not_override_completed_retrieval(self):
         self.assertIn("const pendingManifest=currentManifest&&manifest.candidate_count>0", CHAT_JS)
         self.assertIn("emptyManifest&&node.node_status==='succeeded'?'检索已完成", CHAT_JS)

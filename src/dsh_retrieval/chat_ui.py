@@ -291,6 +291,10 @@ async function refreshTaskSidebar(){
   const retrievalSucceeded=snapshot.progress.nodes?.some(node=>node.node==='retrieval'&&node.node_status==='succeeded');
   $('retrieval-live-status').textContent=(currentSearch?searchStatusLabel(snapshot.search)+' · '+searchSummary(snapshot.search,snapshot.candidates):fixedSearch?`检索已结束 · 已固定 ${snapshot.manifest.candidate_count} 张候选图片`:retrievalSucceeded?'检索已结束':'需求已保存 · 等待检索')+(snapshot.error?' · 读取失败：'+snapshot.error+'（上次状态可能滞后）':'');
   if(currentSearch&&searchStatusLabel(snapshot.search)!=='等待检索'){const identity=taskId+':'+revision+':'+generation;state.searchNotified=state.searchNotified||new Set();if(!state.searchNotified.has(identity)){state.searchNotified.add(identity);message('assistant','检索已启动','可在右侧检索节点查看进度和打开检索候选。')}}
+  // Auto-refill tasks keep a cursor open, so search never reads as "stopped"
+  // and the only confirm button sat in a collapsed node: a real run waited
+  // there indefinitely. Say once per version that candidates need the owner.
+  if(currentSearch&&(snapshot.search.pagination_stopped||snapshot.search.initial_window_complete)&&snapshot.candidates?.verified_count&&!state.candidateManifest&&!snapshot.manifest?.confirmed){const identity=[taskId,revision,generation,snapshot.progress.task_version].join(':');state.manifestPrompted=state.manifestPrompted||new Set();if(!state.manifestPrompted.has(identity)){state.manifestPrompted.add(identity);guidedAction(message('assistant','检索候选已就绪',`已校验 ${snapshot.candidates.verified_count} 张候选图片。确认候选清单后才会开始清洗。`),'确认候选清单',showCandidateManifestReview)}}
  }catch(error){if(same())$('retrieval-live-status').textContent='结果读取失败：'+error.message+'；需求仍已保存。'}
 }
 function showResults(results,taskId,append=false){
