@@ -253,6 +253,25 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.assertTrue(approved.members)
         self.assertEqual({member.plan.request.batch_size for member in approved.members}, {2})
 
+    def test_auto_first_window_fits_one_candidate_manifest(self):
+        # A real 狗10/兔子5 run had 19 branches x 8 hits and never fixed a manifest.
+        terms = [f'狗场景{i}' for i in range(15)]
+        body = json.loads(json.dumps(BODY))
+        body['query_spec']['raw_request'] = '找狗图片'
+        body['query_spec']['target_count'] = 15
+        body['query_spec']['refill_policy'] = {
+            'mode': 'maintain_target', 'target_count': 15,
+            'approved_library_ids': ['dogs'], 'progression': 'auto'}
+        body['node_modes']['refill'] = 'auto'
+        body['query_spec']['grouped_expansion'] = preview_edited_groups(None, [
+            {'primary_label': '狗', 'auxiliary_terms': terms}])['plan']
+        created, _ = self.tasks.create_task(self.actor, 'wide-auto-task',
+            confirmation(self.tasks, self.actor, key='wide-auto-draft', body=body))
+        self.local.auto_start(self.actor, created['task_id'], key='wide-auto-start')
+        approved = self.local.repository.get_current(self.actor, created['task_id'])
+        self.assertGreater(len(approved.members), 12)
+        self.assertLessEqual(sum(m.plan.request.batch_size for m in approved.members), 100)
+
     def test_background_search_requeues_after_bounded_activation(self):
         body = json.loads(json.dumps(BODY))
         body['query_spec']['raw_request'] = '找动物图片'

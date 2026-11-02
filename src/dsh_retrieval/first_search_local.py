@@ -21,6 +21,8 @@ from .multi_branch_contracts import plan_origin_groups
 from .physical_query_preparation import TextQueryCapability
 from .query_routing import QueryRouteChoice
 from .query_spec import digest
+
+MANIFEST_HIT_LIMIT = 100
 from .retrieval_contracts import RetrievalScope
 from .retrieval_coordinator import RetrievalCoordinator
 from .retrieval_progress import read_retrieval_progress
@@ -380,9 +382,15 @@ class LocalFirstSearch:
         # candidates per refill position before its execution budget is known.
         batch_cap = (min(8, max(1, task.target_count * 2))
                      if self._automatic_refill(task) else 8)
+        options = [(route, option) for route in preview['routes'] for option in route['options']]
+        if self._automatic_refill(task) and options:
+            # The automatic first window is fixed as one candidate manifest,
+            # which holds at most 100 hits. Split that budget across members:
+            # 19 branches x 8 per page once stranded a real task at INPUT_LIMIT.
+            batch_cap = min(batch_cap, max(1, MANIFEST_HIT_LIMIT // len(options)))
         choices = [{'branch_id': route['branch_id'], 'binding_id': option['binding_id'],
                     'batch_size': min(batch_cap, option['max_batch_size'])}
-                   for route in preview['routes'] for option in route['options']]
+                   for route, option in options]
         if len(choices) > 64:
             return {'status': 'needs_selection', 'reason': 'source_limit',
                     'queries': [route['query_text'] for route in preview['routes']]}
