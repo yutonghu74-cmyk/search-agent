@@ -14,6 +14,7 @@ from .expansion_models import delivery_targets
 MAX_NODES = 8
 MAX_SOURCE_CHARS = 320
 _SEPARATOR = re.compile(r'[，,；;。\n、]+')
+_QUANTITY = re.compile(r'(?:共|总共|一共|各|每类|每组)?\s*[0-9０-９]+\s*(?:张|只|幅|个)(?:左右)?')
 
 
 def instruction_plan(raw_request):
@@ -51,7 +52,7 @@ def instruction_plan(raw_request):
     return tuple(plan)
 
 
-def group_instruction_plan(raw_request, grouped):
+def group_instruction_plan(raw_request, grouped, *, strip_quantities=True):
     """One check per quota group, each asked only of candidates that group retrieved.
 
     The punctuation splitter cannot serve quota tasks: "狗20张，猫30张" would
@@ -64,6 +65,11 @@ def group_instruction_plan(raw_request, grouped):
     if not source or len(source) > MAX_SOURCE_CHARS or len(groups) > MAX_NODES:
         raise ServiceError('VLM_PLAN_LIMIT',
                            'Group quotas need at most eight groups and a request of 320 characters; revise and confirm the request', 422)
+    # Quantities are the quota, not something one image can show. Left in, a
+    # real VLM read "狗2张" as "this image must contain two dog photos" and
+    # held nearly every dog as unknown.
+    if strip_quantities:
+        source = re.sub(r'\s+', ' ', _QUANTITY.sub('', source)).strip(' ，,、；;') or source
     plan = []
     for index, group in enumerate(groups, 1):
         group_id = group['group_id']
@@ -86,6 +92,24 @@ def confirmed_instruction_plan(spec):
     if delivery_targets(grouped):
         return group_instruction_plan(spec['raw_request'], grouped)
     return instruction_plan(spec['raw_request'])
+
+
+def plan_for_instructions(spec, instructions):
+    """The confirmed plan that frozen model instructions were released against.
+
+    Releases from before quantities were stripped froze the full request text.
+    Both variants derive only from the confirmed spec, so accepting either for
+    an existing release reads history without trusting caller input.
+    """
+    current = confirmed_instruction_plan(spec)
+    try:
+        return with_model_instructions(current, instructions)
+    except ServiceError:
+        grouped = spec.get('grouped_expansion')
+        if not delivery_targets(grouped):
+            raise
+        legacy = group_instruction_plan(spec['raw_request'], grouped, strip_quantities=False)
+        return with_model_instructions(legacy, instructions)
 
 
 def with_model_instructions(plan, instructions):

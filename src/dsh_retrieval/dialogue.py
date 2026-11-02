@@ -44,6 +44,12 @@ If context contains repair, the previous proposal was rejected. Follow its valid
 _CATEGORY_COUNT = re.compile(r'(?P<count>[1-9][0-9]{0,4})\s*(?:只|张)\s*'
                              r'(?P<label>[\u4e00-\u9fff]{1,12}?)'
                              r'(?=(?:(?:和|及|与)?[1-9][0-9]{0,4}\s*(?:只|张))|[，,、；;\s]|$)')
+# "狗20张、猫30张". Anchored to a list boundary so the label can't swallow what
+# precedes it mid-sentence; a leading verb such as "找" is stripped afterwards.
+_LABEL_FIRST_COUNT = re.compile(r'(?:^|(?<=[，,、；;\s和及与]))'
+                                r'(?P<label>[一-鿿]{1,12}?)'
+                                r'(?:的?(?:图片|照片|图像|图))?\s*'
+                                r'(?P<count>[1-9][0-9]{0,4})\s*(?:只|张)')
 
 
 def explicit_category_targets(message):
@@ -56,8 +62,15 @@ def explicit_category_targets(message):
                 label = label[:-len(suffix)]
                 break
         if not label:
-            return []
+            targets = []
+            break
         targets.append({'label': label, 'count': int(match.group('count'))})
+    if len(targets) < 2:
+        targets = [{'label': re.sub(r'^(?:帮我找|帮我|请找|查找|寻找|找|要)', '', match.group('label')),
+                    'count': int(match.group('count'))}
+                   for match in _LABEL_FIRST_COUNT.finditer(message)]
+        if any(not item['label'] for item in targets):
+            return []
     # This helper represents an explicit allocation across categories. A single
     # ordinary phrase such as "5张猫图片" still belongs to normal dialogue
     # interpretation so constraints and intent are not reduced to a regex.

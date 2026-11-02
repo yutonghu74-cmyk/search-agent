@@ -3,6 +3,7 @@ import json
 import unittest
 
 from draft_helpers import BODY, confirmation
+from dsh_retrieval.dialogue import explicit_category_targets
 from dsh_retrieval.adapters.task_storage.multi_rule import SQLiteMultiRuleApprovalRepository
 from dsh_retrieval.candidate_contracts import CandidateManifestProposal, ManifestItem
 from dsh_retrieval.errors import ServiceError
@@ -15,7 +16,8 @@ from dsh_retrieval.multi_rule_contracts import (CleaningCandidateVerdict, Cleani
 from dsh_retrieval.progress_models import build_task_progress
 from dsh_retrieval.recipe_bridge import compile_confirmed_recipe, require_confirmed_rules
 from dsh_retrieval.result_views import build_result_page
-from dsh_retrieval.vlm_instruction_plan import confirmed_instruction_plan
+from dsh_retrieval.vlm_instruction_plan import (confirmed_instruction_plan, group_instruction_plan,
+                                                plan_for_instructions)
 from dsh_retrieval.vlm_registry import ConfirmedTaskVLMRegistry
 from test_first_search_local import FirstSearchLocalTest
 
@@ -26,6 +28,15 @@ SEMANTIC = {'rule_id': 'semantic-match', 'predicate_ref': 'image.semantic-match@
 
 class ExplicitTargetParsingTests(unittest.TestCase):
     LABELS = ['狗', '猫']
+
+    def test_dialogue_recognizes_label_first_allocation(self):
+        # Found by a real browser run: this phrasing was asked "需要多少张图片？".
+        expected = [{'label': '狗', 'count': 2}, {'label': '猫', 'count': 2}]
+        for text in ('狗2张、猫2张的照片', '狗 2 张、猫 2 张', '找狗2张，猫2张', '狗的图片2张，猫图片2张'):
+            self.assertEqual(explicit_category_targets(text), expected, text)
+        self.assertEqual(explicit_category_targets('2张狗和2张猫'), expected)
+        for text in ('狗2张', '找一些户外的狗', '猫2张的照片'):
+            self.assertEqual(explicit_category_targets(text), [], text)
 
     def test_label_first_phrasing_from_the_acceptance_example(self):
         self.assertEqual(explicit_group_targets('狗 20 张、猫 30 张', self.LABELS, 50),
@@ -62,6 +73,31 @@ class ExplicitTargetParsingTests(unittest.TestCase):
                          [group['group_id'] for group in plan['groups']])
         self.assertIn('类别「狗」', nodes[0]['instruction'])
         self.assertIn('都要户外', nodes[1]['instruction'])
+
+    def test_group_checks_do_not_ask_one_image_for_the_quota(self):
+        plan = with_delivery_targets(preview_edited_groups(None, [
+            {'primary_label': '狗', 'auxiliary_terms': []},
+            {'primary_label': '猫', 'auxiliary_terms': []}])['plan'], {'狗': 2, '猫': 2})
+        nodes = confirmed_instruction_plan({'raw_request': '狗2张、猫2张的户外照片',
+                                            'grouped_expansion': plan})
+        for node in nodes:
+            self.assertNotRegex(node['source'], r'[0-9]\s*张')
+            self.assertIn('户外照片', node['source'])
+
+    def test_release_frozen_before_quantity_stripping_still_reads(self):
+        # A real run froze the full-text check; upgrading must not orphan its result.
+        plan = with_delivery_targets(preview_edited_groups(None, [
+            {'primary_label': '狗', 'auxiliary_terms': []},
+            {'primary_label': '猫', 'auxiliary_terms': []}])['plan'], {'狗': 2, '猫': 2})
+        spec = {'raw_request': '狗2张、猫2张的照片', 'grouped_expansion': plan}
+        legacy = group_instruction_plan(spec['raw_request'], plan, strip_quantities=False)
+        frozen = tuple('整理：' + node['source'] for node in legacy)
+        self.assertEqual([n['source'] for n in plan_for_instructions(spec, frozen)],
+                         [n['source'] for n in legacy])
+        current = tuple('整理：' + node['source'] for node in confirmed_instruction_plan(spec))
+        self.assertEqual(len(plan_for_instructions(spec, current)), 2)
+        with self.assertRaises(ServiceError):
+            plan_for_instructions(spec, ('无关', '无关'))
 
 
 class QuotaLedgerFlowTests(unittest.TestCase):

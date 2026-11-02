@@ -12,7 +12,7 @@ from .models import Task, TaskLifecycle
 from .multi_rule_contracts import CleaningRecipe, CleaningRule, DetectionStep
 from .query_spec import digest
 from .vlm_instruction_plan import (confirmed_instruction_plan, instruction_plan,
-                                   with_model_instructions)
+                                   plan_for_instructions, with_model_instructions)
 
 
 def _reject():
@@ -229,8 +229,7 @@ def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
             mismatch()
         hard = [row for row in spec["rules"] if row["hardness"] == "hard"]
         if recipe.instructions:
-            with_model_instructions(confirmed_instruction_plan(spec),
-                                    recipe.instructions)
+            plan_for_instructions(spec, recipe.instructions)
         if delivery_targets(spec.get("grouped_expansion")):
             plan = confirmed_instruction_plan(spec)
             if (len(hard) != 1 or hard[0].get('predicate_ref') != 'image.semantic-match@1'

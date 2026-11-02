@@ -17,7 +17,8 @@ from .recipe_bridge import confirmed_rules_digest
 from .released_detectors import ReleasedDetectorRegistry
 from .vlm_detector import VLMRequirementDetector
 from .vlm_node_detector import VLMNodeDetector
-from .vlm_instruction_plan import confirmed_instruction_plan, with_model_instructions
+from .vlm_instruction_plan import (confirmed_instruction_plan, plan_for_instructions,
+                                   with_model_instructions)
 
 
 class ConfirmedTaskVLMRegistry:
@@ -68,10 +69,11 @@ class ConfirmedTaskVLMRegistry:
         if not requirement or len(requirement) > 2000:
             raise ServiceError("VLM_RULE_REQUIRED",
                                "Confirmed semantic requirement is invalid", 409)
-        return confirmed_instruction_plan({**spec, 'raw_request': requirement}), binding
+        spec = {**spec, 'raw_request': requirement}
+        return confirmed_instruction_plan(spec), binding, spec
 
     def generate(self, task):
-        plan, binding = self._confirmed(task)
+        plan, binding, _ = self._confirmed(task)
         drafted = self.runtime.plan_vlm_cleaning(
             tuple(node['source'] for node in plan), binding)
         instructions = tuple(
@@ -82,9 +84,9 @@ class ConfirmedTaskVLMRegistry:
                      with_model_instructions(plan, instructions))
 
     def build(self, actor, task, *, instructions=None):
-        plan, model_binding = self._confirmed(task)
+        plan, model_binding, spec = self._confirmed(task)
         if instructions is not None:
-            plan = with_model_instructions(plan, instructions)
+            plan = plan_for_instructions(spec, instructions)
         implementation = self._artifact_root / self._artifact_name
         try:
             content_digest = "sha256:" + sha256(implementation.read_bytes()).hexdigest()
@@ -138,9 +140,9 @@ class ConfirmedTaskVLMRegistry:
 
     def describe(self, task, *, instructions=None):
         """Return the frozen, user-readable execution inputs without secrets."""
-        plan, model_binding = self._confirmed(task)
+        plan, model_binding, spec = self._confirmed(task)
         if instructions is not None:
-            plan = with_model_instructions(plan, instructions)
+            plan = plan_for_instructions(spec, instructions)
         profile = self.runtime.select(model_binding['vlm'], 'vlm')
         if model_binding != self.runtime.binding(model_binding['llm'], model_binding['vlm']):
             raise ServiceError('MODEL_BINDING_CHANGED', 'Model configuration changed; reconfirm required', 409)
