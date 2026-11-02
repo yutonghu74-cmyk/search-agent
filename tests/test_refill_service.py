@@ -170,3 +170,78 @@ class ConfirmedRefillServiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GroupQuotaRefillTest(unittest.TestCase):
+    """R14/R15: refill spends search only on groups that are still short."""
+
+    def setUp(self):
+        from dataclasses import dataclass
+        from dsh_retrieval.expansion_models import preview_edited_groups, with_delivery_targets
+        from dsh_retrieval.query_branches import compile_query_branches
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path(temp.name) / "tasks.sqlite3"
+        tasks = SQLiteTaskRepository(path)
+        service = make_service(tasks)
+        self.actor = Actor("tenant", "owner")
+        plan = with_delivery_targets(preview_edited_groups(None, [
+            {"primary_label": "狗", "auxiliary_terms": ["金毛"]},
+            {"primary_label": "猫", "auxiliary_terms": ["橘猫"]}])["plan"], {"狗": 2, "猫": 3})
+        body = deepcopy(BODY)
+        body["query_spec"].update(raw_request="狗2张、猫3张", target_count=5,
+                                  grouped_expansion=plan)
+        body["query_spec"]["refill_policy"] = {
+            "mode": "maintain_target", "target_count": 5,
+            "approved_library_ids": ["library-a"], "progression": "manual"}
+        created, _ = service.create_task(self.actor, "task",
+                                         confirmation(service, self.actor, body=body))
+        self.task_id = created["task_id"]
+        self.groups = {g["primary_label"]: g["group_id"] for g in plan["groups"]}
+        branches = compile_query_branches(body["query_spec"])["branches"]
+        self.positions = {b["query_text"]: build_refill_position(
+            library_id="library-a", index_version="index-v1", query=b["query_text"],
+            parameters={"plan_id": b["branch_id"]}, cursor="next") for b in branches}
+
+        @dataclass(frozen=True)
+        class Row:
+            group_id: str
+            gap: int
+        self.Row = Row
+        reservations = SQLiteRefillReservationRepository(
+            path, projects=service.projects, authorization=Authority())
+        self.runtime = Runtime(reservations, None)
+        self.runtime.adapter.positions = tuple(self.positions.values())
+        self.tasks = tasks
+
+    def preview(self, dog_gap, cat_gap):
+        result = {"accepted_count": 5 - dog_gap - cat_gap, "group_quotas": (
+            self.Row(self.groups["狗"], dog_gap), self.Row(self.groups["猫"], cat_gap))}
+        return ConfirmedRefillService(self.tasks, Results(result), self.runtime).preview(
+            self.actor, self.task_id)
+
+    def test_full_group_queries_are_never_offered(self):
+        view = self.preview(0, 2)
+        self.assertEqual(view["gap"], 2)
+        self.assertIn(view["next_position"]["query"], {"猫", "猫 橘猫"})
+        self.assertEqual(view["next_position"]["group_labels"], ["猫"])
+        self.assertEqual([(row["label"], row["gap"]) for row in view["group_gaps"]],
+                         [("狗", 0), ("猫", 2)])
+
+    def test_neediest_group_goes_first(self):
+        self.assertIn(self.preview(2, 1)["next_position"]["query"], {"狗", "狗 金毛"})
+        self.assertIn(self.preview(1, 2)["next_position"]["query"], {"猫", "猫 橘猫"})
+
+    def test_original_request_branch_is_not_used_for_quota_refill(self):
+        self.runtime.adapter.positions = (self.positions["狗2张、猫3张"],)
+        view = self.preview(0, 2)
+        self.assertEqual((view["next_position"], view["stop_reason"]),
+                         (None, "SEARCH_STRATEGIES_EXHAUSTED"))
+
+    def test_short_group_with_no_positions_stops_even_if_others_have_pages(self):
+        self.runtime.adapter.positions = (self.positions["狗"], self.positions["狗 金毛"])
+        view = self.preview(0, 1)
+        self.assertEqual(view["stop_reason"], "SEARCH_STRATEGIES_EXHAUSTED")
+
+    def test_all_groups_full_finalizes(self):
+        self.assertEqual(self.preview(0, 0)["stop_reason"], "TARGET_MET")

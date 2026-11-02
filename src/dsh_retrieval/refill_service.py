@@ -3,7 +3,9 @@
 import json
 
 from .errors import ServiceError
+from .expansion_models import delivery_targets
 from .models import Actor
+from .query_branches import compile_query_branches
 from .refill_planning import decide_refill, parse_refill_position
 from .refill_planning import normalize_refill_limits
 from .service import require_key
@@ -40,6 +42,42 @@ class ConfirmedRefillService:
             return normalize_refill_limits(proposal["query_spec"].get("refill_limits"))
         except (TypeError, ValueError, KeyError):
             raise ServiceError("TASK_CORRUPT", "Confirmed refill limits are unavailable", 500) from None
+
+    @staticmethod
+    def _quota_focus(task, result, positions):
+        """Keep only positions that can still close a short group, neediest first.
+
+        A full group's queries can only add reserve images, which spend VLM
+        calls without moving the gap. Positions are matched to groups through
+        the confirmed branch query text, the same text every adapter searches,
+        so this adds no state and leaves position fingerprints unchanged.
+        Returns (positions, per-group view, groups per fingerprint); a task
+        without quotas gets its positions back untouched.
+        """
+        spec = json.loads(task.confirmed_proposal_json)["query_spec"]
+        grouped = spec.get("grouped_expansion")
+        if not delivery_targets(grouped):
+            return positions, [], {}
+        labels = {group["group_id"]: group["primary_label"] for group in grouped["groups"]}
+        rows = result.get("group_quotas") or ()
+        gaps = {row.group_id: row.gap for row in rows}
+        if set(gaps) != set(labels):
+            raise ServiceError("REFILL_PLAN_INVALID", "Current group quotas are unavailable", 409)
+        by_query = {}
+        for branch in compile_query_branches(spec)["branches"]:
+            by_query[branch["query_text"]] = {origin["group_id"] for origin in branch["origins"]
+                                              if origin["group_id"] is not None}
+        position_groups, ranked = {}, []
+        for index, position in enumerate(positions):
+            groups = by_query.get(parse_refill_position(position)["query"], set())
+            position_groups[position.fingerprint] = sorted(groups)
+            need = max((gaps[group] for group in groups), default=0)
+            if need:
+                ranked.append((-need, index, position))
+        view = [{"group_id": group_id, "label": labels[group_id], "gap": gaps[group_id]}
+                for group_id in labels]
+        return tuple(position for _, _, position in sorted(ranked, key=lambda row: row[:2])), \
+            view, {key: [labels[group] for group in value] for key, value in position_groups.items()}
 
     def preview(self, actor, task_id):
         task = self.tasks.get(actor, task_id)
@@ -87,11 +125,12 @@ class ConfirmedRefillService:
             }
         remaining_batches = (None if limits["max_rounds"] is None else
                              max(0, limits["max_rounds"] - evidence["issued_rounds"]))
+        focused, group_gaps, position_groups = self._quota_focus(task, result, positions)
         try:
             decision = decide_refill(
                 target_count=task.target_count,
                 accepted_count=result["accepted_count"], policy=policy,
-                node_mode=node_mode, positions=positions,
+                node_mode=node_mode, positions=focused,
                 issued_fingerprints=issued,
                 remaining_batches=remaining_batches,
                 stagnant_rounds=evidence["stagnant_rounds"],
@@ -109,7 +148,10 @@ class ConfirmedRefillService:
                 "index_version": binding["index_version"],
                 "position": binding["position"],
             }
-        return {
+            if group_gaps:
+                next_view["group_labels"] = position_groups.get(
+                    decision.next_position.fingerprint, [])
+        view = {
             "task_id": task_id, "revision": task.confirmed_revision,
             "generation": task.run_generation, "task_version": task.task_version,
             "accepted_count": result["accepted_count"], "target_count": task.target_count,
@@ -118,6 +160,9 @@ class ConfirmedRefillService:
             "active_reservation_id": None, "iteration": None,
             "execution": {**evidence, **limits},
         }
+        if group_gaps:
+            view["group_gaps"] = group_gaps
+        return view
 
     def confirm_next(self, actor, task_id, *, expected_revision, expected_generation,
                      expected_task_version, position_fingerprint, action, key):
