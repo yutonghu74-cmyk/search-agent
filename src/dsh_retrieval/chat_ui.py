@@ -262,15 +262,24 @@ async function refreshTaskSidebar(){
  if(state.searchSnapshot?.taskId!==taskId||state.searchSnapshot?.revision!==revision||state.searchSnapshot?.generation!==generation)state.searchSnapshot={taskId,revision,generation};
  const snapshot=state.searchSnapshot;
  try{
-  const [progress,results,search,manifest]=await Promise.allSettled([api(`/v1/retrieval/tasks/${taskId}/progress`),api(`/v1/retrieval/tasks/${taskId}/results?view=accepted&limit=1`),api(`/v1/retrieval/tasks/${taskId}/first-search/progress`),api(`/v1/retrieval/tasks/${taskId}/first-search/manifest`)]);
+  // After cleaning advances the task version, the original search endpoints
+  // answer REVISION_CONFLICT for that version every time. Once candidates are
+  // frozen or a result exists, stop re-asking until the version moves again.
+  const frozen=Boolean(snapshot.manifest?.confirmed||snapshot.results?.available),knownVersion=snapshot.progress?.task_version;
+  snapshot.staleReads=snapshot.staleReads||{};
+  const read=(name,path)=>frozen&&knownVersion!=null&&snapshot.staleReads[name]===knownVersion?Promise.resolve(null):api(path);
+  const [progress,results,search,manifest]=await Promise.allSettled([api(`/v1/retrieval/tasks/${taskId}/progress`),api(`/v1/retrieval/tasks/${taskId}/results?view=accepted&limit=1`),read('search',`/v1/retrieval/tasks/${taskId}/first-search/progress`),read('manifest',`/v1/retrieval/tasks/${taskId}/first-search/manifest`)]);
   if(!same())return;snapshot.error=null;
-  if(manifest.status==='fulfilled'){
+  const versionNow=progress.status==='fulfilled'?progress.value.task_version:knownVersion;
+  const staleRead=result=>result.status==='rejected'&&['REVISION_CONFLICT','PLAN_NOT_CURRENT'].includes(result.reason?.code);
+  for(const [name,result] of [['search',search],['manifest',manifest]])if(staleRead(result)&&versionNow!=null)snapshot.staleReads[name]=versionNow;
+  if(manifest.status==='fulfilled'&&manifest.value){
     snapshot.manifest=manifest.value;
     if(manifest.value.confirmed&&manifest.value.expected_task_version===state.task.task_version)state.candidateManifest=manifest.value;
     else if(state.candidateManifest?.expected_task_version!==manifest.value.expected_task_version)state.candidateManifest=null;
   }
   for(const [name,result] of [['progress',progress],['results',results]]){if(result.status==='fulfilled')snapshot[name]=result.value;else snapshot.error=result.reason.message}
-  if(search.status==='fulfilled')snapshot.search=search.value;else if(!snapshot.manifest?.confirmed&&!snapshot.results?.available)snapshot.error=search.reason.message;
+  if(search.status==='fulfilled'){if(search.value)snapshot.search=search.value}else if(!snapshot.manifest?.confirmed&&!snapshot.results?.available&&!(frozen&&staleRead(search)))snapshot.error=search.reason.message;
   const currentSearch=snapshot.search?.status==='approved'&&snapshot.search.revision===revision&&snapshot.search.generation===generation&&snapshot.search.task_version===snapshot.progress?.task_version;
   if(currentSearch){try{const data=await api(`/v1/retrieval/tasks/${taskId}/first-search/candidates?limit=1`);if(!same())return;snapshot.candidates=data}catch(error){snapshot.error=error.message}}
   if(!same())return;if(!snapshot.error)snapshot.updated=new Date().toLocaleTimeString();

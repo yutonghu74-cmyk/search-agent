@@ -506,6 +506,40 @@ assert.equal(fields['retrieval-live-status'].textContent,'检索已结束');
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node required for stale polling test')
+    def test_frozen_task_stops_polling_stale_search_until_version_moves(self):
+        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(){'):
+                         CHAT_JS.index('function showResults(')]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');
+const state={task:{task_id:'t',confirmed_revision:1,run_generation:1,task_version:7},
+  confirmedRevision:{taskId:'t',revision:1},sidebarReadToken:0};
+let version=7;const calls={search:0,manifest:0};
+const stale=()=>{const e=Error('REVISION_CONFLICT: Retrieval task scope is stale');e.code='REVISION_CONFLICT';throw e};
+const api=async path=>{
+  if(path.endsWith('/first-search/progress')){calls.search++;stale()}
+  if(path.endsWith('/first-search/manifest')){calls.manifest++;stale()}
+  if(path.endsWith('/progress'))return {task_version:version,nodes:[{node:'retrieval',node_status:'succeeded'}]};
+  if(path.includes('/results?'))return {available:true,counts:{accepted:1}};
+  throw Error('unexpected '+path);
+};
+const fields={'task-sidebar-summary':{textContent:''},'retrieval-live-status':{textContent:''}};
+const refresh=new Function('state','api','$','showProgress','searchStatusLabel','searchSummary','message',
+  process.env.SOURCE+';return refreshTaskSidebar')(state,api,id=>fields[id],()=>{},()=>'',()=>'',()=>{});
+await refresh();await refresh();await refresh();
+assert.deepEqual(calls,{search:1,manifest:1},'the first 409 is learned; later polls at version 7 skip both');
+assert.doesNotMatch(fields['retrieval-live-status'].textContent,/读取失败/);
+const before={...calls};version=8;await refresh();await refresh();await refresh();
+assert.equal(calls.search-before.search,1,'a new version is read once more, then skipped');
+assert.equal(calls.manifest-before.manifest,1);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script],
+                                env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_empty_incremental_manifest_does_not_override_completed_retrieval(self):
         self.assertIn("const pendingManifest=currentManifest&&manifest.candidate_count>0", CHAT_JS)
         self.assertIn("emptyManifest&&node.node_status==='succeeded'?'检索已完成", CHAT_JS)
