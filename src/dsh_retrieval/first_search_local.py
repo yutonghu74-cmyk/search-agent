@@ -95,6 +95,11 @@ class LocalFirstSearch:
                 retry_rounds = 0
                 for _ in range(64):
                     task = self.service.repository.get(actor, task_id)
+                    # Check before ticking, not only after: restart recovery
+                    # re-enqueues every current plan, and a tick here would
+                    # reserve page 2 that belongs to the refill coordinator.
+                    if self._automatic_refill(task) and self._first_window_committed(actor, task_id):
+                        break
                     # One coordinator tick visits each member at most once.
                     # Cover the whole approved set in the initial automatic
                     # window; an 8-request chunk would give early members a
@@ -143,6 +148,10 @@ class LocalFirstSearch:
         return bool(members) and all(
             member.get('committed_pages', 0) >= 1 and not member.get('pending')
             for member in members)
+
+    def _first_window_committed(self, actor, task_id):
+        members = read_retrieval_progress(self.repository, actor, task_id)['members']
+        return bool(members) and all(member['committed_pages'] >= 1 for member in members)
 
     def _fixture(self, fixture_path=None, capabilities_path=None):
         try:

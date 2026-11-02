@@ -253,6 +253,33 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.assertTrue(approved.members)
         self.assertEqual({member.plan.request.batch_size for member in approved.members}, {2})
 
+    def test_restart_does_not_page_an_auto_task_past_its_first_window(self):
+        # A real task restarted after its first window reserved page 2: the
+        # extra hits break the one-manifest budget and refill owns those pages.
+        body = json.loads(json.dumps(BODY))
+        body['query_spec']['raw_request'] = '找动物图片'
+        body['query_spec']['target_count'] = 1
+        body['query_spec']['refill_policy'] = {
+            'mode': 'maintain_target', 'target_count': 1,
+            'approved_library_ids': ['dogs'], 'progression': 'auto'}
+        body['node_modes']['refill'] = 'auto'
+        created, _ = self.tasks.create_task(self.actor, 'restart-auto-task',
+            confirmation(self.tasks, self.actor, key='restart-auto-draft', body=body))
+        task_id = created['task_id']
+        self.local.auto_start(self.actor, task_id, key='restart-auto-start')
+        deadline = time.monotonic() + 3
+        while not self.local.progress(self.actor, task_id)['initial_window_complete']:
+            self.assertLess(time.monotonic(), deadline, 'first window did not finish')
+            time.sleep(.01)
+        before = [(m['committed_pages'], m['status'])
+                  for m in self.local.progress(self.actor, task_id)['members']]
+        restarted = self.make_local()  # recovery re-enqueues persisted plans
+        restarted.enqueue(self.actor, task_id)
+        time.sleep(.5)
+        after = restarted.progress(self.actor, task_id)
+        self.assertEqual([(m['committed_pages'], m['status']) for m in after['members']], before)
+        self.assertTrue(after['initial_window_complete'])
+
     def test_auto_first_window_fits_one_candidate_manifest(self):
         # A real 狗10/兔子5 run had 19 branches x 8 hits and never fixed a manifest.
         terms = [f'狗场景{i}' for i in range(15)]
