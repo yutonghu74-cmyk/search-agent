@@ -239,3 +239,52 @@ class TaskService:
                 raise
             result.append(snapshot.to_summary())
         return tuple(result)
+
+    def delete_conversation(self, actor: Actor, conversation_id: str) -> dict[str, Any]:
+        snapshot = self.repository.get_conversation(actor, conversation_id)
+        if snapshot.confirmations:
+            raise ServiceError('CONVERSATION_DELETE_FORBIDDEN',
+                               '已确认或进入检索的 Chat 不能删除', 409)
+        draft = self.repository.get_draft(actor, snapshot.messages[0].draft_id)
+        self.projects.require_access(actor, snapshot.project_id, draft.dimension_id, 'create')
+        self.repository.delete_conversation(actor, conversation_id)
+        return {'conversation_id': conversation_id, 'deleted': True}
+
+    def hard_delete_conversation(self, actor: Actor, conversation_id: str) -> dict[str, Any]:
+        """Force-cascade delete a Chat even after it entered the formal task boundary.
+
+        This is an explicit override of the default ``delete_conversation`` guard
+        (the ``?force=true`` path). Authorization still mirrors the default path:
+        the actor must be the conversation owner and hold ``create`` on the first
+        message's project/dimension. The repository cascade removes the linked
+        task(s), revisions, batches, feedback/drafts, and task-scoped cleaning
+        records. Local development only; production retention/async cleanup is a
+        separate v1.9 concern and is not implemented here.
+        """
+        snapshot = self.repository.get_conversation(actor, conversation_id)
+        if not snapshot.messages:
+            raise ServiceError('STORAGE_CORRUPT', 'conversation has no messages', 500)
+        draft = self.repository.get_draft(actor, snapshot.messages[0].draft_id)
+        self.projects.require_access(actor, snapshot.project_id, draft.dimension_id, 'create')
+        cascade = self.repository.hard_delete_conversation(actor, conversation_id)
+        result = {'conversation_id': conversation_id, 'deleted': True, 'force': True}
+        result.update(cascade)
+        return result
+
+    def hard_delete_task(self, actor: Actor, task_id: str) -> dict[str, Any]:
+        """Force-cascade delete a legacy task tree by task id, with no Chat boundary.
+
+        The ``?force=true`` path for pre-conversation legacy tasks that carry no
+        ``conversation_id`` and therefore have no Chat to delete through.
+        Authorization mirrors the conversation force path: the actor must own the
+        task and hold ``create`` on its project/dimension. A conversation-linked
+        task is refused (``TASK_HAS_CONVERSATION``) so no confirmation is left
+        dangling — those must go through ``hard_delete_conversation``. Same
+        task-scoped cascade and same local-development scoping.
+        """
+        task = self.repository.get(actor, task_id)
+        self.projects.require_access(actor, task.project_id, task.dimension_id, 'create')
+        cascade = self.repository.hard_delete_task(actor, task_id)
+        result = {'task_id': task_id, 'deleted': True, 'force': True}
+        result.update(cascade)
+        return result

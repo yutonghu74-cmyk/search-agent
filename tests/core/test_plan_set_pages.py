@@ -93,7 +93,9 @@ class PlanSetPagesTest(unittest.TestCase):
     def test_legacy_format_migration_and_corrupt_partial_state(self):
         with closing(sqlite3.connect(self.fixture.path)) as db, db:
             state = restore(db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone())
-            for key in ('reserve_keys', 'operations', 'requests', 'cursors'):
+            for key in ('reserve_keys', 'operations', 'requests', 'cursors',
+                        'candidate_proposals', 'candidate_manifests',
+                        'candidate_published', 'candidate_keys', 'candidate_events'):
                 del state[key]
             db.execute('UPDATE plan_set_ledger SET format=1,payload=?', (serialize(state),))
         self.repo = self.fixture.reopen()
@@ -101,10 +103,10 @@ class PlanSetPagesTest(unittest.TestCase):
         self.reserve()
         with closing(sqlite3.connect(self.fixture.path)) as db, db:
             row = db.execute('SELECT format,payload FROM plan_set_ledger').fetchone()
-        self.assertEqual(row[0], 2)
+        self.assertEqual(row[0], 3)
         state = restore(row)
         del state['cursors']
-        self.assert_code('STORAGE_CORRUPT', lambda: restore((2, serialize(state))))
+        self.assert_code('STORAGE_CORRUPT', lambda: restore((3, serialize(state))))
 
     def test_pending_limit_is_atomic_and_replay_remains_available(self):
         operation, _ = self.reserve()
@@ -119,6 +121,19 @@ class PlanSetPagesTest(unittest.TestCase):
         self.assert_code('INPUT_LIMIT', lambda: self.reserve(self.second, 'blocked'))
         self.commit(operation)
         self.assertFalse(self.reserve(self.second, 'blocked')[1])
+
+    def test_candidate_summary_stays_bounded_after_100_committed_pages(self):
+        request = self.first
+        for index in range(101):
+            operation, _ = self.reserve(request, 'long-page-' + str(index))
+            next_cursor = 'page-' + str(index + 1)
+            self.commit(operation, request, cursor=next_cursor)
+            request = replace(request, cursor=next_cursor)
+        self.assert_code('INPUT_LIMIT', lambda: self.repo.list_committed_pages(self.actor, self.approved))
+        total, shown = self.repo.summarize_committed_hits(self.actor, self.approved)
+        self.assertEqual(total, 0)
+        self.assertEqual(shown, ())
+        self.assertEqual(self.repo.get_progress(self.actor, self.approved)[0].committed_pages, 101)
 
     def test_generation_change_blocks_late_commit(self):
         operation, _ = self.reserve()

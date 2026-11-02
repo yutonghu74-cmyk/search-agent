@@ -142,7 +142,9 @@ assert.equal(elements.status.textContent, '');
         with self.assertRaises(ValueError):
             preview_grouped_expansion("动物，狗扩20个词，狗扩10个词")
         with self.assertRaises(ValueError):
-            preview_grouped_expansion("动物，狗扩31个词")
+            preview_grouped_expansion("动物，狗扩201个词")
+        expanded = preview_grouped_expansion("动物，狗扩200个词")
+        self.assertEqual(len(expanded["plan"]["groups"][0]["auxiliary_terms"]), 200)
         plan = preview_grouped_expansion("动物，狗扩2个词")["plan"]
         plan["groups"][0]["package_name"] = "动物"
         with self.assertRaises(ValueError):

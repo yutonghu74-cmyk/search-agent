@@ -80,13 +80,13 @@ class QueryRoutingTest(unittest.TestCase):
     def test_two_libraries_route_and_encode_in_their_own_spaces(self):
         preview = self.discover()
         self.assertEqual([[option.binding.library_id for option in route.options]
-                          for route in preview.routes], [['cats', 'dogs'], ['dogs'], ['cats']])
+                          for route in preview.routes], [['dogs', 'cats'], ['dogs'], ['cats']])
         self.assertEqual(self.encodes, [])
         plan_set = self.prepare(preview)
         validate_plan_set(self.actor, self.task, plan_set)
         by_text = {text: binding for text, binding in self.encodes}
         self.assertEqual((by_text['狗'].encoder_ref, by_text['猫'].encoder_ref), ('encoder-a', 'encoder-b'))
-        self.assertEqual([len(member.plan.request.vector.values) for member in plan_set.members], [3, 2, 3])
+        self.assertEqual([len(member.plan.request.vector.values) for member in plan_set.members], [2, 2, 3])
         self.assertEqual(self.repo.get(self.actor, self.task_id), self.task)
         self.assertEqual(preview.routing_digest, self.discover().routing_digest)
 

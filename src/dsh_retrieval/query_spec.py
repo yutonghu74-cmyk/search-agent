@@ -36,6 +36,7 @@ class PredicateDefinition:
 
 
 DEFAULT_PREDICATES: Mapping[str, PredicateDefinition] = {
+    "image.semantic-match@1": PredicateDefinition(bool, frozenset({"eq"})),
     "scene.indoor@1": PredicateDefinition(bool, frozenset({"eq"})),
     "subject.home@1": PredicateDefinition(bool, frozenset({"eq"})),
     "watermark.present@1": PredicateDefinition(bool, frozenset({"eq"})),
@@ -205,4 +206,3 @@ def canonical_json(value: Mapping[str, Any]) -> bytes:
 
 def digest(value: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(value)).hexdigest()
-

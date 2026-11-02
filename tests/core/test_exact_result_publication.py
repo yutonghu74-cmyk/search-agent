@@ -34,7 +34,7 @@ class ExactResultPublicationTest(unittest.TestCase):
         self.assertFalse(replayed)
         self.assertEqual((view["accepted_count"], view["eligible_unique_count"],
                           view["reserve_count"], view["gap"]), (1, 1, 0, 9))
-        self.assertEqual(view["stop_reason"], "SEARCH_STRATEGIES_EXHAUSTED")
+        self.assertEqual(view["stop_reason"], "INPUT_SCOPE_COMPLETE")
         self.assertFalse(view["refill_dispatched"])
         after = self.f.f.f.tasks.get(self.actor, self.task_id)
         self.assertEqual(after.task_version, before.task_version + 1)

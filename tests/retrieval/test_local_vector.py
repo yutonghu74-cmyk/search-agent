@@ -91,6 +91,34 @@ class LocalVectorTest(unittest.TestCase):
         self.assertEqual([hit.vector_id for hit in cat.hits], [1, 2])
         self.assertEqual(adapter.resolve_hits(self.context, cat.hits)[0].media, self.media_cat)
 
+    def test_dynamic_encoder_accepts_new_text_only_after_library_authorization(self):
+        class Encoder:
+            def __init__(self, vector):
+                self.vector = vector
+                self.calls = []
+
+            def encode_query(self, text, binding):
+                self.calls.append((text, binding))
+                return self.vector
+
+        encoder = Encoder(self.dog_query)
+        adapter = LocalVectorRetrieval(self.authority, libraries=self.libraries,
+            query_vectors={}, approved=(), records=self.records,
+            filter_templates={'allowed': frozenset({'public'})},
+            cursor_secret=b's' * 32, query_encoder=encoder)
+        self.assertTrue(adapter.can_encode_query(self.context, '新的任意检索描述', self.dog))
+        self.assertEqual(adapter.encode_query(self.context, '新的任意检索描述', self.dog),
+                         self.dog_query)
+        self.assertEqual(len(encoder.calls), 2)
+        self.authority.denied.add('library:animals')
+        self.assert_code('ACCESS_DENIED', lambda: adapter.encode_query(
+            self.context, '未经授权的查询', self.dog))
+        self.assertEqual(len(encoder.calls), 2)
+        self.authority.denied.clear()
+        self.assert_code('QUERY_UNSUPPORTED', lambda: adapter.encode_query(
+            self.context, ' ', self.dog))
+        self.assertEqual(len(encoder.calls), 2)
+
     def test_cursor_survives_same_corpus_restart_but_not_changed_corpus_or_plan(self):
         first = self.make_adapter().search(self.context, self.dog_request)
         continuation = replace(self.dog_request, cursor=first.next_cursor)

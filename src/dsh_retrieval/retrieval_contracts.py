@@ -88,12 +88,17 @@ def validate_plan(plan: RetrievalPlan) -> None:
         raise ServiceError("ENCODER_MISMATCH", "Incompatible query vector", 422)
 
 
-def validate_scope(actor: Actor, task: Task, scope: RetrievalScope) -> None:
+def validate_scope(actor: Actor, task: Task, scope: RetrievalScope, *, reading=False) -> None:
     if (actor.tenant_id, actor.user_id) != (task.tenant_id, task.owner_user_id):
         raise ServiceError("NOT_FOUND", "Task not found", 404)
-    if (task.lifecycle != TaskLifecycle.ACTIVE
-            or task.run_status not in (RunStatus.PLANNING, RunStatus.RUNNING)
-            or task.stage == "FINALIZING"):
+    terminal_read = reading and (
+        (task.stage == 'FINALIZING' and task.run_status in (
+            RunStatus.AWAITING_INPUT, RunStatus.RUNNING,
+            RunStatus.COMPLETED, RunStatus.PARTIAL))
+        or (task.stage == 'refill' and task.run_status == RunStatus.AWAITING_INPUT))
+    if (task.lifecycle != TaskLifecycle.ACTIVE or (not terminal_read and (
+            task.run_status not in (RunStatus.PLANNING, RunStatus.RUNNING)
+            or task.stage == "FINALIZING"))):
         raise ServiceError("INVALID_STATE_TRANSITION", "Task cannot retrieve", 409)
     if RetrievalScope.from_task(task) != scope:
         raise ServiceError("REVISION_CONFLICT", "Retrieval task scope is stale", 409)

@@ -33,6 +33,65 @@ class TaskServiceTest(unittest.TestCase):
             self.service.get_task(Actor("tenant-a", "user-b"), created["task_id"])
         self.assertEqual(raised.exception.status, 404)
 
+    def test_unconfirmed_conversation_can_be_deleted_but_confirmed_one_cannot(self):
+        draft = self.service.get_draft(self.actor, 'demo', self.body['draft_id'])
+        conversation_id = draft['conversation_id']
+        self.assertTrue(self.service.delete_conversation(self.actor, conversation_id)['deleted'])
+        with self.assertRaises(ServiceError) as missing:
+            self.service.get_conversation(self.actor, conversation_id)
+        self.assertEqual(missing.exception.status, 404)
+
+        body = confirmation(self.service, self.actor, key='second-draft')
+        confirmed_draft = self.service.get_draft(self.actor, 'demo', body['draft_id'])
+        created, _ = self.service.create_task(self.actor, 'second-task', body)
+        task_id = created['task_id']
+        with self.assertRaises(ServiceError) as protected:
+            self.service.delete_conversation(self.actor, confirmed_draft['conversation_id'])
+        self.assertEqual(protected.exception.code, 'CONVERSATION_DELETE_FORBIDDEN')
+
+        # The default guard still blocks the confirmed Chat; the explicit force
+        # path cascades the linked task tree and its cleaning records together.
+        cascade = self.service.hard_delete_conversation(self.actor, confirmed_draft['conversation_id'])
+        self.assertTrue(cascade['deleted'])
+        self.assertTrue(cascade['force'])
+        self.assertIn(task_id, cascade['tasks'])
+        with self.assertRaises(ServiceError) as gone:
+            self.service.get_task(self.actor, task_id)
+        self.assertEqual(gone.exception.status, 404)
+        with self.assertRaises(ServiceError) as conv_gone:
+            self.service.get_conversation(self.actor, confirmed_draft['conversation_id'])
+        self.assertEqual(conv_gone.exception.status, 404)
+
+    def test_hard_delete_task_cascades_legacy_task_and_refuses_conversation_linked(self):
+        body = confirmation(self.service, self.actor, key='legacy-draft')
+        created, _ = self.service.create_task(self.actor, 'legacy-task', body)
+        task_id = created['task_id']
+        # A task created through the conversation flow carries a conversation_id,
+        # so the task-scoped force path must refuse it (no dangling confirmation).
+        with self.assertRaises(ServiceError) as linked:
+            self.service.hard_delete_task(self.actor, task_id)
+        self.assertEqual(linked.exception.code, 'TASK_HAS_CONVERSATION')
+        # The task is still present — the refusal happened before any mutation.
+        self.assertEqual(self.service.get_task(self.actor, task_id)['task_id'], task_id)
+
+        # A legacy task with no conversation_id is the intended target.
+        from dsh_retrieval.models import Task, TaskLifecycle, RunStatus
+        legacy = Task("rt_legacy", self.actor.tenant_id, self.actor.user_id, "legacy request",
+                      "image", 1, "domain", True, "interactive", "sha256:" + "1" * 64,
+                      project_id="demo", dimension_id="default")
+        self.service.repository.create(self.actor, "legacy-key", legacy.request_digest, legacy)
+        cascade = self.service.hard_delete_task(self.actor, "rt_legacy")
+        self.assertTrue(cascade['deleted'])
+        self.assertTrue(cascade['force'])
+        self.assertIn("rt_legacy", cascade['tasks'])
+        with self.assertRaises(ServiceError) as gone:
+            self.service.get_task(self.actor, "rt_legacy")
+        self.assertEqual(gone.exception.status, 404)
+        # Cross-user hard delete is hidden, mirroring the conversation path.
+        with self.assertRaises(ServiceError) as foreign:
+            self.service.hard_delete_task(Actor("tenant-a", "user-b"), task_id)
+        self.assertEqual(foreign.exception.status, 404)
+
 
 class StateMachineTest(unittest.TestCase):
     def task(self):

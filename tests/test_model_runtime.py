@@ -30,6 +30,33 @@ class Transport:
 
 
 class ModelRuntimeTest(unittest.TestCase):
+    def test_vlm_cleaning_plan_uses_selected_vision_model_and_requires_coverage(self):
+        runtime = self.runtime([{'instructions': ['检查有人和狗', '检查画面无水印']}])
+        binding = runtime.binding('text', 'vision')
+        self.assertEqual(runtime.plan_vlm_cleaning(('有人和狗', '画面无水印'), binding),
+                         ('检查有人和狗', '检查画面无水印'))
+        self.assertEqual(self.transport.calls[0]['model'], 'vision-v1')
+        self.assertEqual(json.loads(self.transport.calls[0]['messages'][1]['content'])['chunks'],
+                         ['有人和狗', '画面无水印'])
+        runtime = self.runtime([{'instructions': ['检查有人和狗']},
+                                {'instructions': ['检查有人和狗']}])
+        with self.assertRaises(ServiceError) as caught:
+            runtime.plan_vlm_cleaning(('有人和狗', '画面无水印'),
+                                      runtime.binding('text', 'vision'))
+        self.assertEqual(caught.exception.code, 'MODEL_OUTPUT_INVALID')
+        self.assertEqual(len(self.transport.calls), 2)
+
+    def test_vlm_cleaning_plan_repairs_one_invalid_shape_without_losing_chunks(self):
+        runtime = self.runtime([{'instructions': ['遗漏了一条']},
+                                {'instructions': ['检查有人和狗', '检查画面无水印']}])
+        binding = runtime.binding('text', 'vision')
+        self.assertEqual(runtime.plan_vlm_cleaning(('有人和狗', '画面无水印'), binding),
+                         ('检查有人和狗', '检查画面无水印'))
+        self.assertEqual(len(self.transport.calls), 2)
+        repaired = json.loads(self.transport.calls[1]['messages'][1]['content'])
+        self.assertEqual(repaired['chunks'], ['有人和狗', '画面无水印'])
+        self.assertIn('repair', repaired)
+
     def test_contextual_edit_uses_visible_groups_and_both_sides_of_history(self):
         edits = [{'target': 'terms', 'labels': ['猫'], 'operation': 'scale', 'value': 0.5},
                  {'target': 'images', 'labels': [], 'operation': 'add', 'value': -20}]
@@ -87,6 +114,105 @@ class ModelRuntimeTest(unittest.TestCase):
         self.assertEqual(answer['kind'], 'answer')
         edit = runtime.classify_followup('猫图片', groups, '图片要一半就行', 'text', task_context=context)
         self.assertEqual(edit['target_count'], 10)
+
+    def test_single_group_term_reduction_recovers_explicit_target(self):
+        groups = [{'primary_label': '人与宠物合影',
+                   'auxiliary_terms': [f'人与宠物合影场景{i}' for i in range(100)]}]
+        runtime = self.runtime([{'kind': 'expansion', 'target_count': None,
+                                 'requested_terms_per_group': None, 'count_edits': [],
+                                 'expansion_instruction': '将召回词减少到两个'},
+                                {'kind': 'expansion', 'target_count': None,
+                                 'requested_terms_per_group': 2, 'count_edits': [],
+                                 'expansion_instruction': '将召回词减少到两个'}])
+        result = runtime.classify_followup('找1000张人与宠物合影', groups,
+                                           '检索词减少到两个', 'text',
+                                           task_context={'target_count': 1000})
+        self.assertEqual(result['requested_terms_per_group'], 2)
+        self.assertIsNone(result['target_count'])
+        self.assertTrue(result['term_count_only'])
+        self.assertFalse(self.transport.calls)
+
+        runtime = self.runtime([{'kind': 'expansion', 'target_count': None,
+                                 'requested_terms_per_group': 2, 'count_edits': [],
+                                 'term_count_only': True}])
+        result = runtime.classify_followup('找1000张人与宠物合影', groups,
+                                           '检索词减少到两个', 'text',
+                                           task_context={'target_count': 1000})
+        self.assertTrue(result['term_count_only'])
+
+        runtime = self.runtime([{'kind': 'expansion', 'target_count': None,
+                                 'requested_terms_per_group': 2, 'count_edits': []}])
+        result = runtime.classify_followup('找1000张人与宠物合影', groups,
+                                           '搜索短语收敛成俩', 'text',
+                                           task_context={'target_count': 1000})
+        self.assertEqual(result['requested_terms_per_group'], 2)
+
+        runtime = self.runtime([{'kind': 'expansion', 'target_count': None,
+                                 'requested_terms_per_group': 100, 'count_edits': []},
+                                {'kind': 'expansion', 'target_count': None,
+                                 'requested_terms_per_group': 2, 'count_edits': []}])
+        result = runtime.classify_followup('找1000张人与宠物合影', groups,
+                                           '检索词减少到两个', 'text',
+                                           task_context={'target_count': 1000})
+        self.assertEqual(result['requested_terms_per_group'], 2)
+        self.assertFalse(self.transport.calls)
+
+    def test_explicit_order_only_reduction_recovers_missing_model_flag(self):
+        groups = [{'primary_label': '小孩抱狗',
+                   'auxiliary_terms': ['词一', '词二', '词三']}]
+        output = {'kind': 'expansion', 'target_count': None,
+                  'requested_terms_per_group': None,
+                  'count_edits': [{'target': 'terms', 'labels': ['小孩抱狗'],
+                                   'operation': 'set', 'value': 2}],
+                  'term_count_only': False,
+                  'expansion_instruction': '按原顺序保留前两条'}
+        runtime = self.runtime([output])
+        result = runtime.classify_followup('小孩抱狗', groups,
+            '只按原词表顺序保留前两个检索词，不替换词的内容，1张目标不变。',
+            'text', task_context={'target_count': 1})
+        self.assertTrue(result['term_count_only'])
+        runtime = self.runtime([output])
+        result = runtime.classify_followup('小孩抱狗', groups,
+            '按原词表顺序保留前两个检索词，同时改成黑狗',
+            'text', task_context={'target_count': 1})
+        self.assertFalse(result['term_count_only'])
+
+    def test_complete_quoted_term_list_routes_without_model(self):
+        runtime = self.runtime([])
+        groups = [{'primary_label': '小孩抱狗', 'auxiliary_terms': ['旧词一', '旧词二']}]
+        result = runtime.classify_followup('找1张小孩抱狗图片', groups,
+            '检索词减少到两个，保留“小孩抱狗”和“小女孩在草地上抱着狗”，其他需求和1张目标不变。',
+            'text', task_context={'target_count': 1})
+        self.assertEqual(result['kind'], 'expansion')
+        self.assertEqual(result['requested_terms_per_group'], 1)
+        self.assertFalse(result['term_count_only'])
+        self.assertFalse(self.transport.calls)
+
+    def test_pure_six_term_revision_routes_without_model(self):
+        runtime = self.runtime([])
+        result = runtime.classify_followup('找1张小孩抱狗图片',
+            [{'primary_label': '小孩抱狗', 'auxiliary_terms': ['词一', '词二']}],
+            '检索词改成6个', 'text', task_context={'target_count': 1})
+        self.assertEqual(result['requested_terms_per_group'], 6)
+        self.assertTrue(result['term_count_only'])
+        self.assertFalse(self.transport.calls)
+
+    def test_independent_search_is_not_a_revision_of_current_task(self):
+        runtime = self.runtime([
+            {'kind': 'new_request', 'target_count': None, 'requested_terms_per_group': None,
+             'count_edits': [], 'reply': '这是另一项检索需求。'}])
+        groups = [{'primary_label': '狗', 'auxiliary_terms': ['宠物狗']}]
+        result = runtime.classify_followup('找20张狗图片', groups, '另外找20张兔子图片', 'text',
+                                           task_context={'target_count': 20, 'run_status': 'RUNNING'})
+        self.assertEqual(result['kind'], 'new_request')
+        self.assertIsNone(result['target_count'])
+        self.assertEqual(result['count_edits'], [])
+        self.assertIn('new_request', self.transport.calls[0]['messages'][0]['content'])
+        invalid = self.runtime([{'kind': 'new_request', 'target_count': 20,
+                                 'requested_terms_per_group': None}] * 2)
+        with self.assertRaises(ServiceError) as caught:
+            invalid.classify_followup('找20张狗图片', groups, '另外找20张兔子图片', 'text')
+        self.assertEqual(caught.exception.code, 'MODEL_OUTPUT_INVALID')
 
     def test_image_count_only_change_can_retain_words(self):
         groups = [{'primary_label': '猫', 'auxiliary_terms': ['猫在树下']}]
@@ -161,7 +287,21 @@ class ModelRuntimeTest(unittest.TestCase):
             self.assertEqual(context['current_groups'], preview)
             self.assertEqual(context['recent_messages'][0]['text'], '少找点，主体还是狗，不要情绪，多找户外画面')
             self.assertEqual(context['task_context']['target_count'], 5)
+            history = call('/v1/retrieval/conversations/' + task['conversation_id'])
+            self.assertEqual([item['role'] for item in history['task_messages']],
+                             ['user', 'assistant', 'user', 'assistant'])
+            self.assertEqual(history['task_messages'][0]['text'],
+                             '少找点，主体还是狗，不要情绪，多找户外画面')
             self.assertEqual(service.get_task(Actor('tenant', 'owner'), task['task_id'])['task_version'], task['task_version'])
+            self.assertEqual(history['clarification_messages'], [])
+            session_id, _ = dialogue.store.save(Actor('tenant', 'owner'), 'demo', None, None, {
+                'messages': [{'role': 'user', 'text': '找狗'}, {'role': 'assistant', 'text': '几张？'}]})
+            archived = call(f'/v1/retrieval/projects/demo/dialogue-sessions/{session_id}/archive',
+                            {'task_id': task['task_id']})
+            self.assertEqual(archived['message_count'], 2)
+            self.assertEqual(call('/v1/retrieval/projects/demo/dialogue-sessions')['items'], [])
+            history = call('/v1/retrieval/conversations/' + task['conversation_id'])
+            self.assertEqual([item['text'] for item in history['clarification_messages']], ['找狗', '几张？'])
         finally:
             server.shutdown()
             server.server_close()
@@ -198,13 +338,13 @@ class ModelRuntimeTest(unittest.TestCase):
 
     def test_model_expansion_uses_quantity_as_advice_and_accepts_feedback(self):
         self.assertEqual([ModelRuntime.expansion_terms_per_group(count) for count in (1, 100, 101, 250, 10000)],
-                         [1, 1, 2, 3, 30])
+                         [3, 3, 3, 3, 100])
         runtime = self.runtime([{'parent_label': '动物', 'groups': [
             {'primary_label': '狗', 'auxiliary_terms': ['金毛', '柯基', '边牧']},
             {'primary_label': '猫', 'auxiliary_terms': ['橘猫', '布偶猫', '狸花猫']}]}])
         result = runtime.expand('找250张狗和猫的图片', 'text', 'vision', target_count=250)
         self.assertEqual([group['requested_expansion_count'] for group in result['plan']['groups']], [3, 3])
-        self.assertIn('建议每类约 3 个辅助词', self.transport.calls[0]['messages'][0]['content'])
+        self.assertIn('初始词表每类至少建议 3 个', self.transport.calls[0]['messages'][0]['content'])
         self.assertEqual(json.loads(self.transport.calls[0]['messages'][1]['content'])['target_count'], 250)
         runtime = self.runtime([{'parent_label': None, 'groups': [
             {'primary_label': '狗', 'auxiliary_terms': ['金毛']}]}])
@@ -219,6 +359,38 @@ class ModelRuntimeTest(unittest.TestCase):
             with self.assertRaises(ServiceError) as caught:
                 runtime.expand('狗图片', 'text', 'vision', target_count=invalid)
             self.assertEqual(caught.exception.code, 'INVALID_SPEC')
+
+    def test_initial_expansion_uses_each_explicit_category_count_and_repairs_short_list(self):
+        one_each = {'parent_label': None, 'groups': [
+            {'primary_label': '狗', 'auxiliary_terms': ['狗在草地奔跑']},
+            {'primary_label': '兔子', 'auxiliary_terms': ['兔子在草地吃草']}]}
+        diverse = {'parent_label': None, 'groups': [
+            {'primary_label': '狗', 'auxiliary_terms': ['狗在草地奔跑', '狗在室内坐着', '狗的侧面肖像']},
+            {'primary_label': '兔子', 'auxiliary_terms': ['兔子在草地吃草', '兔子在笼内站立', '兔子的正面肖像']}]}
+        runtime = self.runtime([one_each, diverse])
+        result = runtime.expand('查找20张狗20张兔子的照片', 'text', 'vision', target_count=40)
+        self.assertEqual(len(self.transport.calls), 2)
+        self.assertEqual([group['requested_expansion_count'] for group in result['plan']['groups']], [3, 3])
+        sent = json.loads(self.transport.calls[0]['messages'][1]['content'])
+        self.assertEqual(sent['category_targets'], [
+            {'label': '狗', 'count': 20}, {'label': '兔子', 'count': 20}])
+        self.assertEqual(sent['suggested_terms_by_category'], {'狗': 3, '兔子': 3})
+        self.assertIn('明确类别缺少', self.transport.calls[1]['messages'][0]['content'])
+
+        runtime = self.runtime([{'parent_label': None, 'groups': [
+            {'primary_label': '狗', 'auxiliary_terms': ['狗在草地', '狗在室内', '狗在街道']},
+            {'primary_label': '兔子', 'auxiliary_terms': [f'兔子场景{i}' for i in range(5)]}]}])
+        result = runtime.expand('20张狗，500张兔子', 'text', 'vision', target_count=520)
+        self.assertEqual([group['requested_expansion_count'] for group in result['plan']['groups']], [3, 5])
+        sent = json.loads(self.transport.calls[0]['messages'][1]['content'])
+        self.assertEqual(sent['suggested_terms_by_category'], {'狗': 3, '兔子': 5})
+
+        runtime = self.runtime([one_each])
+        result = runtime.expand('查找20张狗20张兔子的照片，每类要一个检索词',
+                                'text', 'vision', target_count=40)
+        self.assertEqual([group['requested_expansion_count'] for group in result['plan']['groups']], [1, 1])
+        sent = json.loads(self.transport.calls[0]['messages'][1]['content'])
+        self.assertEqual(sent['requested_terms_per_group'], 1)
 
     def test_explicit_feedback_term_count_overrides_quantity_advice(self):
         groups = [{'primary_label': '狗', 'auxiliary_terms': ['狗在草地奔跑', '狗接飞盘',
@@ -294,7 +466,7 @@ class ModelRuntimeTest(unittest.TestCase):
 
     def test_relative_double_above_group_cap_fails_before_model_call(self):
         runtime = self.runtime([])
-        current = [{'primary_label': '猫', 'auxiliary_terms': [f'猫场景{i}' for i in range(16)]}]
+        current = [{'primary_label': '猫', 'auxiliary_terms': [f'猫场景{i}' for i in range(101)]}]
         with self.assertRaises(ServiceError) as caught:
             runtime.expand('找猫图片', 'text', 'vision', feedback_text='检索词翻倍', current_groups=current,
                            count_edits=[{'target': 'terms', 'labels': [], 'operation': 'scale', 'value': 2}])
@@ -478,6 +650,18 @@ class ModelRuntimeTest(unittest.TestCase):
             self.assertEqual(len(self.transport.calls), expected_calls)
             self.assertNotIn('test-secret', str(raised.exception))
             self.assertEqual(sleep.call_count, expected_calls - 1)
+            if outputs and isinstance(outputs[-1], HTTPError) and outputs[-1].code == 503:
+                self.assertTrue(raised.exception.retryable)
+
+    def test_missing_catalog_model_reports_actionable_error_without_upstream_body(self):
+        missing = HTTPError('https://fixture.invalid/v1/chat/completions', 404,
+                            'test-secret', {}, BytesIO(b'{"error":{"code":"model_not_found","message":"test-secret"}}'))
+        runtime = self.runtime([missing])
+        with self.assertRaises(ServiceError) as raised:
+            runtime.expand('狗', 'text', 'vision')
+        self.assertEqual(raised.exception.code, 'MODEL_NOT_AVAILABLE')
+        self.assertIn('HTTP 404', raised.exception.message)
+        self.assertNotIn('test-secret', str(raised.exception))
 
     def test_config_drift_and_remote_image_are_rejected_before_call(self):
         runtime = self.runtime([])

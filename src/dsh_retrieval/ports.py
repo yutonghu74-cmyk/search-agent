@@ -195,6 +195,33 @@ class TaskRepository(Protocol):
         """List at most 100 owner-only conversations, newest activity first."""
         ...
 
+    def delete_conversation(self, actor: Actor, conversation_id: str) -> None:
+        """Delete an owner-only conversation only while it has no confirmed task."""
+        ...
+
+    def hard_delete_conversation(self, actor: Actor, conversation_id: str) -> dict[str, Any]:
+        """Force-delete an owner-only conversation, cascading its confirmed task tree.
+
+        Migration note: the default ``delete_conversation`` guard stays intact
+        (confirmed conversations still raise CONVERSATION_DELETE_FORBIDDEN).
+        This is the explicit ``force`` override used by local development only;
+        it removes the linked task(s) and task-scoped retrieval/cleaning records
+        together. Production async retention/cleanup (v1.9) is a separate concern.
+        """
+        ...
+
+    def hard_delete_task(self, actor: Actor, task_id: str) -> dict[str, Any]:
+        """Force-delete a legacy task tree by task id, with no conversation boundary.
+
+        Used for pre-conversation legacy tasks that carry no ``conversation_id``
+        and therefore have no Chat to delete through. A conversation-linked task
+        is refused (``TASK_HAS_CONVERSATION``) so no confirmation is left
+        dangling — those must go through ``hard_delete_conversation``. Same
+        task-scoped cascade (revisions/batches/feedback/draft/cleaning) and same
+        local-development ``force`` scoping as the conversation path.
+        """
+        ...
+
 
 class ProjectContextProvider(Protocol):
     def require_access(self, actor: Actor, project_id: str, dimension_id: str, action: str) -> None: ...

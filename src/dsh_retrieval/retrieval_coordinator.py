@@ -21,10 +21,14 @@ class RetrievalCoordinator:
         return self.repository.confirm(actor, task_id, proposal_digest=proposal_digest,
             expected_task_version=expected_task_version, action=action, key=key)
 
-    def _progress(self, actor, approved):
-        if self.repository.get_current(actor, approved.scope.task_id) != approved:
+    def _progress(self, actor, approved, *, allow_downstream=False):
+        current = (self.repository.get_browse_current(actor, approved.scope.task_id)
+                   if allow_downstream else
+                   self.repository.get_current(actor, approved.scope.task_id))
+        if current != approved:
             raise ServiceError('PLAN_NOT_CURRENT', 'Approved plan set changed', 409)
-        rows = self.repository.get_progress(actor, approved)
+        rows = (self.repository.get_progress(actor, approved, allow_downstream=True)
+                if allow_downstream else self.repository.get_progress(actor, approved))
         members = {member.plan.request.plan_id: member.plan.request for member in approved.members}
         if (type(rows) is not tuple or len(rows) != len(members)
                 or any(type(row) is not PlanSetMemberProgress for row in rows)
@@ -39,6 +43,45 @@ class RetrievalCoordinator:
                     or row.page is not None and (type(row.page) is not SearchPage or row.committed_pages < 1)):
                 raise ServiceError('STORAGE_CORRUPT', 'Invalid member checkpoint', 500)
         return rows
+
+    def tick_position(self, actor, approved, *, plan_id, expected_cursor,
+                      authorization_version='current'):
+        """Execute exactly one approved downstream page for a refill reservation."""
+        rows = self._progress(actor, approved, allow_downstream=True)
+        row = next((item for item in rows if item.plan_id == plan_id), None)
+        if row is None:
+            raise ServiceError('PLAN_REQUEST_MISMATCH', 'Unknown refill plan member', 409)
+        request = self._next(row)
+        if request is None:
+            return {'status': 'replayed', 'network_attempts': 0, 'outcomes': []}
+        if request.cursor != expected_cursor:
+            raise ServiceError('REFILL_POSITION_CHANGED', 'Refill cursor changed', 409)
+        key = 'refill_' + digest({'set': approved.proposal_digest,
+                                  'plan_id': plan_id, 'cursor': expected_cursor})[7:]
+        operation_id, replayed = self.repository.reserve_page(
+            actor, approved, plan_id=plan_id, request=request, key=key,
+            allow_downstream=True)
+        current = next(item for item in self._progress(
+            actor, approved, allow_downstream=True) if item.plan_id == plan_id)
+        if current.page is not None:
+            return {'status': 'replayed', 'network_attempts': 0, 'outcomes': []}
+        context = AccessContext(actor, approved.scope.task_id, 'retrieval',
+                                authorization_version)
+        try:
+            page = self.gateway.search(context, request)
+        except ServiceError as error:
+            if error.retryable and error.status in (429, 502, 503, 504):
+                return {'status': 'retry_pending', 'network_attempts': 1,
+                        'outcomes': [{'plan_id': plan_id, 'operation_id': operation_id,
+                                      'status': 'retry_pending', 'code': error.code}]}
+            raise
+        committed_replay = self.repository.commit_page(
+            actor, approved, operation_id=operation_id, plan_id=plan_id,
+            request=request, page=page, allow_downstream=True)
+        return {'status': 'replayed' if replayed and committed_replay else 'committed',
+                'network_attempts': 1,
+                'outcomes': [{'plan_id': plan_id, 'operation_id': operation_id,
+                              'status': 'committed', 'replayed': committed_replay}]}
 
     @staticmethod
     def _next(row):

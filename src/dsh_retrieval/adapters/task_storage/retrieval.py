@@ -55,6 +55,45 @@ def load_state(row):
         raise ServiceError("STORAGE_CORRUPT", "invalid retrieval ledger; refusing reset", 500) from exc
 
 
+def _event_task_id(event):
+    plan = event.get("plan") if isinstance(event, dict) else None
+    return getattr(getattr(plan, "scope", None), "task_id", None)
+
+
+def purge_for_tasks(state, task_ids):
+    """Drop every retrieval record scoped to the given task ids, in place.
+
+    ``load_state`` validates shape only, so the events list is not strictly
+    revalidated; it is still filtered so no dangling plan reference survives.
+    A no-op for an empty task set. Returns the mutated state.
+    """
+    if not task_ids:
+        return state
+    surviving_ops = {oid for oid, record in state["operations"].items()
+                     if record[0].scope.task_id not in task_ids}
+    state["operations"] = {oid: rec for oid, rec in state["operations"].items()
+                           if oid in surviving_ops}
+    state["requests"] = {fp: oid for fp, oid in state["requests"].items()
+                         if oid in surviving_ops}
+    state["cursors"] = {key: oid for key, oid in state["cursors"].items()
+                        if oid in surviving_ops}
+    state["proposals"] = {key: p for key, p in state["proposals"].items()
+                          if key[0] not in task_ids}
+    state["approved"] = {key: p for key, p in state["approved"].items()
+                         if key[0] not in task_ids}
+    state["current"] = {tid: p for tid, p in state["current"].items()
+                        if tid not in task_ids}
+    state["epochs"] = {tid: e for tid, e in state["epochs"].items()
+                       if tid not in task_ids}
+    state["confirm_keys"] = {key: v for key, v in state["confirm_keys"].items()
+                             if key[2] not in task_ids}
+    state["reserve_keys"] = {key: v for key, v in state["reserve_keys"].items()
+                             if key[2] not in task_ids}
+    state["events"] = [event for event in state["events"]
+                       if _event_task_id(event) not in task_ids]
+    return state
+
+
 class SQLiteRetrievalPlanRepository:
     """Implements RetrievalPlanRepository; shares one file with task/cleaning data.
 

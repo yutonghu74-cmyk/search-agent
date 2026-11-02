@@ -8,7 +8,7 @@ from .query_spec import digest
 
 
 MAX_GROUPS = 20
-MAX_EXPANSIONS = 30
+MAX_EXPANSIONS = 200
 MODIFIERS = (
     "特写", "全身", "正面", "侧面", "背面", "近景", "中景", "远景", "单体", "群体",
     "静态", "动态", "室内", "户外", "自然光", "棚拍", "纯色背景", "生活场景", "自然环境", "城市环境",
@@ -16,13 +16,25 @@ MODIFIERS = (
 )
 GROUP_PATTERN = re.compile(
     r"^(?P<label>[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_-]{0,31})\s*"
-    r"(?:扩|扩展)\s*(?P<count>\d{1,2})\s*个?(?:词|关键词)$"
+    r"(?:扩|扩展)\s*(?P<count>\d{1,3})\s*个?(?:词|关键词)$"
 )
 
 
 def _term(label: str, modifier: str) -> str:
     separator = " " if label.isascii() else ""
     return label + separator + modifier
+
+
+def _modifiers(count: int) -> list[str]:
+    """Keep the original template stable, then extend it deterministically."""
+    values = list(MODIFIERS)
+    for first in MODIFIERS:
+        for second in MODIFIERS:
+            if first != second:
+                values.append(f"{first}·{second}")
+                if len(values) >= count:
+                    return values[:count]
+    return values[:count]
 
 
 def _group_id(parent_label: str | None, primary_label: str) -> str:
@@ -70,13 +82,13 @@ def preview_grouped_expansion(raw_request: str) -> dict:
         if primary_label in seen:
             raise ValueError("primary labels must be unique")
         if count < 1 or count > MAX_EXPANSIONS:
-            raise ValueError("expansion count must be between 1 and 30")
+            raise ValueError(f"expansion count must be between 1 and {MAX_EXPANSIONS}")
         seen.add(primary_label)
         groups.append({
             "group_id": _group_id(parent_label, primary_label),
             "primary_label": primary_label,
             "requested_expansion_count": count,
-            "auxiliary_terms": [_term(primary_label, modifier) for modifier in MODIFIERS[:count]],
+            "auxiliary_terms": [_term(primary_label, modifier) for modifier in _modifiers(count)],
             "package_name": primary_label,
             "package_mode": "separate",
             "delivery_target": None,

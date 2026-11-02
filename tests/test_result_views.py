@@ -34,7 +34,8 @@ class ResultViewTest(unittest.TestCase):
         first = build_result_page(TASK, PROPOSAL, published(), limit=2)
         self.assertTrue(first["available"])
         self.assertEqual(first["counts"], {"eligible_unique": 4, "accepted": 3,
-            "reserve": 1, "duplicate": 2, "failed": 1, "pending_review": 1, "gap": 0})
+            "reserve": 1, "duplicate": 2, "failed": 1, "pending_review": 1,
+            "near_duplicate_review": 0, "gap": 0})
         self.assertEqual([item["candidate_id"] for item in first["items"]], ["asset-0", "asset-1"])
         self.assertTrue(all(item["preview_status"] == "unavailable" for item in first["items"]))
         second = build_result_page(TASK, PROPOSAL, published(), limit=2,
@@ -45,6 +46,40 @@ class ResultViewTest(unittest.TestCase):
     def test_reserve_is_a_separate_view(self):
         page = build_result_page(TASK, PROPOSAL, published(), view_type="reserve")
         self.assertEqual([item["candidate_id"] for item in page["items"]], ["asset-4"])
+
+    def test_fused_source_evidence_is_visible_without_inflating_counts(self):
+        result = published()
+        first = {**result["accepted"][0],
+                 "candidate_ids": ("asset-0", "asset-copy"),
+                 "sources": (
+                     {"candidate_id": "asset-0", "binding_id": "binding-a",
+                      "library_id": "library-a", "index_version": "v1",
+                      "vector_id": "vec-a", "score": 0.9},
+                     {"candidate_id": "asset-copy", "binding_id": "binding-b",
+                      "library_id": "library-b", "index_version": "v2",
+                      "vector_id": 2, "score": 0.8},)}
+        result["accepted"] = (first,) + result["accepted"][1:]
+        page = build_result_page(TASK, PROPOSAL, result)
+        item = page["items"][0]
+        self.assertEqual((item["duplicate_candidate_count"], item["source_count"]), (1, 2))
+        self.assertEqual([source["library_id"] for source in item["sources"]],
+                         ["library-a", "library-b"])
+        self.assertEqual(page["counts"]["accepted"], 3)
+
+    def test_near_duplicate_review_is_symmetric_and_does_not_change_counts(self):
+        result = published()
+        result["near_duplicate_pairs"] = ({
+            "candidate_id": "asset-0", "other_candidate_id": "asset-1",
+            "hamming_distance": 3, "review_threshold": 6,
+            "policy_ref": "near-duplicate-review@1"},)
+        result["near_duplicate_review_count"] = 1
+        page = build_result_page(TASK, PROPOSAL, result)
+        self.assertEqual(page["counts"]["near_duplicate_review"], 1)
+        self.assertEqual(page["counts"]["accepted"], 3)
+        self.assertEqual(page["items"][0]["near_duplicate_matches"][0]["candidate_id"],
+                         "asset-1")
+        self.assertEqual(page["items"][1]["near_duplicate_matches"][0]["candidate_id"],
+                         "asset-0")
 
     def test_cursor_is_bound_to_digest_and_view(self):
         cursor = build_result_page(TASK, PROPOSAL, published(), limit=1)["next_cursor"]

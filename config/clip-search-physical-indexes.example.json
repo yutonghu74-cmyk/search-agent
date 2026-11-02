@@ -1,0 +1,28 @@
+{
+  "schema": "physical-index-registry@1",
+  "entries": [
+    {
+      "binding": {
+        "binding_id": "clip-images-simulated-v1",
+        "library_id": "clip-images-simulated",
+        "index_version": "simulated-index-v1",
+        "encoder_ref": "chinese-clip-vit-huge-patch14-simulated",
+        "vector_dimension": 4,
+        "metric": "IP"
+      },
+      "connection_ref": "clip-combined-service-simulated",
+      "database": "none",
+      "collection": "simulated-collection",
+      "primary_key_field": "path",
+      "vector_field": "vector",
+      "model_id": "chinese-clip-vit-huge-patch14",
+      "model_version": "unknown-simulated",
+      "preprocessing_version": "clip-text-77-simulated",
+      "filter_template_ref": "simulated-all",
+      "pagination_mode": "offset",
+      "read_mode": "live",
+      "max_batch_size": 25,
+      "max_depth": 100
+    }
+  ]
+}

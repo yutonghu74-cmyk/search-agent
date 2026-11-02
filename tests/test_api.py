@@ -16,11 +16,23 @@ from draft_helpers import BODY
 class ResultReader:
     def __init__(self):
         self.items = {}
+        self.review_calls = []
 
     def get_current_result_set(self, actor, task_id):
         if task_id not in self.items:
             raise ServiceError("NOT_FOUND", "Current result set not found", 404)
         return self.items[task_id]
+
+    def near_duplicate_reviews(self, actor, task_id):
+        return {"result_set_id": "resultset-review",
+                "result_set_digest": "sha256:" + "b" * 64,
+                "task_version": 4, "pending_cluster_count": 1,
+                "clusters": [], "decisions": [], "counts": {}}
+
+    def review_near_duplicate_cluster(self, actor, task_id, **values):
+        self.review_calls.append((actor, task_id, values))
+        return {"result_set_id": "resultset-reviewed",
+                "pending_cluster_count": 0}, False
 
 
 class ApiTest(unittest.TestCase):
@@ -42,7 +54,7 @@ class ApiTest(unittest.TestCase):
         cls.server.server_close()
         cls.thread.join()
 
-    def request(self, path, *, body=None, key=None, identity=True):
+    def request(self, path, *, body=None, key=None, identity=True, method=None):
         headers = {}
         if identity:
             headers.update({"X-Tenant-Id": "tenant-a", "X-User-Id": "user-a"})
@@ -52,8 +64,9 @@ class ApiTest(unittest.TestCase):
             data = json.dumps(body).encode()
         if key:
             headers["Idempotency-Key"] = key
-        request = Request(self.base + path, headers=headers, data=data,
-                          method="POST" if body is not None else "GET")
+        if method is None:
+            method = "POST" if body is not None else "GET"
+        request = Request(self.base + path, headers=headers, data=data, method=method)
         try:
             response = urlopen(request)
         except HTTPError as error:
@@ -63,12 +76,19 @@ class ApiTest(unittest.TestCase):
             payload = json.loads(payload)
         return response.status, payload, response.headers
 
-    def test_static_chat_has_security_headers(self):
+    def test_production_home_and_chat_route_have_security_headers(self):
         status, body, headers = self.request("/", identity=False)
         self.assertEqual(status, 200)
-        self.assertIn(b"Chat", body)
+        self.assertIn('数据生产线路'.encode(), body)
+        self.assertIn(b'/production.js', body)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+        status, body, _ = self.request("/chat", identity=False)
+        self.assertEqual(status, 200)
+        self.assertIn(b'/chat.js', body)
+        status, body, _ = self.request("/production.js", identity=False)
+        self.assertEqual(status, 200)
+        self.assertIn(b'function selectLine(id)', body)
 
     def test_build_reports_process_source_and_runtime_without_identity(self):
         status, body, _ = self.request('/v1/build', identity=False)
@@ -166,6 +186,21 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(second["items"][0]["candidate_id"], "asset-b")
         self.assertIsNone(second["next_cursor"])
 
+    def test_deferred_near_duplicate_review_routes_are_not_exposed(self):
+        status, review, _ = self.request(
+            "/v1/retrieval/tasks/task-review/near-duplicate-reviews")
+        self.assertEqual((status, review["code"]), (404, "NOT_FOUND"))
+        body = {"expected_task_version": 4,
+                "result_set_digest": "sha256:" + "b" * 64,
+                "cluster_id": "ndc_" + "1" * 24,
+                "action": "merge",
+                "representative_candidate_id": "asset-a"}
+        status, reviewed, _ = self.request(
+            "/v1/retrieval/tasks/task-review/near-duplicate-reviews",
+            body=body, key="review-key")
+        self.assertEqual((status, reviewed["code"]), (404, "NOT_FOUND"))
+        self.assertEqual(self.results.review_calls, [])
+
     def test_existing_feedback_draft_can_be_revised_with_expansion(self):
         status, draft, _ = self.request('/v1/retrieval/projects/demo/drafts', body=BODY, key='revise-draft')
         self.assertEqual(status, 200)
@@ -209,6 +244,49 @@ class ApiTest(unittest.TestCase):
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
         status, body, _ = self.request("/v1/retrieval/tasks/missing/results", identity=False)
         self.assertEqual((status, body["code"]), (401, "UNAUTHENTICATED"))
+
+    def test_force_delete_cascades_confirmed_chat_and_legacy_task(self):
+        status, draft, _ = self.request("/v1/retrieval/projects/demo/drafts", body=BODY, key="del-draft")
+        self.assertEqual(status, 200)
+        status, task, _ = self.request("/v1/retrieval/tasks", key="del-task", body={
+            "draft_id": draft["draft_id"], "expected_draft_version": draft["draft_version"],
+            "proposal_digest": draft["proposal_digest"], "action": "confirm"})
+        self.assertEqual(status, 202)
+        conversation_id = draft["conversation_id"]
+        task_id = task["task_id"]
+
+        # Default delete is still blocked on a confirmed Chat.
+        status, body, _ = self.request(f"/v1/retrieval/conversations/{conversation_id}",
+                                       method="DELETE")
+        self.assertEqual((status, body["code"]), (409, "CONVERSATION_DELETE_FORBIDDEN"))
+
+        # The force path cascades the Chat and its linked task together.
+        status, cascade, _ = self.request(
+            f"/v1/retrieval/conversations/{conversation_id}?force=true", method="DELETE")
+        self.assertEqual(status, 200)
+        self.assertTrue(cascade["deleted"])
+        self.assertTrue(cascade["force"])
+        self.assertIn(task_id, cascade["tasks"])
+        status, _, _ = self.request(f"/v1/retrieval/tasks/{task_id}")
+        self.assertEqual(status, 404)
+        status, _, _ = self.request(f"/v1/retrieval/conversations/{conversation_id}")
+        self.assertEqual(status, 404)
+
+        # A conversation-linked task refuses the task-scoped force path.
+        status, draft2, _ = self.request("/v1/retrieval/projects/demo/drafts", body=BODY, key="del-draft-2")
+        status, task2, _ = self.request("/v1/retrieval/tasks", key="del-task-2", body={
+            "draft_id": draft2["draft_id"], "expected_draft_version": draft2["draft_version"],
+            "proposal_digest": draft2["proposal_digest"], "action": "confirm"})
+        status, linked, _ = self.request(
+            f"/v1/retrieval/tasks/{task2['task_id']}?force=true", method="DELETE")
+        self.assertEqual((status, linked["code"]), (409, "TASK_HAS_CONVERSATION"))
+        # The task is still present after the refusal.
+        status, _, _ = self.request(f"/v1/retrieval/tasks/{task2['task_id']}")
+        self.assertEqual(status, 200)
+
+        # A task-scoped force delete without force=true is not offered.
+        status, body, _ = self.request(f"/v1/retrieval/tasks/{task2['task_id']}", method="DELETE")
+        self.assertEqual((status, body["code"]), (404, "NOT_FOUND"))
 
 
 if __name__ == "__main__":

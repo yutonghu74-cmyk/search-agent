@@ -92,6 +92,10 @@ class PhysicalIndexRegistry:
         self._entries = MappingProxyType(by_id)
 
     @property
+    def bindings(self):
+        return tuple(self._entries[key].binding for key in sorted(self._entries))
+
+    @property
     def config_digest(self):
         return digest({'schema': 'physical-index-registry@1',
                        'entries': [asdict(self._entries[key]) for key in sorted(self._entries)]})

@@ -126,6 +126,8 @@ class ConversationSnapshot:
             "project_id": self.project_id,
             "message_count": len(self.messages),
             "confirmation_count": len(self.confirmations),
+            "created_at": (self.messages[0].created_at.isoformat()
+                           if self.messages else None),
             "last_message_at": (self.messages[-1].created_at.isoformat()
                                 if self.messages else None),
         }

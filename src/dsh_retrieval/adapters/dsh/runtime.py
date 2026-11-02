@@ -11,7 +11,8 @@ import uuid
 
 from ...errors import ServiceError
 from ...intent_model import IntentModelClient, SYSTEM_PROMPT
-from ...model_runtime import ModelRuntime
+from ...dialogue import PROMPT as DIALOGUE_PROMPT
+from ...model_runtime import EXPANSION_PROMPT, ModelRuntime
 from ...query_spec import digest
 from .runs import RunIndex
 
@@ -37,7 +38,10 @@ class DshModelRuntime(ModelRuntime):
 
     def status(self):
         return {'engine': 'dsh', 'version': '0.2.1rc2', 'profile': 'sdk-minimal',
-                'tools': ['mcp__retrieval__get_context', 'mcp__retrieval__submit_proposal'],
+                'tools': ['mcp__retrieval__get_request_context',
+                          'mcp__retrieval__update_request_draft',
+                          'mcp__retrieval__save_expansion_draft',
+                          'mcp__retrieval__submit_proposal'],
                 'approval_authority': 'business_service', 'vlm': 'direct_operator'}
 
     def binding(self, llm_id, vlm_id):
@@ -109,7 +113,10 @@ class DshModelRuntime(ModelRuntime):
         root = self.home / principal / run_id
         root.mkdir(parents=True, mode=0o700)
         os.chmod(root.parent, 0o700)
-        context = {'messages': (conversation or []) + [{'role': 'user', 'content': content}]}
+        tool_mode = ('request_draft' if system == DIALOGUE_PROMPT else
+                     'expansion_draft' if system.startswith(EXPANSION_PROMPT) else 'proposal')
+        context = {'tool_mode': tool_mode,
+                   'messages': (conversation or []) + [{'role': 'user', 'content': content}]}
         request_timeout = profile.config.request_timeout_seconds or 90
         request = {'run_id': run_id, 'turn_dir': str(root), 'model': profile.config.model,
                    'base_url': profile.config.base_url, 'api_key': profile.config.api_key,
@@ -150,7 +157,7 @@ class DshModelRuntime(ModelRuntime):
                 'AUTH': ('MODEL_AUTH_FAILED', '模型凭据不可用，请检查服务端配置。', 503, False),
                 'TIMEOUT': ('DSH_TIMEOUT', '模型响应超时，原需求未改变，请重试。', 504, True),
                 'TRANSPORT': ('MODEL_UNAVAILABLE', '模型服务暂时不可用，请稍后重试。', 503, True),
-                'INVALID_REQUEST': ('MODEL_REQUEST_FAILED', '模型服务拒绝此请求，请检查协议配置。', 502, False),
+                'INVALID_REQUEST': ('MODEL_REQUEST_FAILED', '模型服务拒绝此请求，请检查账号状态、额度或接口配置。', 502, False),
             }
             if result.get('error') in errors:
                 raise ServiceError(*errors[result['error']])

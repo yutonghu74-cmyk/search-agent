@@ -1,4 +1,7 @@
+from io import BytesIO
 import unittest
+
+from PIL import Image
 
 from dsh_retrieval.adapters.cleaning import GenericCleaningExecutor
 from dsh_retrieval.adapters.cleaning.runner import MAX_CANDIDATE_BYTES
@@ -96,6 +99,20 @@ class GenericRunnerTests(unittest.TestCase):
         self.assertEqual(self.reader.calls, list(self.bodies))
         self.assertEqual(result.candidates[2].rules[1].evidence_ref, None)
         self.assertGreaterEqual(self.guard.calls, 2 * len(self.bodies) + 2)
+        self.assertEqual(result.fingerprints, ())
+
+    def test_authorized_image_bytes_do_not_enable_deferred_perceptual_dedup(self):
+        image = Image.new("RGB", (32, 24), "navy")
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        body = buffer.getvalue()
+        job = make_job((body,))
+        reader = Reader({"asset.0": body})
+        detector = Detector({"asset.0": ok(has_text=False, wide_enough=True)})
+        result = GenericCleaningExecutor(
+            guard=Guard(), reader=reader,
+            detectors={detector.backend_ref: detector}).run(job)
+        self.assertEqual(result.fingerprints, ())
 
     def test_rejects_unapproved_input_before_read(self):
         with self.assertRaises(TypeError):

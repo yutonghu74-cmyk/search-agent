@@ -98,6 +98,10 @@ class ReleasedDetectorRegistry:
                     or getattr(detector, "evidence_ref", None) != step.evidence_ref
                     or not callable(getattr(detector, "detect", None))):
                 unavailable()
+            if recipe.instructions:
+                index = recipe.steps.index(step)
+                if getattr(detector, '_requirement', None) != recipe.instructions[index]:
+                    unavailable()
             review_digest = getattr(detector, "source_review_digest", None)
             if review_digest is not None and review_digest != recipe.source_review_digest:
                 unavailable()

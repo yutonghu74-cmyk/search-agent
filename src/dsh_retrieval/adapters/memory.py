@@ -15,6 +15,26 @@ from ..query_spec import digest
 from .cleaning_memory import MemoryCleaningMixin
 
 
+def _feedback_request_belongs_to(value, task_ids):
+    """Return True when a feedback request-scope value is tied to a purged task.
+
+    ``_feedback_requests`` maps a scope tuple to ``(fingerprint, view_or_result)``.
+    The stored value is either a feedback draft view dict (``save_feedback_draft``)
+    carrying ``task_id``, or a confirm result dict (``confirm_feedback_draft``)
+    whose ``task`` summary carries ``task_id``. Either way the task id is the
+    cascade key; if it is missing the request is not task-scoped and is kept.
+    """
+    if not task_ids:
+        return False
+    if isinstance(value, dict):
+        if value.get('task_id') in task_ids:
+            return True
+        nested = value.get('task')
+        if isinstance(nested, dict) and nested.get('task_id') in task_ids:
+            return True
+    return False
+
+
 class InMemoryTaskRepository(MemoryCleaningMixin):
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -332,6 +352,116 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 rows.append(self.get_conversation(actor, conversation_id))
             rows.sort(key=lambda item: item.messages[-1].created_at, reverse=True)
             return tuple(rows[:100])
+
+    def delete_conversation(self, actor, conversation_id):
+        with self._lock:
+            snapshot = self.get_conversation(actor, conversation_id)
+            if snapshot.confirmations:
+                raise ServiceError('CONVERSATION_DELETE_FORBIDDEN',
+                                   '已确认或进入检索的 Chat 不能删除', 409)
+            draft_ids = {message.draft_id for message in snapshot.messages}
+            self._conversation_messages.pop(conversation_id, None)
+            self._conversation_confirmations.pop(conversation_id, None)
+            for draft_id in draft_ids:
+                draft = self._drafts.get(draft_id)
+                if draft is not None and not draft.confirmed_task_id:
+                    self._drafts.pop(draft_id, None)
+            self._draft_requests = {scope: value for scope, value in self._draft_requests.items()
+                                    if value[1].conversation_id != conversation_id}
+
+    def hard_delete_conversation(self, actor, conversation_id):
+        """Force-delete an owner-only conversation and cascade its task tree.
+
+        Unlike ``delete_conversation`` this path is allowed on confirmed Chats:
+        it removes the conversation messages/confirmations, every linked formal
+        task and its revisions/batches/feedback drafts, all conversation drafts
+        (confirmed or not), and the task-scoped cleaning records. Idempotency
+        and request-scope indexes are filtered so no dangling scope survives.
+        Returns a cascade summary; the conversation must already exist and be
+        owned by ``actor`` (otherwise NOT_FOUND is raised before any mutation).
+        """
+        with self._lock:
+            snapshot = self.get_conversation(actor, conversation_id)
+            task_ids = {confirmation.task_id for confirmation in snapshot.confirmations}
+            draft_ids = {message.draft_id for message in snapshot.messages}
+            purged_batches = []
+            for task_id in task_ids:
+                task = self._tasks.pop(task_id, None)
+                if task is not None:
+                    purged_batches.append(task.batch_id)
+            for batch_id in purged_batches:
+                self._batches.pop(batch_id, None)
+            for task_id in task_ids:
+                self._revisions.pop(task_id, None)
+                self._feedback_drafts = {fd_id: fd for fd_id, fd in self._feedback_drafts.items()
+                                         if fd.get('task_id') != task_id}
+            self._feedback_requests = {
+                scope: value for scope, value in self._feedback_requests.items()
+                if not _feedback_request_belongs_to(value[1], task_ids)}
+            self._idempotency = {scope: value for scope, value in self._idempotency.items()
+                                 if value[1] not in task_ids}
+            self._conversation_messages.pop(conversation_id, None)
+            self._conversation_confirmations.pop(conversation_id, None)
+            for draft_id in draft_ids:
+                self._drafts.pop(draft_id, None)
+            self._draft_requests = {scope: value for scope, value in self._draft_requests.items()
+                                    if value[1].conversation_id != conversation_id}
+            cleaning_summary = self._purge_cleaning_for_tasks(task_ids)
+            return {
+                'conversation_id': conversation_id,
+                'tasks': sorted(task_ids),
+                'drafts': sorted(draft_ids),
+                'batches': sorted(purged_batches),
+                'cleaning': cleaning_summary,
+            }
+
+    def hard_delete_task(self, actor, task_id):
+        """Force-delete a legacy task tree by task id, with no conversation boundary.
+
+        Mirrors ``hard_delete_conversation`` but keyed by task id directly, for
+        pre-conversation legacy tasks that carry no ``conversation_id``. A
+        conversation-linked task is refused (``TASK_HAS_CONVERSATION``) so no
+        confirmation is left dangling — those must go through the conversation
+        force path. Purges the task, its revisions/batches/feedback drafts,
+        idempotency and request-scope indexes, the confirmed draft, and
+        task-scoped cleaning records. Returns a cascade summary; the task must
+        exist and be owned by ``actor`` (otherwise NOT_FOUND before any mutation).
+        """
+        with self._lock:
+            task = self.get(actor, task_id)
+            if task.conversation_id:
+                raise ServiceError('TASK_HAS_CONVERSATION',
+                                   'conversation-linked tasks must be deleted via the conversation force path', 409)
+            task_ids = {task_id}
+            purged_batches = []
+            removed = self._tasks.pop(task_id, None)
+            if removed is not None:
+                purged_batches.append(removed.batch_id)
+            for batch_id in purged_batches:
+                self._batches.pop(batch_id, None)
+            self._revisions.pop(task_id, None)
+            self._feedback_drafts = {fd_id: fd for fd_id, fd in self._feedback_drafts.items()
+                                     if fd.get('task_id') != task_id}
+            self._feedback_requests = {
+                scope: value for scope, value in self._feedback_requests.items()
+                if not _feedback_request_belongs_to(value[1], task_ids)}
+            self._idempotency = {scope: value for scope, value in self._idempotency.items()
+                                 if value[1] not in task_ids}
+            draft_ids = [draft_id for draft_id, draft in self._drafts.items()
+                         if draft.confirmed_task_id == task_id]
+            draft_id_set = set(draft_ids)
+            for draft_id in draft_ids:
+                self._drafts.pop(draft_id, None)
+            self._draft_requests = {scope: value for scope, value in self._draft_requests.items()
+                                    if value[1].draft_id not in draft_id_set}
+            cleaning_summary = self._purge_cleaning_for_tasks(task_ids)
+            return {
+                'task_id': task_id,
+                'tasks': sorted(task_ids),
+                'drafts': sorted(draft_ids),
+                'batches': sorted(purged_batches),
+                'cleaning': cleaning_summary,
+            }
 
     def create(self, actor: Actor, key: str, request_digest: str, task: Task) -> tuple[Task, bool]:
         if (task.tenant_id, task.owner_user_id) != (actor.tenant_id, actor.user_id):

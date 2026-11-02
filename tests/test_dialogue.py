@@ -42,6 +42,49 @@ class DialogueTest(unittest.TestCase):
         return coordinator.turn(self.actor, 'demo', {'session_id': session_id,
             'expected_version': version, 'message': message, 'llm_id': 'chat-llm', 'phase': phase})
 
+    def test_dialogue_sessions_list_start_time_and_can_be_deleted(self):
+        store = DialogueStore(self.path)
+        coordinator = DialogueCoordinator(store, FakeRuntime(), self.projects)
+        result = self.turn(coordinator, None, 0, '100张猫，100张狗')
+        items = store.list(self.actor, 'demo')
+        self.assertEqual(items[0]['session_id'], result['session_id'])
+        self.assertEqual(items[0]['title'], '100张猫，100张狗')
+        self.assertTrue(items[0]['history_visible'])
+        self.assertIn('T', items[0]['created_at'])
+        self.assertTrue(items[0]['deletable'])
+        self.assertTrue(store.delete(self.actor, 'demo', result['session_id'])['deleted'])
+        with self.assertRaises(ServiceError) as caught:
+            store.read(self.actor, 'demo', result['session_id'])
+        self.assertEqual(caught.exception.code, 'DIALOGUE_NOT_FOUND')
+
+    def test_new_chat_is_one_container_for_all_followup_messages(self):
+        store = DialogueStore(self.path)
+        coordinator = DialogueCoordinator(store, FakeRuntime(
+            proposal('update', subject='猫', target_count=5, media_type='image'),
+            proposal('answer', reply='仍然是同一个 Chat。')), self.projects)
+        created = coordinator.start(self.actor, 'demo')
+        self.assertEqual(store.list(self.actor, 'demo')[0]['message_count'], 0)
+        first = self.turn(coordinator, created['session_id'], created['version'], '找5张猫图片')
+        second = self.turn(coordinator, created['session_id'], first['version'], '这是同一个需求吗')
+        items = store.list(self.actor, 'demo')
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['session_id'], created['session_id'])
+        self.assertEqual(items[0]['message_count'], 4)
+        self.assertEqual(second['session_id'], created['session_id'])
+
+    def test_legacy_request_rows_are_not_promoted_to_history_chats_until_continued(self):
+        store = DialogueStore(self.path)
+        legacy_id, _ = store.save(self.actor, 'demo', None, 0, {
+            'subject': '猫', 'target_count': 5, 'media_type': 'image',
+            'constraints': [], 'stage': 'request', 'question': None,
+            'messages': [{'role': 'user', 'text': '找5张猫图片'}],
+            'context_start': 0, 'raw_request': '找5张猫图片'})
+        self.assertFalse(store.list(self.actor, 'demo')[0]['history_visible'])
+        coordinator = DialogueCoordinator(store, FakeRuntime(proposal('answer', reply='还是这个 Chat。')),
+                                          self.projects)
+        self.turn(coordinator, legacy_id, 1, '继续')
+        self.assertTrue(store.list(self.actor, 'demo')[0]['history_visible'])
+
     def test_term_count_double_revises_terms_without_changing_image_count(self):
         store = DialogueStore(self.path)
         session_id, _ = store.save(self.actor, 'demo', None, 0, {
@@ -65,7 +108,7 @@ class DialogueTest(unittest.TestCase):
                  {'target': 'images', 'labels': [], 'operation': 'add', 'value': -20}]
         self.assertEqual(resolve_count_edits(edits, 120, groups), (100, {'猫': 2, '狗': 2}))
         for invalid in ([edits[0], edits[0]], [{'target': 'terms', 'labels': ['兔'], 'operation': 'set', 'value': 2}],
-                        [{'target': 'terms', 'labels': [], 'operation': 'scale', 'value': 20}],
+                        [{'target': 'terms', 'labels': [], 'operation': 'scale', 'value': 100}],
                         [{'target': 'images', 'labels': [], 'operation': 'set', 'value': True}]):
             with self.assertRaises(ValueError):
                 resolve_count_edits(invalid, 120, groups)
@@ -102,6 +145,29 @@ class DialogueTest(unittest.TestCase):
         reopened = DialogueStore(self.path)
         self.assertEqual(reopened.read(self.actor, 'demo', first['session_id'])['current_groups'], groups)
 
+    def test_confirmed_clarification_is_archived_with_task_not_left_as_separate_chat(self):
+        store = DialogueStore(self.path)
+        state = {'stage': 'terms', 'messages': [
+            {'role': 'user', 'text': '找狗的照片'}, {'role': 'assistant', 'text': '要多少张？'},
+            {'role': 'user', 'text': '10 张，真实照片'}, {'role': 'assistant', 'text': '  '}]}
+        session_id, _ = store.save(self.actor, 'demo', None, None, state)
+        result = store.archive_to_task(self.actor, 'demo', session_id, 'task-a')
+        self.assertEqual(result['message_count'], 3)
+        self.assertEqual(store.list(self.actor, 'demo'), [])
+        reopened = DialogueStore(self.path)
+        self.assertEqual([item['text'] for item in reopened.task_origin(self.actor, 'demo', 'task-a')],
+                         ['找狗的照片', '要多少张？', '10 张，真实照片'])
+        self.assertEqual(reopened.archive_to_task(self.actor, 'demo', session_id, 'task-a')['message_count'], 3)
+        self.assertEqual(reopened.task_origin(Actor('tenant-a', 'other'), 'demo', 'task-a'), [])
+        self.assertEqual(reopened.task_origin(self.actor, 'other', 'task-a'), [])
+        other, _ = reopened.save(self.actor, 'demo', None, None, state)
+        with self.assertRaises(ServiceError) as conflict:
+            reopened.archive_to_task(self.actor, 'demo', other, 'task-a')
+        self.assertEqual(conflict.exception.code, 'DIALOGUE_CONFLICT')
+        with self.assertRaises(ServiceError) as missing:
+            reopened.archive_to_task(Actor('tenant-a', 'other'), 'demo', other, 'task-b')
+        self.assertEqual(missing.exception.code, 'DIALOGUE_NOT_FOUND')
+
     def test_task_history_is_persistent_and_actor_project_task_scoped(self):
         store = DialogueStore(self.path)
         store.append_task_turn(self.actor, 'demo', 'task-a', 1, '为什么选这些词？', '它们覆盖多个场景。')
@@ -110,11 +176,20 @@ class DialogueTest(unittest.TestCase):
         self.assertEqual(reopened.task_history(Actor('tenant-a', 'other'), 'demo', 'task-a'), [])
         self.assertEqual(reopened.task_history(self.actor, 'other', 'task-a'), [])
         self.assertEqual(reopened.task_history(self.actor, 'demo', 'task-b'), [])
+        for index in range(11):
+            store.append_task_turn(self.actor, 'demo', 'task-a', 1, f'第 {index} 条', '已记录')
+        self.assertEqual(len(reopened.task_history(self.actor, 'demo', 'task-a')), 20)
+        self.assertEqual(len(reopened.task_history(self.actor, 'demo', 'task-a', limit=100)), 24)
 
     def test_animal_category_quantities_supply_total_without_reasking(self):
+        self.assertEqual(explicit_category_targets('查找20张狗20张兔子的照片'), [
+            {'label': '狗', 'count': 20}, {'label': '兔子', 'count': 20}])
         self.assertEqual(explicit_category_targets('1000只猫，200只狗，20只兔子'), [
             {'label': '猫', 'count': 1000}, {'label': '狗', 'count': 200},
             {'label': '兔子', 'count': 20}])
+        self.assertEqual(explicit_category_targets('100张猫，100张狗，1000张狐狸'), [
+            {'label': '猫', 'count': 100}, {'label': '狗', 'count': 100},
+            {'label': '狐狸', 'count': 1000}])
         model = FakeRuntime(proposal('clarify', subject='猫、狗、兔子',
                                      question='需要多少张图片？'))
         coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
@@ -128,6 +203,98 @@ class DialogueTest(unittest.TestCase):
         self.assertIn('20 张兔子图片', result['reply'])
         self.assertIn('共 1220 张', result['reply'])
         self.assertEqual(coordinator.snapshot(self.actor, 'demo', result['session_id'])['request']['target_count'], 1220)
+
+    def test_adjacent_category_counts_do_not_trigger_quantity_question(self):
+        class UnexpectedRuntime:
+            def interpret_dialogue_turn(self, *args, **kwargs):
+                raise AssertionError('explicit quantities should not call the model')
+
+        coordinator = DialogueCoordinator(DialogueStore(self.path), UnexpectedRuntime(), self.projects)
+        result = self.turn(coordinator, None, 0, '查找20张狗20张兔子的照片')
+        self.assertEqual(result['action'], 'update')
+        self.assertEqual(result['request']['target_count'], 40)
+        self.assertEqual(result['question'], 'confirm_summary')
+        self.assertIn('20 张狗图片', result['reply'])
+        self.assertIn('20 张兔子图片', result['reply'])
+        self.assertNotIn('需要多少张', result['reply'])
+
+    def test_complete_new_request_generates_terms_without_summary_question(self):
+        model = FakeRuntime(proposal('update', subject='狗', target_count=5, media_type='image'))
+        coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
+        result = coordinator.turn(self.actor, 'demo', {
+            'session_id': None, 'expected_version': 0, 'message': '找5张狗图片',
+            'llm_id': 'chat-llm', 'phase': 'request', 'generate_terms_when_complete': True})
+        self.assertEqual(result['action'], 'update')
+        self.assertEqual(result['stage'], 'terms')
+        self.assertEqual(result['question'], 'review_terms')
+        self.assertIn('正在生成检索词', result['reply'])
+        self.assertEqual(result['request']['target_count'], 5)
+        self.assertEqual(coordinator.snapshot(self.actor, 'demo', result['session_id'])['stage'], 'terms')
+
+    def test_direct_terms_still_asks_for_missing_count_and_never_approves_search(self):
+        model = FakeRuntime(proposal('update', subject='狗', media_type='image'),
+                            proposal('update', target_count=5))
+        coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
+        body = {'session_id': None, 'expected_version': 0, 'message': '找狗图片',
+                'llm_id': 'chat-llm', 'phase': 'request', 'generate_terms_when_complete': True}
+        first = coordinator.turn(self.actor, 'demo', body)
+        self.assertEqual(first['question'], 'target_count')
+        self.assertEqual(first['stage'], 'request')
+        second = coordinator.turn(self.actor, 'demo', {**body, 'session_id': first['session_id'],
+            'expected_version': first['version'], 'message': '5张'})
+        self.assertEqual(second['stage'], 'terms')
+        self.assertEqual(second['question'], 'review_terms')
+        self.assertNotEqual(second['action'], 'confirm_terms')
+
+    def test_direct_terms_does_not_override_genuine_clarification(self):
+        model = FakeRuntime(proposal('clarify', question='你要的是图片还是视频？'))
+        coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
+        result = coordinator.turn(self.actor, 'demo', {'session_id': None, 'expected_version': 0,
+            'message': '找5个猫素材', 'llm_id': 'chat-llm', 'phase': 'request',
+            'generate_terms_when_complete': True})
+        self.assertEqual(result['stage'], 'request')
+        self.assertEqual(result['question'], 'custom_clarification')
+
+    def test_explicit_category_quantities_do_not_wait_for_model(self):
+        class UnexpectedRuntime:
+            def interpret_dialogue_turn(self, *args, **kwargs):
+                raise AssertionError('unambiguous category quantities should not call the model')
+
+        coordinator = DialogueCoordinator(DialogueStore(self.path), UnexpectedRuntime(), self.projects)
+        result = self.turn(coordinator, None, 0, '100张猫，100张狗，1000张狐狸')
+        self.assertEqual(result['action'], 'update')
+        self.assertEqual(result['question'], 'confirm_summary')
+        self.assertEqual(result['request']['target_count'], 1200)
+        self.assertIn('100 张猫图片', result['reply'])
+        self.assertIn('1000 张狐狸图片', result['reply'])
+        confirmed = self.turn(coordinator, result['session_id'], result['version'], '对')
+        self.assertEqual(confirmed['action'], 'confirm')
+        self.assertEqual(confirmed['stage'], 'terms')
+
+    def test_explicit_group_term_target_is_fast_and_enforces_limit(self):
+        class UnexpectedRuntime:
+            def interpret_dialogue_turn(self, *args, **kwargs):
+                raise AssertionError('explicit group term target should not call the model')
+
+        store = DialogueStore(self.path)
+        session_id, version = store.save(self.actor, 'demo', None, 0, {
+            'subject': '猫、狗、狐狸', 'target_count': 1200, 'media_type': 'image',
+            'constraints': [], 'stage': 'terms', 'question': 'review_terms',
+            'messages': [], 'context_start': 0, 'raw_request': '需要100张猫，100张狗，1000张狐狸'})
+        coordinator = DialogueCoordinator(store, UnexpectedRuntime(), self.projects)
+        groups = [{'primary_label': label, 'auxiliary_terms': [label + '全身照']}
+                  for label in ('猫', '狗', '狐狸')]
+        too_many = coordinator.turn(self.actor, 'demo', {'session_id': session_id,
+            'expected_version': version, 'message': '狐狸可以扩词到201个', 'llm_id': 'chat-llm',
+            'phase': 'terms', 'current_groups': groups, 'current_target_count': 1200})
+        self.assertEqual(too_many['action'], 'clarify')
+        self.assertIn('最多 200 个', too_many['reply'])
+        accepted = coordinator.turn(self.actor, 'demo', {'session_id': session_id,
+            'expected_version': too_many['version'], 'message': '狐狸扩词到40个', 'llm_id': 'chat-llm',
+            'phase': 'terms', 'current_groups': groups, 'current_target_count': 1200})
+        self.assertEqual(accepted['action'], 'revise_terms')
+        self.assertEqual(accepted['count_edits'], [{'target': 'terms', 'labels': ['狐狸'],
+                                                   'operation': 'set', 'value': 40}])
 
     def test_old_session_recovers_category_total_before_yes_confirmation(self):
         store = DialogueStore(self.path)
@@ -157,9 +324,8 @@ class DialogueTest(unittest.TestCase):
         first = self.turn(coordinator, None, 0, '找猫图')
         self.assertEqual(first['reply'], '猫图想要多少张？')
         second = self.turn(coordinator, first['session_id'], 1, '5张')
-        self.assertIn('数量补充好了', second['reply'])
-        self.assertIn('找 5 张猫图片', second['reply'])
-        self.assertIn('对吗？', second['reply'])
+        self.assertEqual(second['reply'], '收到，共 5 张，对吗？')
+        self.assertNotIn('数量补充好了', second['reply'])
         third = self.turn(coordinator, first['session_id'], 2, '改成5张狗图片')
         self.assertNotIn('我已开始检索', third['reply'])
         self.assertIn('找 5 张狗图片', third['reply'])
@@ -173,7 +339,7 @@ class DialogueTest(unittest.TestCase):
         self.assertEqual(first['question'], 'target_count')
         second = self.turn(coordinator, first['session_id'], 1, '5张')
         self.assertEqual(second['question'], 'confirm_summary')
-        self.assertIn('5 张狗图片', second['reply'])
+        self.assertEqual(second['reply'], '收到，共 5 张，对吗？')
         self.assertEqual(second['request']['raw_request'], '找狗图片\n5张')
         restarted = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
         self.assertEqual(restarted.snapshot(self.actor, 'demo', first['session_id'])['version'], 2)
@@ -186,6 +352,40 @@ class DialogueTest(unittest.TestCase):
         self.assertEqual(fourth['stage'], 'terms')
         fifth = self.turn(restarted, first['session_id'], 4, '这些词可以了', 'terms')
         self.assertEqual(fifth['action'], 'confirm_terms')
+
+    def test_count_only_followup_does_not_repeat_long_request_or_model_paraphrase(self):
+        subject = '宠物和人的合影，宠物包含狗、猫、老虎、鹦鹉等'
+        model = FakeRuntime(
+            proposal('update', subject=subject, media_type='image', reply='需要多少张图片？'),
+            proposal('update', target_count=1000,
+                     reply='好的，已补充数量：1000张。当前需求为：宠物和人的合影图片，共1000张。'))
+        coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
+        first = self.turn(coordinator, None, 0, subject)
+        self.assertEqual(first['reply'], '需要多少张图片？')
+        second = self.turn(coordinator, first['session_id'], first['version'], '1000张')
+        self.assertEqual(second['reply'], '收到，共 1000 张，对吗？')
+        self.assertNotIn(subject, second['reply'])
+        self.assertNotIn('我记录的是', second['reply'])
+
+    def test_media_limitation_and_choice_do_not_repeat_the_full_request(self):
+        subject = '宠物和人的合影，宠物包含狗、猫、老虎、鹦鹉等'
+        model = FakeRuntime(
+            proposal('update', subject=subject, media_type='image'),
+            proposal('update', target_count=1000),
+            proposal('update', media_type='video'),
+            proposal('answer', reply='因为当前只支持图片。您可以选择1）把整段需求改为图片；2）保持视频。'),
+            proposal('update', media_type='image'))
+        coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
+        first = self.turn(coordinator, None, 0, subject)
+        second = self.turn(coordinator, first['session_id'], first['version'], '1000张')
+        third = self.turn(coordinator, first['session_id'], second['version'], '需要的是视频')
+        self.assertEqual(third['reply'], '目前只能检索图片。你要改为找图片吗？')
+        fourth = self.turn(coordinator, first['session_id'], third['version'], '为什么只能检索图片')
+        self.assertEqual(fourth['reply'], '当前检索服务暂不支持视频；可以改为图片继续。')
+        self.assertNotIn(subject, fourth['reply'])
+        fifth = self.turn(coordinator, first['session_id'], fourth['version'], '1')
+        self.assertEqual(fifth['reply'], '已改为图片，对吗？')
+        self.assertNotIn(subject, fifth['reply'])
 
     def test_new_topic_replaces_unconfirmed_request(self):
         model = FakeRuntime(proposal('update', subject='老虎', target_count=100, media_type='image'),
@@ -237,6 +437,15 @@ class DialogueTest(unittest.TestCase):
         self.assertIsNone(runtime.interpret_dialogue_turn(state, '要五个召回词', 'chat-llm')['target_count'])
         self.assertEqual(runtime.interpret_dialogue_turn(state, '找5张图片', 'chat-llm')['target_count'], 5)
 
+    def test_followup_can_defer_all_group_scaling_until_missing_terms_are_generated(self):
+        runtime = ModelRuntime([ModelProfile('chat-llm', 'llm',
+            ModelConfig('fixture', 'test', 'https://fixture.invalid/v1', 'not-used'))])
+        value = {'kind': 'expansion', 'target_count': None, 'requested_terms_per_group': None,
+                 'count_edits': [{'target': 'terms', 'labels': [], 'operation': 'scale', 'value': 2}],
+                 'expansion_instruction': '把生成后的每组检索词数量翻倍', 'reply': None}
+        result = runtime._validate_followup(value, '词数翻倍', [], {'target_count': 200})
+        self.assertEqual(result['count_edits'], value['count_edits'])
+
     def test_invalid_model_output_becomes_safe_clarification(self):
         runtime = ModelRuntime([ModelProfile('chat-llm', 'llm',
             ModelConfig('fixture', 'test', 'https://fixture.invalid/v1', 'not-used'))])
@@ -249,7 +458,7 @@ class DialogueTest(unittest.TestCase):
 
     def test_terms_phase_maps_natural_update_and_confirm(self):
         model = FakeRuntime(proposal('update', subject='盒马', target_count=100, media_type='image'),
-                            proposal('confirm'), proposal('update', constraints='不同姿势、横图'),
+                            proposal('update', constraints='不同姿势、横图'),
                             proposal('confirm'))
         coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
         first = self.turn(coordinator, None, 0, '找100张盒马图片')
@@ -262,7 +471,7 @@ class DialogueTest(unittest.TestCase):
 
     def test_terms_same_subject_replace_is_treated_as_revision(self):
         model = FakeRuntime(proposal('update', subject='盒马', target_count=100, media_type='image'),
-                            proposal('confirm'), proposal('replace', subject='盒马不同姿势'))
+                            proposal('replace', subject='盒马不同姿势'))
         coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
         first = self.turn(coordinator, None, 0, '找100张盒马图片')
         self.turn(coordinator, first['session_id'], 1, '是的')

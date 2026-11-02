@@ -74,7 +74,7 @@ class ConfiguredCatalog:
         before = self._saved(scope)
         libraries = self.configs.configured_libraries(scope)
         entries = {entry['library_id']: entry for entry in before['entries']}
-        result = []
+        matched, fallback = [], []
         for library in libraries:
             try:
                 self._authorize(context, library.library_id)
@@ -85,11 +85,15 @@ class ConfiguredCatalog:
             entry = entries.get(library.library_id)
             if entry is None:
                 raise ServiceError('CATALOG_CHANGED', 'Configured libraries changed', 409)
-            if library.media_type == media_type and matches_topic(topic, entry):
-                result.append(library)
+            if library.media_type == media_type:
+                # Catalogue text ranks trusted, preconfigured sources; it is not
+                # a content whitelist. A library may contain useful material even
+                # when its short description does not contain the user's term.
+                (matched if matches_topic(topic, entry) else fallback).append(library)
         if self._saved(scope) != before:
             raise ServiceError('CATALOG_CHANGED', 'Configuration changed during discovery', 409)
         validate_scope(context.actor, self._task(context), RetrievalScope.from_task(task))
+        result = matched + fallback
         for library in result:
             self._authorize(context, library.library_id)
         return tuple(result)

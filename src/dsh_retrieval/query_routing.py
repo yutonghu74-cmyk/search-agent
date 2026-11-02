@@ -145,8 +145,9 @@ class QueryRoutingService:
                         options.append(capability)
             if len(options) > 64:
                 raise ServiceError('INPUT_LIMIT', 'At most 64 compatible indexes per branch', 422)
-            routes.append(QueryRoute(branch_id, branch['query_text'], tuple(sorted(
-                options, key=lambda option: (option.binding.library_id, option.binding.binding_id)))))
+            # Preserve catalogue order: lexical/alias matches are recommendations,
+            # followed by the remaining authorized preconfigured sources.
+            routes.append(QueryRoute(branch_id, branch['query_text'], tuple(options)))
         self._task(actor, task_id, expected_scope)
         for library_id in sorted({option.binding.library_id for route in routes for option in route.options}):
             self._authorize(context, library_id)

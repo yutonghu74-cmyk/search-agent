@@ -4,8 +4,12 @@
 
 `grouped-expansion@1` 将“交付分类”和“召回用词”分开：每个 group 的 `primary_label` 是独立交付单元，`package_name` 必须与主标签相同且 `package_mode=separate`；`auxiliary_terms` 只用于建立后续查询分支，不创建独立结果包，也不单独占用交付数量。
 
-本地预览只识别用户明确写出的 `主标签扩N个词`，N 为 1–30，最多 20 组。例如 `动物，狗扩20个词，猫扩30个词` 生成上级标签“动物”下的狗、猫两组。没有明确语法时返回 `recognized=false`，不从普通自然语言猜测分类；当前 `local-template@1` 只是可审阅的确定性词表组合，不代表模型扩词质量。
+本地预览只识别用户明确写出的 `主标签扩N个词`，N 为 1–200，最多 20 组。例如 `动物，狗扩20个词，猫扩30个词` 生成上级标签“动物”下的狗、猫两组。没有明确语法时返回 `recognized=false`，不从普通自然语言猜测分类；当前 `local-template@1` 只是可审阅的确定性词表组合，不代表模型扩词质量。
+
+正式任务的单组反馈若给出完整带引号的词表（首项必须等于已确认主标签、数量与原话一致），或明确把一个已存在的辅助词替换成新词，可直接生成 `user-edited@1` 待确认提案而不调用扩词模型。纯“检索词改成/减少到 N 个”按原词表顺序缩减；原词表不足时仍走模型生成。含其他语义修改、歧义或版本冲突时不得套用确定性快路；发起人确认前正式 revision、检索和清洗均不改变。
 
 每组 `delivery_target=null`，因为“扩 20 个词”不是“交付 20 张图片”。在用户另行确认每组配额前，系统不得平均拆分总目标。`overlap_policy=single_primary_per_aggregate` 表示同一素材即使带多个标签，在聚合总数中默认只计一次；可生成额外聚合清单，但不复制素材文件或重复累计总数。
 
 `POST /v1/retrieval/projects/{project_id}/expansions` 需要可信身份和项目创建权限，只返回待确认预览。正式草稿保存完整分组及 `plan_digest`，篡改标签、辅助词、包名或策略会导致验证失败。预览和确认都不启动检索、清洗或打包。
+
+后台扩词（新 Chat 与正式任务反馈）分别使用 `POST /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/expansion-jobs` 和 `POST /v1/retrieval/tasks/{task_id}/expansion-jobs`，返回 HTTP 202 及 `job_id`；同一路径 GET 返回最近作业，追加 `/{job_id}` GET 查询指定作业，`/{job_id}/retry` POST 仅重试失败批次。响应包含 `status=queued|running|failed|completed`、`completed_terms`、`target_terms`、`failed_batch`、错误及完成后的 `result`；未完成时 `result=null`，不暴露部分词表为可确认提案。正式任务提交必须带 `expected_task_version`、`expected_revision`，Chat 提交必须带 `dialogue_session_id`、`dialogue_version`；所有读取和重试均校验原发起人访问。作业绑定模型配置摘要，版本或配置变更后不发布旧结果。重复提交同版本同请求返回同一作业，显式重新生成需新 `regeneration_key`。旧同步预览接口保留兼容，不用于页面的大词表重新扩词。

@@ -10,6 +10,7 @@ from .errors import ServiceError
 from .models import Task, TaskLifecycle
 from .multi_rule_contracts import CleaningRecipe, CleaningRule, DetectionStep
 from .query_spec import digest
+from .vlm_instruction_plan import instruction_plan, with_model_instructions
 
 
 def _reject():
@@ -66,6 +67,117 @@ def compile_reviewed_recipe(compiler, actor, draft_id, expected_version,
     return recipe
 
 
+def confirmed_rules_digest(task: Task) -> str:
+    """Return the immutable review identity for one confirmed rule set.
+
+    This gives deployment-owned detectors (notably a task-scoped VLM
+    detector) a stable value to bind before a recipe is prepared.  It is
+    derived only from the current confirmed task snapshot; request payloads
+    cannot supply or override it.
+    """
+
+    if (type(task) is not Task or type(task.confirmed_revision) is not int
+            or task.confirmed_revision < 1 or not isinstance(task.confirmed_proposal_json, str)):
+        raise ServiceError("RECIPE_RULE_MISMATCH", "Confirmed cleaning rules unavailable", 409)
+    try:
+        proposal = json.loads(task.confirmed_proposal_json)
+        spec = proposal["query_spec"]
+        rules = spec["rules"]
+        if (type(spec) is not dict or spec["schema_version"] != "query-spec@2"
+                or type(rules) is not list):
+            raise ValueError
+        hard = [row for row in rules if type(row) is dict and row.get("hardness") == "hard"]
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError, RecursionError) as exc:
+        raise ServiceError("RECIPE_RULE_MISMATCH", "Confirmed cleaning rules unavailable", 409) from exc
+    return digest({
+        "schema_version": "confirmed-cleaning-rules@1",
+        "task_id": task.task_id,
+        "revision": task.confirmed_revision,
+        "request_digest": task.request_digest,
+        "media_type": task.media_type,
+        "rules": hard,
+    })
+
+
+def compile_confirmed_recipe(task: Task, registry) -> CleaningRecipe:
+    """Compile the current confirmed hard rules through a released registry.
+
+    Unlike ``compile_reviewed_recipe``, this entry point is for an already
+    confirmed task.  It never accepts client-provided steps, backend names or
+    release digests.  The released registry remains authoritative for every
+    executable binding and performs the final artifact/capability preflight.
+    """
+
+    from .released_detectors import ReleasedDetectorRegistry
+
+    if type(registry) is not ReleasedDetectorRegistry:
+        raise ValueError("trusted released detector registry required")
+    registry.preflight()
+    review_digest = confirmed_rules_digest(task)
+    try:
+        proposal = json.loads(task.confirmed_proposal_json)
+        hard = [row for row in proposal["query_spec"]["rules"]
+                if row["hardness"] == "hard"]
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError, RecursionError) as exc:
+        raise ServiceError("RECIPE_RULE_MISMATCH", "Confirmed cleaning rules unavailable", 409) from exc
+    if not hard:
+        raise ServiceError("NO_EXECUTABLE_RULES", "No confirmed hard cleaning rules", 422)
+
+    # A single confirmed semantic image rule can be evaluated through several
+    # source-grounded checks. Each is a separate VLM call and rule verdict.
+    plan = getattr(registry, 'instruction_plan', ())
+    if len(plan) > 1:
+        if (len(hard) != 1 or hard[0].get('predicate_ref') != 'image.semantic-match@1'
+                or hard[0].get('operator') != 'eq' or hard[0].get('value') is not True
+                or tuple((node['node_id'], node['source'], node['backend_ref'], node['predicate_ref'])
+                         for node in plan) != tuple((node['node_id'], node['source'],
+                         node['backend_ref'], node['predicate_ref'])
+                         for node in instruction_plan(task.raw_request))):
+            raise ServiceError('RECIPE_RULE_MISMATCH',
+                               'Multi-check plan differs from confirmed request', 409)
+        steps = tuple(DetectionStep(node['node_id'], node['backend_ref'],
+                                    'vlm.boolean@1', 'vlm.observation@1') for node in plan)
+        rules = tuple(CleaningRule(node['rule_id'], node['node_id'], node['predicate_ref'],
+                                   'eq', True) for node in plan)
+        recipe = CleaningRecipe(task.media_type, review_digest,
+                                registry.registry_digest, steps, rules,
+                                registry.frozen_instructions)
+        registry.require_recipe(recipe)
+        require_confirmed_rules(task, recipe)
+        return recipe
+
+    bindings = {(item.predicate_ref, item.media_type): item for item in registry.bindings}
+    steps_by_backend = {}
+    rules = []
+    for row in hard:
+        binding = bindings.get((row.get("predicate_ref"), task.media_type))
+        if binding is None:
+            raise ServiceError("DETECTOR_NOT_RELEASED",
+                               "Confirmed rule has no released detector", 409)
+        step = steps_by_backend.get(binding.backend_ref)
+        if step is None:
+            step = DetectionStep(f"step_{len(steps_by_backend) + 1}", binding.backend_ref,
+                                 binding.validator_ref, binding.evidence_ref)
+            steps_by_backend[binding.backend_ref] = step
+        elif (step.validator_ref, step.evidence_ref) != (
+                binding.validator_ref, binding.evidence_ref):
+            raise ServiceError("DETECTOR_NOT_RELEASED",
+                               "Released detector bindings are inconsistent", 409)
+        try:
+            rules.append(CleaningRule(row["rule_id"], step.step_id,
+                                      row["predicate_ref"], row["operator"],
+                                      row["value"], row["hardness"]))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ServiceError("RECIPE_RULE_MISMATCH",
+                               "Confirmed cleaning rule is invalid", 409) from exc
+    recipe = CleaningRecipe(task.media_type, review_digest, registry.registry_digest,
+                            tuple(steps_by_backend.values()), tuple(rules),
+                            getattr(registry, 'frozen_instructions', ()))
+    registry.require_recipe(recipe)
+    require_confirmed_rules(task, recipe)
+    return recipe
+
+
 def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
     """Check rule equivalence against the task's immutable confirmed proposal.
 
@@ -94,14 +206,32 @@ def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
                 or type(spec["rules"]) is not list):
             mismatch()
         hard = [row for row in spec["rules"] if row["hardness"] == "hard"]
-        if len(hard) != len(recipe.rules):
-            mismatch()
-        for confirmed, compiled in zip(hard, recipe.rules):
-            if (type(confirmed) is not dict
-                    or (confirmed["rule_id"], confirmed["predicate_ref"], confirmed["operator"])
-                    != (compiled.rule_id, compiled.predicate_ref, compiled.operator)
-                    or type(confirmed["value"]) is not type(compiled.value)
-                    or confirmed["value"] != compiled.value):
+        if recipe.instructions:
+            with_model_instructions(instruction_plan(task.raw_request),
+                                    recipe.instructions)
+        if (len(hard) == 1 and hard[0].get('predicate_ref') == 'image.semantic-match@1'
+                and len(recipe.rules) > 1):
+            plan = instruction_plan(task.raw_request)
+            if (len(plan) != len(recipe.rules) or len(plan) != len(recipe.steps)
+                    or hard[0].get('operator') != 'eq' or hard[0].get('value') is not True):
                 mismatch()
+            for node, step, rule in zip(plan, recipe.steps, recipe.rules):
+                if ((step.step_id, step.backend_ref, step.validator_ref, step.evidence_ref)
+                        != (node['node_id'], node['backend_ref'], 'vlm.boolean@1', 'vlm.observation@1')
+                        or (rule.rule_id, rule.step_id, rule.predicate_ref,
+                            rule.operator, rule.value, rule.hardness)
+                        != (node['rule_id'], node['node_id'], node['predicate_ref'],
+                            'eq', True, 'hard')):
+                    mismatch()
+        else:
+            if len(hard) != len(recipe.rules):
+                mismatch()
+            for confirmed, compiled in zip(hard, recipe.rules):
+                if (type(confirmed) is not dict
+                        or (confirmed["rule_id"], confirmed["predicate_ref"], confirmed["operator"])
+                        != (compiled.rule_id, compiled.predicate_ref, compiled.operator)
+                        or type(confirmed["value"]) is not type(compiled.value)
+                        or confirmed["value"] != compiled.value):
+                    mismatch()
     except (TypeError, ValueError, KeyError, AttributeError, RecursionError):
         mismatch()

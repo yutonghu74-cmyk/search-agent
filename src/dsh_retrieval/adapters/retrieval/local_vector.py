@@ -1,8 +1,8 @@
-"""Small, exact-search development connector for the existing retrieval ports.
+"""Bounded local vector connector for authorized development corpora.
 
-This is not Milvus or a learned embedding service. Trusted setup supplies exact
-query vectors or explicit word rules and immutable test records; it ranks vectors and
-pages the resulting authorized scope. Never expose setup as an approval API.
+Trusted setup supplies immutable test records and either explicit query vectors,
+word rules, or an opt-in learned text encoder matching those image vectors.
+This is not Milvus. Never expose setup as an approval API.
 """
 from __future__ import annotations
 
@@ -50,7 +50,8 @@ class LocalVectorRetrieval(SimulatedRetrieval):
                  records: tuple[LocalVectorRecord, ...],
                  filter_templates: dict[str, frozenset[str]],
                  cursor_secret: bytes,
-                 query_rules: tuple[tuple[IndexBinding, tuple[str, ...], QueryVector], ...] = ()):
+                 query_rules: tuple[tuple[IndexBinding, tuple[str, ...], QueryVector], ...] = (),
+                 query_encoder=None):
         if not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32:
             raise ValueError("stable cursor_secret must contain at least 32 bytes")
         if not filter_templates or any(not isinstance(key, str) or not key
@@ -92,6 +93,7 @@ class LocalVectorRetrieval(SimulatedRetrieval):
             if binding.metric == "COSINE" and not any(value != 0 for value in vector.values):
                 raise ValueError("zero-norm local query rule")
         self._query_rules = query_rules
+        self._query_encoder = query_encoder
         self._records = tuple(records)
         self._templates = dict(filter_templates)
         self._cursor_secret = cursor_secret
@@ -114,7 +116,13 @@ class LocalVectorRetrieval(SimulatedRetrieval):
         matches = {vector for rule_binding, tokens, vector in self._query_rules
                    if rule_binding == binding and any(token in normalized for token in tokens)}
         if len(matches) != 1:
-            raise ServiceError("QUERY_UNSUPPORTED", "No unambiguous local query rule", 422)
+            if self._query_encoder is None:
+                raise ServiceError("QUERY_UNSUPPORTED", "No unambiguous local query rule", 422)
+            if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+                raise ServiceError("QUERY_UNSUPPORTED", "Text query is empty or too long", 422)
+            vector = self._query_encoder.encode_query(text, binding)
+            self._vector(binding, vector)
+            return vector
         return matches.pop()
 
     def can_encode_query(self, context: AccessContext, text: str, binding: IndexBinding) -> bool:

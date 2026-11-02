@@ -1,20 +1,24 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from hashlib import sha256
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from dsh_retrieval.adapters.task_storage.sqlite import SQLiteTaskRepository
+from dsh_retrieval.adapters.task_storage.sqlite import SQLiteTaskRepository, dump
 from dsh_retrieval.adapters.task_storage.plan_sets import SQLitePlanSetApprovalRepository
+from dsh_retrieval.candidate_contracts import CandidateManifestProposal, ManifestItem
 from dsh_retrieval.errors import ServiceError
-from dsh_retrieval.integration_models import IndexBinding, QueryVector, SearchRequest
-from dsh_retrieval.models import Actor
+from dsh_retrieval.integration_models import (IndexBinding, MediaRecord, QueryVector,
+                                              SearchRequest, SearchPage, SearchHit)
+from dsh_retrieval.models import Actor, RunStatus
 from dsh_retrieval.multi_branch_contracts import RetrievalPlanSet
 from dsh_retrieval.physical_query_preparation import PreparedQuery
 from dsh_retrieval.query_branches import compile_query_branches
 from dsh_retrieval.retrieval_contracts import RetrievalPlan, RetrievalScope
+from dsh_retrieval.retrieval_coordinator import RetrievalCoordinator
 from draft_helpers import make_service, confirmation
 
 
@@ -149,6 +153,131 @@ print(current.proposal_digest)
         result = subprocess.run([sys.executable, '-c', script, str(self.path), self.task_id],
                                 capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), approved.proposal_digest)
+
+    def test_refill_position_can_commit_after_downstream_task_version_advance(self):
+        self.repo.put_proposal(self.actor, self.proposal)
+        approved, _ = self.confirm()
+        with self.repo.tasks._connect() as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            memory = self.repo.tasks._load(db.execute(
+                'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+            current = memory._tasks[self.task_id]
+            memory._tasks[self.task_id] = replace(
+                current, task_version=current.task_version + 1,
+                run_status=RunStatus.RUNNING, stage='deciding')
+            db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (dump(memory),))
+
+        class Gateway:
+            def search(inner, context, request):
+                hit = SearchHit(request.binding, 'candidate-1', 0.9)
+                return SearchPage((hit,), None, 'exhausted', 'snapshot', 'snap-1')
+
+        result = RetrievalCoordinator(self.repo, Gateway()).tick_position(
+            self.actor, approved, plan_id=approved.members[0].plan.request.plan_id,
+            expected_cursor=None)
+        self.assertEqual(result['status'], 'committed')
+        heads = self.repo.get_progress(self.actor, approved, allow_downstream=True)
+        self.assertEqual(heads[0].committed_pages, 1)
+        with self.assertRaises(ServiceError) as error:
+            self.repo.get_progress(self.actor, approved)
+        self.assertEqual(error.exception.code, 'REVISION_CONFLICT')
+
+    def test_recovery_skips_refill_task_waiting_for_owner_decision(self):
+        self.repo.put_proposal(self.actor, self.proposal)
+        self.confirm()
+        with self.repo.tasks._connect() as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            memory = self.repo.tasks._load(db.execute(
+                'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+            current = memory._tasks[self.task_id]
+            memory._tasks[self.task_id] = replace(
+                current, run_status=RunStatus.AWAITING_INPUT, stage='refill')
+            db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (dump(memory),))
+        self.assertEqual(self.reopen().recoverable(), ())
+
+    def test_delivery_read_revalidates_candidate_after_task_enters_finalizing(self):
+        self.repo.put_proposal(self.actor, self.proposal)
+        approved, _ = self.confirm()
+        class Gateway:
+            def search(inner, context, request):
+                hit = SearchHit(request.binding, 'candidate-1', 0.9)
+                return SearchPage((hit,), None, 'exhausted', 'snapshot',
+                                  'snap-' + request.plan_id)
+        coordinator = RetrievalCoordinator(self.repo, Gateway())
+        hits = []
+        for member in approved.members:
+            coordinator.tick_position(
+                self.actor, approved, plan_id=member.plan.request.plan_id,
+                expected_cursor=None)
+            hits.append(SearchHit(member.plan.request.binding, 'candidate-1', 0.9))
+        task = self.service.repository.get(self.actor, self.task_id)
+        media = MediaRecord('unit-1', 'v1', 'source', 'asset-1', 'trusted:asset-1',
+                            'sha256:' + sha256(b'asset-1').hexdigest())
+        proposal = CandidateManifestProposal(
+            RetrievalScope.from_task(task), self.repo.candidate_source_id(approved),
+            approved.proposal_digest, (ManifestItem(media, tuple(hits)),))
+        self.repo.put_candidate_proposal(self.actor, proposal)
+        self.repo.confirm_candidate_manifest(
+            self.actor, proposal, key='confirm-for-delivery',
+            expected_task_version=proposal.scope.task_version, action='confirm')
+        with self.repo.tasks._connect() as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            memory = self.repo.tasks._load(db.execute(
+                'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+            current = memory._tasks[self.task_id]
+            memory._tasks[self.task_id] = replace(
+                current, task_version=current.task_version + 1,
+                run_status=RunStatus.PARTIAL, stage='FINALIZING')
+            db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (dump(memory),))
+
+        def validate(memory, state, delivery_read):
+            return self.repo._validate_candidate_manifest(
+                memory, state, self.actor, proposal, reading=True,
+                delivery_read=delivery_read)
+
+        self.repo._transaction(False, lambda memory, state: validate(memory, state, True))
+        with self.assertRaises(ServiceError) as error:
+            self.repo._transaction(False, lambda memory, state: validate(memory, state, False))
+        self.assertEqual(error.exception.code, 'REVISION_CONFLICT')
+
+    def test_downstream_candidate_batch_accepts_committed_refill_prefix(self):
+        self.repo.put_proposal(self.actor, self.proposal)
+        approved, _ = self.confirm()
+        with self.repo.tasks._connect() as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            memory = self.repo.tasks._load(db.execute(
+                'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+            current = memory._tasks[self.task_id]
+            memory._tasks[self.task_id] = replace(
+                current, task_version=current.task_version + 1,
+                run_status=RunStatus.RUNNING, stage='deciding')
+            db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (dump(memory),))
+
+        hit = SearchHit(approved.members[0].plan.request.binding, 'candidate-1', 0.9)
+
+        class Gateway:
+            def search(inner, context, request):
+                return SearchPage((hit,), 'next-page', 'more_available',
+                                  'snapshot', 'snap-1')
+
+        result = RetrievalCoordinator(self.repo, Gateway()).tick_position(
+            self.actor, approved, plan_id=approved.members[0].plan.request.plan_id,
+            expected_cursor=None)
+        self.assertEqual(result['status'], 'committed')
+        task = self.service.repository.get(self.actor, self.task_id)
+        media = MediaRecord('unit-1', 'v1', 'source', 'asset-1', 'trusted:asset-1',
+                            'sha256:' + sha256(b'asset-1').hexdigest())
+        proposal = CandidateManifestProposal(
+            RetrievalScope.from_task(task), self.repo.candidate_source_id(approved),
+            approved.proposal_digest, (ManifestItem(media, (hit,)),))
+        self.repo.put_candidate_proposal(self.actor, proposal)
+        manifest, replayed = self.repo.confirm_candidate_manifest(
+            self.actor, proposal, key='confirm-refill-prefix',
+            expected_task_version=proposal.scope.task_version, action='confirm')
+        self.assertFalse(replayed)
+        self.assertEqual(manifest.proposal, proposal)
+        self.assertEqual(self.repo.candidate_manifest_candidate_ids(
+            self.actor, self.task_id, approved), frozenset({proposal.items[0].candidate_id}))
 
 
 if __name__ == '__main__':

@@ -21,6 +21,7 @@ from .service import InMemoryTaskRepository, TaskService
 from .adapters.projects import LocalProjectAccess
 from .adapters.task_storage.sqlite import SQLiteTaskRepository
 from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
+from .production_board_ui import BOARD_CSS, BOARD_HTML, BOARD_JS
 from .progress_models import build_task_progress
 from .result_views import ResultCursorError, build_result_page
 from .expansion_models import preview_grouped_expansion, preview_edited_groups
@@ -33,7 +34,10 @@ from .local_catalog import build_local_catalog
 from .routing_preview import LocalRoutingPreview
 from .retrieval_progress import build_local_demo_progress_repository, read_retrieval_progress
 from .first_search_local import LocalFirstSearch
+from .search_dispatch import SearchDispatchCoordinator
+from .refill_runtime import build_refill_runtime
 from .dialogue import DialogueStore, DialogueCoordinator
+from .expansion_jobs import ExpansionJobs
 
 
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
@@ -49,29 +53,47 @@ PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
+EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)/expansion-jobs(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
+TASK_EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/tasks/(rt_[a-f0-9]{32})/expansion-jobs(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
 INTENT_PREVIEW_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/intent-preview$")
 DIALOGUE_TURN_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-turn$")
+PROJECT_DIALOGUE_SESSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions$")
 DIALOGUE_SESSION_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)$")
+DIALOGUE_ARCHIVE_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)/archive$")
 QUERY_BRANCHES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-branches$")
 MODELS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/models$")
+MODEL_SETTINGS_PATH = re.compile(r'^/v1/retrieval/projects/([^/]+)/model-settings(?:/(connections|defaults|probe)(?:/(conn_[a-f0-9]{32})/(discover|bind|rotate))?)?$')
 CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(preview|confirm))?$")
 ROUTING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-routing$")
 RETRIEVAL_PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/retrieval-progress$")
 AGENT_RUNS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/agent-runs$")
-FIRST_SEARCH_GET_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search(?:/(candidates|progress))?$")
+FIRST_SEARCH_GET_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/(?:first-search(?:/(candidates(?:/changes)?|progress))?|(?P<candidate_view>candidates(?:/changes)?))$")
+FIRST_SEARCH_PREVIEW_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/(?:first-search/)?candidates/(candidate_[a-f0-9]{64})/preview$")
 FIRST_SEARCH_POST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search/(prepare|confirm|tick)$")
+FIRST_SEARCH_MANIFEST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search/manifest$")
+CLEANING_POST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/cleaning/(prepare|confirm|execute)$")
+CLEANING_PREVIEW_PATH = re.compile(
+    r"^/v1/retrieval/tasks/([^/]+)/cleaning/candidates/(candidate_[a-f0-9]{64})/preview$")
+REFILL_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/refill$")
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "dsh-retrieval-p0"
     service: TaskService
     result_reader: Any = None
+    cleaning_reader: Any = None
+    cleaning_service: Any = None
+    cleaning_dispatch: Any = None
+    delivery_service: Any = None
     model_runtime: Any = None
     catalog_config: Any = None
     routing_preview: Any = None
     plan_set_repository: Any = None
     first_search: Any = None
+    search_dispatch: Any = None
+    refill_service: Any = None
     dialogue: Any = None
+    expansion_jobs: Any = None
     build_info: dict[str, Any] = {}
 
     def _catalog_action(self, match, post=False):
@@ -119,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -139,7 +161,9 @@ class Handler(BaseHTTPRequestHandler):
         trace_id = self._trace_id()
         try:
             scope = getattr(self.model_runtime, 'request_scope', None)
-            with (scope(self.headers.get('X-Tenant-Id', ''), self.headers.get('X-User-Id', ''),
+            settings = getattr(self.model_runtime, 'settings', None)
+            with (settings.scope(self.headers.get('X-Tenant-Id', ''), self.headers.get('X-User-Id', ''))
+                  if settings else nullcontext()), (scope(self.headers.get('X-Tenant-Id', ''), self.headers.get('X-User-Id', ''),
                         trace_id, urlsplit(self.path).path) if scope else nullcontext()):
                 status, body, replayed = action()
             body["trace_id"] = trace_id
@@ -147,7 +171,140 @@ class Handler(BaseHTTPRequestHandler):
         except ServiceError as error:
             self._json(error.status, error.as_dict(trace_id=trace_id))
 
+    def _model_settings_action(self, match, post=False):
+        port = self.server.server_port
+        if self.headers.get('Host') not in {f'127.0.0.1:{port}', f'localhost:{port}'}:
+            raise ServiceError('FORBIDDEN', '模型设置仅允许本机地址访问', 403)
+        actor = self._actor()
+        self.service.projects.require_access(actor, match.group(1), 'default', 'create' if post else 'read')
+        settings = getattr(self.model_runtime, 'settings', None)
+        if settings is None:
+            raise ServiceError('MODEL_SETTINGS_DISABLED', '服务端尚未启用持久化模型设置', 503)
+        if not post and not match.group(2):
+            return HTTPStatus.OK, settings.read(), False
+        # Browser cross-origin writes must never reach the credential store.
+        if self.headers.get('Origin') and self.headers['Origin'] != 'http://' + self.headers.get('Host', ''):
+            raise ServiceError('FORBIDDEN', '跨站模型配置请求已拒绝', 403)
+        if self.headers.get('Content-Type', '').split(';')[0].strip() != 'application/json':
+            raise ServiceError('INVALID_JSON', '模型设置仅接受 application/json', 400)
+        body = self._body()
+        resource, identifier, operation = match.group(2, 3, 4)
+        if post and resource == 'connections' and identifier is None:
+            result = {'connection': settings.register(body)}
+        elif post and resource == 'defaults' and identifier is None:
+            result = settings.save_defaults(body, self.model_runtime)
+        elif post and resource == 'probe' and identifier is None:
+            result = settings.probe(body, self.model_runtime)
+        elif post and resource == 'connections' and operation == 'discover' and not body:
+            result = {'connection': settings.discover(identifier)}
+        elif post and resource == 'connections' and operation == 'bind':
+            result = settings.bind(identifier, body)
+        elif post and resource == 'connections' and operation == 'rotate':
+            result = settings.rotate(identifier, body)
+        else:
+            raise ServiceError('MODEL_SETTINGS_INVALID', '模型配置请求无效', 422)
+        return HTTPStatus.OK, result, False
+
     def do_POST(self) -> None:  # noqa: N802
+        refill_match = REFILL_PATH.fullmatch(self.path)
+        if refill_match:
+            def refill_action():
+                if self.refill_service is None:
+                    raise ServiceError('REFILL_NOT_CONFIGURED',
+                                       'Confirmed refill planning is unavailable', 503)
+                body = self._body()
+                expected = {'expected_revision', 'expected_generation',
+                            'expected_task_version', 'position_fingerprint', 'action'}
+                if set(body) != expected:
+                    raise ServiceError('INVALID_SPEC', 'Invalid refill confirmation payload', 422)
+                result = self.refill_service.confirm_next(
+                    self._actor(), refill_match.group(1),
+                    key=self.headers.get('Idempotency-Key', ''), **body)
+                return HTTPStatus.ACCEPTED, result, result['replayed']
+            self._run(refill_action)
+            return
+        task_expansion_match = TASK_EXPANSION_JOBS_PATH.fullmatch(self.path)
+        if task_expansion_match:
+            def task_expansion_action():
+                if self.expansion_jobs is None:
+                    raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Expansion jobs are unavailable', 503)
+                task_id, job_id, operation = task_expansion_match.groups()
+                actor = self._actor()
+                body = self._body()
+                if job_id is None:
+                    return HTTPStatus.ACCEPTED, self.expansion_jobs.start_task(actor, task_id, body), False
+                if operation != 'retry' or body:
+                    raise ServiceError('INVALID_SPEC', 'Invalid expansion retry', 422)
+                task = self.service.get_task(actor, task_id)
+                return HTTPStatus.ACCEPTED, self.expansion_jobs.retry(
+                    actor, task['project_id'], 'task:' + task_id, job_id), False
+            self._run(task_expansion_action)
+            return
+        expansion_job_match = EXPANSION_JOBS_PATH.fullmatch(self.path)
+        archive_match = DIALOGUE_ARCHIVE_PATH.fullmatch(self.path)
+        if archive_match:
+            def archive_action():
+                if self.dialogue is None:
+                    raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
+                actor = self._actor()
+                project_id, session_id = archive_match.groups()
+                body = self._body()
+                if set(body) != {'task_id'} or not isinstance(body['task_id'], str):
+                    raise ServiceError('INVALID_SPEC', 'Invalid clarification archive payload', 422)
+                task = self.service.get_task(actor, body['task_id'])
+                if task['project_id'] != project_id:
+                    raise ServiceError('INVALID_SPEC', 'Task belongs to another project', 422)
+                return HTTPStatus.OK, self.dialogue.store.archive_to_task(
+                    actor, project_id, session_id, body['task_id']), False
+            self._run(archive_action)
+            return
+        if expansion_job_match:
+            def expansion_job_action():
+                if self.expansion_jobs is None:
+                    raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Expansion jobs are unavailable', 503)
+                actor = self._actor()
+                project_id, session_id, job_id, operation = expansion_job_match.groups()
+                body = self._body()
+                if job_id is None:
+                    if body.get('dialogue_session_id') != session_id:
+                        raise ServiceError('INVALID_SPEC', 'Session binding mismatch', 422)
+                    return HTTPStatus.ACCEPTED, self.expansion_jobs.start(actor, project_id, body), False
+                if operation != 'retry' or body:
+                    raise ServiceError('INVALID_SPEC', 'Invalid expansion retry', 422)
+                return HTTPStatus.ACCEPTED, self.expansion_jobs.retry(actor, project_id, session_id, job_id), False
+            self._run(expansion_job_action)
+            return
+        delivery_match = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/delivery/(prepare|publish)', self.path)
+        if delivery_match:
+            def delivery_action():
+                if self.delivery_service is None:
+                    raise ServiceError('DELIVERY_UNAVAILABLE', 'Image delivery is not configured', 503)
+                actor = self._actor()
+                task_id, action = delivery_match.groups()
+                body = self._body()
+                expected = ({'expected_task_version', 'result_set_digest'} if action == 'prepare'
+                            else {'package_id', 'manifest_digest', 'expected_task_version', 'action'})
+                if set(body) != expected:
+                    raise ServiceError('INVALID_SPEC', 'Invalid delivery request fields', 422)
+                result, replayed = getattr(self.delivery_service, action)(actor, task_id, **body)
+                return HTTPStatus.OK, result, replayed
+            self._run(delivery_action)
+            return
+        settings_match = MODEL_SETTINGS_PATH.fullmatch(self.path)
+        if settings_match:
+            self._run(lambda: self._model_settings_action(settings_match, True))
+            return
+        dialogue_list_match = PROJECT_DIALOGUE_SESSIONS_PATH.fullmatch(self.path)
+        if dialogue_list_match:
+            def start_dialogue():
+                if self.dialogue is None:
+                    raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
+                if self._body():
+                    raise ServiceError('INVALID_SPEC', 'New Chat request must be empty', 422)
+                return HTTPStatus.CREATED, self.dialogue.start(
+                    self._actor(), dialogue_list_match.group(1)), False
+            self._run(start_dialogue)
+            return
         dialogue_match = DIALOGUE_TURN_PATH.fullmatch(self.path)
         if dialogue_match:
             def dialogue_action():
@@ -155,6 +312,56 @@ class Handler(BaseHTTPRequestHandler):
                     raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
                 return HTTPStatus.OK, self.dialogue.turn(self._actor(), dialogue_match.group(1), self._body()), False
             self._run(dialogue_action)
+            return
+        cleaning_match = CLEANING_POST_PATH.fullmatch(self.path)
+        if cleaning_match:
+            def cleaning_action():
+                if self.cleaning_service is None:
+                    raise ServiceError('CLEANING_NOT_CONFIGURED',
+                                       'Confirmed cleaning execution is unavailable', 503)
+                actor = self._actor()
+                task_id, operation = cleaning_match.groups()
+                body = self._body()
+                if operation == 'prepare' and set(body) == {'manifest_ref'}:
+                    return HTTPStatus.OK, self.cleaning_service.prepare(
+                        actor, task_id, body['manifest_ref']), False
+                if operation == 'confirm' and set(body) == {
+                        'proposal_digest', 'expected_task_version', 'action'}:
+                    result, replayed = self.cleaning_service.confirm(
+                        actor, task_id, key=self.headers.get('Idempotency-Key', ''), **body)
+                    if self.cleaning_dispatch is not None:
+                        self.cleaning_dispatch.notify()
+                        result = {**result, 'status': self.cleaning_dispatch.status(
+                            actor, task_id, result['operation_id'])['status']}
+                    return HTTPStatus.ACCEPTED, result, replayed
+                if operation == 'execute' and set(body) == {'operation_id'}:
+                    if self.cleaning_dispatch is not None:
+                        self.cleaning_service.steps(actor, task_id)
+                        self.cleaning_dispatch.notify()
+                        return HTTPStatus.ACCEPTED, self.cleaning_dispatch.status(
+                            actor, task_id, body['operation_id']), False
+                    result, replayed = self.cleaning_service.execute(
+                        actor, task_id, body['operation_id'])
+                    return HTTPStatus.OK, result, replayed
+                raise ServiceError('INVALID_CLEANING_REQUEST',
+                                   'Invalid confirmed cleaning payload', 422)
+            self._run(cleaning_action)
+            return
+        manifest_match = FIRST_SEARCH_MANIFEST_PATH.fullmatch(self.path)
+        if manifest_match:
+            def manifest_action():
+                if self.first_search is None or not callable(
+                        getattr(self.first_search, 'confirm_manifest', None)):
+                    raise ServiceError('CANDIDATE_MANIFEST_NOT_CONFIGURED',
+                                       'Candidate manifest publication is unavailable', 503)
+                body = self._body()
+                if set(body) != {'proposal_digest', 'expected_task_version', 'action'}:
+                    raise ServiceError('INVALID_SPEC', 'Invalid candidate confirmation payload', 422)
+                result, replayed = self.first_search.confirm_manifest(
+                    self._actor(), manifest_match.group(1),
+                    key=self.headers.get('Idempotency-Key', ''), **body)
+                return HTTPStatus.ACCEPTED, result, replayed
+            self._run(manifest_action)
             return
         first_search_match = FIRST_SEARCH_POST_PATH.fullmatch(self.path)
         if first_search_match:
@@ -169,6 +376,7 @@ class Handler(BaseHTTPRequestHandler):
                 if action == 'confirm' and set(body) == {'proposal_digest', 'expected_task_version', 'action'}:
                     result, replay = self.first_search.confirm(actor, task_id,
                         key=self.headers.get('Idempotency-Key', ''), **body)
+                    self.first_search.enqueue(actor, task_id)
                     return HTTPStatus.OK, result, replay
                 if action == 'tick' and set(body) == {'max_requests'}:
                     return HTTPStatus.OK, self.first_search.tick(actor, task_id, **body), False
@@ -383,17 +591,159 @@ class Handler(BaseHTTPRequestHandler):
                     self._body(), feedback_match.group(2))
                 return HTTPStatus.OK, result, replayed
             if confirmation_match:
+                actor, task_id, body = self._actor(), confirmation_match.group(1), self._body()
                 result, replayed = self.service.confirm_feedback(
-                    self._actor(), confirmation_match.group(1), self.headers.get("Idempotency-Key", ""), self._body())
+                    actor, task_id, self.headers.get("Idempotency-Key", ""), body)
+                draft = result['draft']
+                revisions = self.service.list_revisions(actor, task_id)
+                base = next((row['proposal'] for row in revisions
+                             if row['revision'] == draft['base_revision']), None)
+                if (self.first_search is not None and body.get('action') == 'confirm'
+                        and base is not None and (
+                            draft['proposal']['query_spec'].get('grouped_expansion')
+                            != base['query_spec'].get('grouped_expansion')
+                            or draft['proposal']['query_spec'].get('target_count')
+                            != base['query_spec'].get('target_count'))):
+                    result['search_enqueue'] = (self.search_dispatch.dispatch_task(task_id)
+                        if self.search_dispatch is not None else self.first_search.auto_start(
+                            actor, task_id, key='terms:' + draft['proposal_digest']))
+                    result['task'] = self.service.get_task(actor, task_id)
                 return HTTPStatus.ACCEPTED, result, replayed
-            result, replayed = self.service.create_task(self._actor(), self.headers.get("Idempotency-Key", ""), self._body())
+            actor = self._actor()
+            result, replayed = self.service.create_task(actor, self.headers.get("Idempotency-Key", ""), self._body())
+            if self.first_search is not None:
+                enqueue = (self.search_dispatch.dispatch_task(result['task_id'])
+                    if self.search_dispatch is not None else self.first_search.auto_start(
+                        actor, result['task_id'], key='terms:' + result['task_id'] + ':1'))
+                result = self.service.get_task(actor, result['task_id'])
+                result['search_enqueue'] = enqueue
             return HTTPStatus.ACCEPTED, result, replayed
 
         self._run(action)
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        dialogue_match = DIALOGUE_SESSION_PATH.fullmatch(path)
+        conversation_match = CONVERSATION_PATH.fullmatch(path)
+        if dialogue_match:
+            def delete_dialogue():
+                if self.dialogue is None:
+                    raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
+                actor = self._actor()
+                project_id, session_id = dialogue_match.groups()
+                self.service.projects.require_access(actor, project_id, 'default', 'create')
+                return HTTPStatus.OK, self.dialogue.store.delete(actor, project_id, session_id), False
+            self._run(delete_dialogue)
+            return
+        if conversation_match:
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            force = params.get('force', [''])[0].lower() == 'true'
+            if force:
+                self._run(lambda: (HTTPStatus.OK,
+                                   self.service.hard_delete_conversation(
+                                       self._actor(), conversation_match.group(1)),
+                                   False))
+                return
+            self._run(lambda: (HTTPStatus.OK,
+                               self.service.delete_conversation(self._actor(), conversation_match.group(1)),
+                               False))
+            return
+        task_match = TASK_PATH.fullmatch(path)
+        if task_match:
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            force = params.get('force', [''])[0].lower() == 'true'
+            if force:
+                self._run(lambda: (HTTPStatus.OK,
+                                   self.service.hard_delete_task(
+                                       self._actor(), task_match.group(1)),
+                                   False))
+                return
+            self._json(404, {'code': 'NOT_FOUND', 'message': 'task route requires force=true',
+                             'retryable': False, 'trace_id': self._trace_id()})
+            return
+        self._json(404, {'code': 'NOT_FOUND', 'message': 'route was not found',
+                         'retryable': False, 'trace_id': self._trace_id()})
+
     def do_GET(self) -> None:  # noqa: N802
+        task_expansion_match = TASK_EXPANSION_JOBS_PATH.fullmatch(urlsplit(self.path).path)
+        if task_expansion_match:
+            def task_expansion_action():
+                if urlsplit(self.path).query or task_expansion_match.group(3):
+                    raise ServiceError('INVALID_SPEC', 'Invalid expansion job URL', 422)
+                if self.expansion_jobs is None:
+                    raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Expansion jobs are unavailable', 503)
+                task_id, job_id, _ = task_expansion_match.groups()
+                actor = self._actor()
+                task = self.service.get_task(actor, task_id)
+                return HTTPStatus.OK, self.expansion_jobs.get(
+                    actor, task['project_id'], 'task:' + task_id, job_id), False
+            self._run(task_expansion_action)
+            return
+        expansion_job_match = EXPANSION_JOBS_PATH.fullmatch(urlsplit(self.path).path)
+        if expansion_job_match:
+            def expansion_job_action():
+                if urlsplit(self.path).query or expansion_job_match.group(4):
+                    raise ServiceError('INVALID_SPEC', 'Invalid expansion job URL', 422)
+                if self.expansion_jobs is None:
+                    raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Expansion jobs are unavailable', 503)
+                project_id, session_id, job_id, _ = expansion_job_match.groups()
+                return HTTPStatus.OK, self.expansion_jobs.get(self._actor(), project_id, session_id, job_id), False
+            self._run(expansion_job_action)
+            return
+        settings_match = MODEL_SETTINGS_PATH.fullmatch(urlsplit(self.path).path)
+        if settings_match:
+            self._run(lambda: self._model_settings_action(settings_match))
+            return
         parsed = urlsplit(self.path)
         path = parsed.path
+        delivery_match = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/delivery(?:/(package_[a-f0-9]{32})/download)?', path)
+        if delivery_match:
+            try:
+                if parsed.query:
+                    raise ServiceError('INVALID_SPEC', 'Delivery URL has no query parameters', 422)
+                if self.delivery_service is None:
+                    raise ServiceError('DELIVERY_UNAVAILABLE', 'Image delivery is not configured', 503)
+                actor = self._actor()
+                task_id, package_id = delivery_match.groups()
+                if package_id is None:
+                    self._json(200, self.delivery_service.status(actor, task_id))
+                else:
+                    content = self.delivery_service.download(actor, task_id, package_id)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/zip')
+                    self.send_header('Content-Disposition', f'attachment; filename="{package_id}.zip"')
+                    self.send_header('Content-Length', str(len(content)))
+                    self.send_header('Cache-Control', 'private, no-store')
+                    self.send_header('X-Content-Type-Options', 'nosniff')
+                    self.end_headers()
+                    self.wfile.write(content)
+            except ServiceError as error:
+                self._json(error.status, error.as_dict(trace_id=self._trace_id()))
+            return
+        cleaning_preview_match = CLEANING_PREVIEW_PATH.fullmatch(path)
+        if cleaning_preview_match:
+            trace_id = self._trace_id()
+            try:
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW',
+                                       'Cleaning preview URL has no query parameters', 422)
+                if self.cleaning_service is None or not callable(
+                        getattr(self.cleaning_service, 'candidate_preview', None)):
+                    raise ServiceError('PREVIEW_UNAVAILABLE',
+                                       'Cleaning candidate image is unavailable', 404)
+                content_type, content = self.cleaning_service.candidate_preview(
+                    self._actor(), *cleaning_preview_match.groups())
+                self.send_response(HTTPStatus.OK)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(content)))
+                self.send_header('Cache-Control', 'private, no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Referrer-Policy', 'no-referrer')
+                self.end_headers()
+                self.wfile.write(content)
+            except ServiceError as error:
+                self._json(error.status, error.as_dict(trace_id=trace_id))
+            return
         if path == '/v1/build':
             if parsed.query:
                 self._json(422, {'code': 'INVALID_SPEC', 'message': 'Build URL has no query parameters'})
@@ -410,16 +760,123 @@ class Handler(BaseHTTPRequestHandler):
                 return HTTPStatus.OK, self.dialogue.snapshot(self._actor(), *dialogue_match.groups()), False
             self._run(dialogue_action)
             return
+        dialogue_list_match = PROJECT_DIALOGUE_SESSIONS_PATH.fullmatch(path)
+        if dialogue_list_match:
+            def dialogue_list_action():
+                if parsed.query:
+                    raise ServiceError('INVALID_SPEC', 'Conversation URL has no query parameters', 422)
+                if self.dialogue is None:
+                    raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
+                actor = self._actor()
+                project_id = dialogue_list_match.group(1)
+                self.service.projects.require_access(actor, project_id, 'default', 'read')
+                return HTTPStatus.OK, {'items': self.dialogue.store.list(actor, project_id)}, False
+            self._run(dialogue_list_action)
+            return
+        refill_match = REFILL_PATH.fullmatch(path)
+        if refill_match:
+            def refill_action():
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW',
+                                       'Refill preview URL has no query parameters', 422)
+                if self.refill_service is None:
+                    raise ServiceError('REFILL_NOT_CONFIGURED',
+                                       'Confirmed refill planning is unavailable', 503)
+                return HTTPStatus.OK, self.refill_service.preview(
+                    self._actor(), refill_match.group(1)), False
+            self._run(refill_action)
+            return
+        cleaning_match = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/cleaning/steps', path)
+        if cleaning_match:
+            def cleaning_steps_action():
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Unexpected query parameters', 422)
+                actor = self._actor()
+                task_id = cleaning_match.group(1)
+                reader = self.cleaning_service or self.cleaning_reader
+                if reader is None:
+                    self.service.get_task(actor, task_id)
+                    return HTTPStatus.OK, {'available': False, 'runs': [],
+                        'note': '尚未产生可查看的清洗步骤结果。'}, False
+                result = (reader.steps(actor, task_id) if self.cleaning_service is not None
+                          else reader.step_results(actor, task_id))
+                return HTTPStatus.OK, result, False
+            self._run(cleaning_steps_action)
+            return
+        cleaning_status_match = re.fullmatch(
+            r'/v1/retrieval/tasks/([^/]+)/cleaning/status', path)
+        if cleaning_status_match:
+            def cleaning_status_action():
+                values = parse_qs(parsed.query, keep_blank_values=True)
+                if set(values) != {'operation_id'} or len(values['operation_id']) != 1:
+                    raise ServiceError('INVALID_CLEANING_REQUEST',
+                                       'Exactly one operation_id is required', 422)
+                actor = self._actor()
+                task_id = cleaning_status_match.group(1)
+                if self.cleaning_service is None or self.cleaning_dispatch is None:
+                    raise ServiceError('CLEANING_NOT_CONFIGURED',
+                                       'Background cleaning is unavailable', 503)
+                self.cleaning_service.steps(actor, task_id)
+                return HTTPStatus.OK, self.cleaning_dispatch.status(
+                    actor, task_id, values['operation_id'][0]), False
+            self._run(cleaning_status_action)
+            return
+        manifest_match = FIRST_SEARCH_MANIFEST_PATH.fullmatch(path)
+        if manifest_match:
+            def manifest_action():
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Candidate manifest URL has no query parameters', 422)
+                if self.first_search is None or not callable(
+                        getattr(self.first_search, 'preview_manifest', None)):
+                    raise ServiceError('CANDIDATE_MANIFEST_NOT_CONFIGURED',
+                                       'Candidate manifest publication is unavailable', 503)
+                return HTTPStatus.OK, self.first_search.preview_manifest(
+                    self._actor(), manifest_match.group(1)), False
+            self._run(manifest_action)
+            return
+        preview_match = FIRST_SEARCH_PREVIEW_PATH.fullmatch(path)
+        if preview_match:
+            trace_id = self._trace_id()
+            try:
+                params = parse_qs(parsed.query, keep_blank_values=True)
+                if set(params) - {'ref'} or any(len(values) != 1 for values in params.values()):
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Invalid preview reference', 422)
+                if not isinstance(self.first_search, LocalFirstSearch):
+                    raise ServiceError('PREVIEW_UNAVAILABLE', 'Candidate image bytes are unavailable', 404)
+                content_type, content = self.first_search.candidate_preview(
+                    self._actor(), *preview_match.groups(), ref=params.get('ref', [None])[0])
+                self.send_response(HTTPStatus.OK)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(content)))
+                self.send_header('Cache-Control', 'private, no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Referrer-Policy', 'no-referrer')
+                self.end_headers()
+                self.wfile.write(content)
+            except ServiceError as error:
+                self._json(error.status, error.as_dict(trace_id=trace_id))
+            return
         first_search_match = FIRST_SEARCH_GET_PATH.fullmatch(path)
         if first_search_match:
             def first_search_action():
-                if parsed.query:
-                    raise ServiceError('INVALID_RESULT_VIEW', 'Local search view has no query parameters', 422)
                 if self.first_search is None:
                     raise ServiceError('LOCAL_SEARCH_NOT_CONFIGURED', 'Local first search is not enabled', 503)
                 actor = self._actor()
-                task_id, view = first_search_match.groups()
-                result = (self.first_search.candidates(actor, task_id) if view == 'candidates'
+                task_id, view, alias = first_search_match.groups()
+                view = view or alias
+                params = parse_qs(parsed.query, keep_blank_values=True)
+                options = {}
+                if view in ('candidates', 'candidates/changes'):
+                    if set(params) - {'limit', 'cursor', 'query'} or any(len(v) != 1 for v in params.values()):
+                        raise ServiceError('INVALID_RESULT_VIEW', 'Invalid candidate page parameters', 422)
+                    try:
+                        options = dict(limit=int(params.get('limit', ['200'])[0]), cursor=params.get('cursor', [None])[0],
+                                       query=params.get('query', [''])[0], changes=view.endswith('/changes'))
+                    except ValueError:
+                        raise ServiceError('INVALID_RESULT_VIEW', 'Invalid candidate page limit', 422) from None
+                elif params:
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Search status has no query parameters', 422)
+                result = (self.first_search.candidates(actor, task_id, **options) if view in ('candidates', 'candidates/changes')
                           else self.first_search.progress(actor, task_id) if view == 'progress'
                           else self.first_search.preview(actor, task_id))
                 return HTTPStatus.OK, result, False
@@ -481,7 +938,16 @@ class Handler(BaseHTTPRequestHandler):
         if catalog_match and catalog_match.group(2) is None:
             self._run(lambda: self._catalog_action(catalog_match))
             return
-        if path == "/":
+        if path in ("/", "/production"):
+            self._asset("text/html", BOARD_HTML)
+            return
+        if path == "/production.css":
+            self._asset("text/css", BOARD_CSS)
+            return
+        if path == "/production.js":
+            self._asset("text/javascript", BOARD_JS)
+            return
+        if path == "/chat":
             self._asset("text/html", CHAT_HTML)
             return
         if path == "/chat.css":
@@ -503,7 +969,8 @@ class Handler(BaseHTTPRequestHandler):
         models_match = MODELS_PATH.fullmatch(path)
         if (match is None and not (draft_match and draft_match.group(2))
                 and not (feedback_match and feedback_match.group(2))
-                and revisions_match is None and progress_match is None and results_match is None and project_tasks_match is None
+                and revisions_match is None and progress_match is None and results_match is None
+                and project_tasks_match is None
                 and project_conversations_match is None and conversation_match is None and branches_match is None and models_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
             return
@@ -512,6 +979,7 @@ class Handler(BaseHTTPRequestHandler):
             if models_match:
                 self.service.projects.require_access(self._actor(), models_match.group(1), 'default', 'read')
                 return HTTPStatus.OK, {'items': self.model_runtime.catalog(),
+                                      'defaults': self.model_runtime.settings.defaults() if getattr(self.model_runtime, 'settings', None) else {},
                                       'runtime': self.model_runtime.status()}, False
             if branches_match:
                 actor = self._actor()
@@ -543,8 +1011,23 @@ class Handler(BaseHTTPRequestHandler):
                 revisions = self.service.list_revisions(actor, progress_match.group(1))
                 proposal = next((item["proposal"] for item in revisions
                                  if item["revision"] == task["confirmed_revision"]), None)
+                result_set = None
+                if self.result_reader is not None:
+                    try:
+                        result_set = self.result_reader.get_current_result_set(actor, task["task_id"])
+                    except ServiceError as error:
+                        if error.code != "NOT_FOUND":
+                            raise
+                raw_returned = None
+                if self.first_search is not None:
+                    try:
+                        raw_returned = self.first_search.candidate_count(actor, task["task_id"])
+                    except ServiceError as error:
+                        if error.code not in ("PLAN_NOT_APPROVED", "PLAN_NOT_CURRENT"):
+                            raise
                 try:
-                    return HTTPStatus.OK, build_task_progress(task, proposal).to_view(), False
+                    return HTTPStatus.OK, build_task_progress(
+                        task, proposal, result_set, raw_returned=raw_returned).to_view(), False
                 except ValueError:
                     raise ServiceError("STORAGE_CORRUPT", "task progress binding is invalid", 500) from None
             if results_match:
@@ -583,8 +1066,18 @@ class Handler(BaseHTTPRequestHandler):
                 return HTTPStatus.OK, {"items": list(self.service.list_conversations(
                     self._actor(), project_conversations_match.group(1)))}, False
             if conversation_match:
-                return HTTPStatus.OK, self.service.get_conversation(
-                    self._actor(), conversation_match.group(1)), False
+                actor = self._actor()
+                conversation = self.service.get_conversation(actor, conversation_match.group(1))
+                task_messages = []
+                clarification_messages = []
+                if self.dialogue is not None and conversation['confirmations']:
+                    latest = conversation['confirmations'][-1]
+                    task_messages = self.dialogue.store.task_history(
+                        actor, conversation['project_id'], latest['task_id'], limit=100)
+                    clarification_messages = self.dialogue.store.task_origin(
+                        actor, conversation['project_id'], conversation['confirmations'][0]['task_id'])
+                return HTTPStatus.OK, {**conversation, 'task_messages': task_messages,
+                                       'clarification_messages': clarification_messages}, False
             return HTTPStatus.OK, self.service.get_task(self._actor(), match.group(1)), False
 
         self._run(action)
@@ -596,19 +1089,28 @@ class Handler(BaseHTTPRequestHandler):
 
 def create_handler(service: TaskService, result_reader: Any = None, model_runtime=None, catalog_config=None,
                    routing_preview=None, plan_set_repository=None, first_search=None, dialogue=None,
-                   build_info=None) -> type[Handler]:
+                   search_dispatch=None, build_info=None, cleaning_reader=None,
+                   cleaning_service=None, cleaning_dispatch=None, delivery_service=None,
+                   expansion_jobs=None, refill_service=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
 
     BoundHandler.service = service
-    BoundHandler.result_reader = result_reader
+    BoundHandler.result_reader = result_reader if result_reader is not None else cleaning_reader
+    BoundHandler.cleaning_reader = cleaning_reader
+    BoundHandler.cleaning_service = cleaning_service
+    BoundHandler.cleaning_dispatch = cleaning_dispatch
+    BoundHandler.delivery_service = delivery_service
     BoundHandler.model_runtime = model_runtime or ModelRuntime()
     BoundHandler.catalog_config = catalog_config
     BoundHandler.routing_preview = routing_preview
     BoundHandler.plan_set_repository = plan_set_repository
     BoundHandler.first_search = first_search
+    BoundHandler.search_dispatch = search_dispatch
+    BoundHandler.refill_service = refill_service
     BoundHandler.dialogue = dialogue
+    BoundHandler.expansion_jobs = expansion_jobs
     BoundHandler.build_info = build_info or {}
     return BoundHandler
 
@@ -632,6 +1134,10 @@ def main() -> None:
     parser.add_argument("--ledger", help="local SQLite ledger path; omitted means in-memory storage")
     parser.add_argument('--dialogue-ledger', help='separate SQLite ledger for unconfirmed conversation turns')
     parser.add_argument('--model-config', help='trusted model profile JSON path; keys are environment references')
+    parser.add_argument('--model-settings-store', help='private SQLite model connection store (opt-in)')
+    parser.add_argument('--model-key-file', help='owner-only encryption master key outside the repository')
+    parser.add_argument('--model-allowed-url', action='append', default=[],
+                        help='administrator-approved exact HTTPS Base URL; repeat for multiple gateways')
     parser.add_argument('--agent-runtime', choices=('dsh', 'direct'), default='dsh',
                         help='DSH is the default; direct is an explicit legacy diagnostic mode')
     parser.add_argument('--require-clean-source', action='store_true',
@@ -645,7 +1151,27 @@ def main() -> None:
                         help='enable read-only approved-plan progress for local demo tasks')
     parser.add_argument('--local-first-search-fixture',
                         help='opt-in trusted local exact-vector fixture; requires DSH_LOCAL_CURSOR_SECRET')
+    parser.add_argument('--local-first-search-legacy-fixture',
+                        help='trusted prior LOCAL_EXACT fixture for already approved plans')
+    parser.add_argument('--local-first-search-legacy-capabilities',
+                        help='capabilities matching the prior LOCAL_EXACT fixture')
+    parser.add_argument('--local-test-media-manifest',
+                        help='validated local image manifest used by the real VLM cleaning worker')
+    parser.add_argument('--local-clip-model',
+                        help='offline CLIP model directory for real embeddings of local test images')
+    parser.add_argument('--clip-search-physical-indexes',
+                        help='trusted physical registry for combined CLIP search')
+    parser.add_argument('--clip-search-endpoints',
+                        help='trusted combined CLIP endpoint declarations; URLs come from env')
+    parser.add_argument('--clip-search-jobs', help='independent SQLite ledger for combined CLIP jobs')
+    parser.add_argument('--clip-search-media-mappings',
+                        help='trusted CLIP hit-to-media mapping JSON (optional simulation adapter)')
     args = parser.parse_args()
+    if bool(args.model_settings_store) != bool(args.model_key_file):
+        parser.error('--model-settings-store and --model-key-file must be supplied together')
+    if args.model_settings_store and any(Path(args.model_settings_store).resolve() == Path(p).resolve()
+            for p in (args.ledger, args.dialogue_ledger, args.catalog_ledger, args.model_key_file) if p):
+        parser.error('model settings store must be independent from all ledgers and master key')
     if bool(args.catalog_source) != bool(args.catalog_ledger):
         parser.error('--catalog-source and --catalog-ledger must be supplied together')
     if args.query_capabilities and not args.catalog_source:
@@ -661,10 +1187,31 @@ def main() -> None:
             and args.catalog_ledger and args.query_capabilities and args.demo_project):
         parser.error('--local-first-search-fixture requires --ledger, --catalog-source, '
                      '--catalog-ledger, --query-capabilities and --demo-project')
+    if args.local_test_media_manifest and not (args.local_first_search_fixture
+            and (args.model_config or args.model_settings_store)):
+        parser.error('--local-test-media-manifest requires --local-first-search-fixture '
+                     'and configured model profiles or model settings')
+    if args.local_clip_model and not (args.local_first_search_fixture and args.local_test_media_manifest):
+        parser.error('--local-clip-model requires --local-first-search-fixture '
+                     'and --local-test-media-manifest')
+    clip_values = (args.clip_search_physical_indexes, args.clip_search_endpoints, args.clip_search_jobs)
+    if any(clip_values) and not all(clip_values):
+        parser.error('combined CLIP search requires --clip-search-physical-indexes, '
+                     '--clip-search-endpoints and --clip-search-jobs together')
+    if args.clip_search_media_mappings and not all(clip_values):
+        parser.error('--clip-search-media-mappings requires combined CLIP search configuration')
+    if all(clip_values) and (args.local_first_search_fixture or not (args.ledger and args.catalog_source
+            and args.catalog_ledger and args.query_capabilities and args.demo_project)):
+        parser.error('combined CLIP search is mutually exclusive with the local fixture and requires '
+                     '--ledger, --catalog-source, --catalog-ledger, --query-capabilities and --demo-project')
+    if args.clip_search_jobs and any(Path(args.clip_search_jobs).resolve() == Path(path).resolve()
+            for path in (args.ledger, args.dialogue_ledger, args.catalog_ledger,
+                         args.model_settings_store) if path):
+        parser.error('combined CLIP job ledger must be independent from other stores')
     grants = [("tenant-a", "user-a", "demo", "default")] if args.demo_project else []
     repository = SQLiteTaskRepository(Path(args.ledger)) if args.ledger else InMemoryTaskRepository()
     runtime = load_model_runtime(args.model_config) if args.model_config else ModelRuntime()
-    if args.model_config and args.agent_runtime == 'dsh':
+    if (args.model_config or args.model_settings_store) and args.agent_runtime == 'dsh':
         from .adapters.dsh.runtime import DshModelRuntime
         home = args.dsh_home or os.environ.get('DSH_HOME')
         if not args.dsh_python or not home:
@@ -675,10 +1222,16 @@ def main() -> None:
         if any(recovered.values()):
             print(f"DSH recovery: closed {recovered['runs']} indexed and {recovered['audits']} "
                   "audited run(s) as interrupted", file=sys.stderr)
+    if args.model_settings_store:
+        from .model_settings import ModelSettings
+        runtime.settings = ModelSettings(args.model_settings_store, args.model_key_file,
+            [p.config.base_url for p in runtime.profiles.values()] + args.model_allowed_url)
     catalog = build_local_catalog(args.catalog_source, args.catalog_ledger, runtime) if args.catalog_source else None
     service = TaskService(repository, LocalProjectAccess(grants))
     dialogue = DialogueCoordinator(DialogueStore(Path(args.dialogue_ledger) if args.dialogue_ledger else None),
                                    runtime, service.projects)
+    expansion_jobs = ExpansionJobs(Path(args.dialogue_ledger) if args.dialogue_ledger else None,
+                                   runtime, dialogue, service.projects, service)
     routing = LocalRoutingPreview(service, catalog, args.catalog_source, args.query_capabilities) if args.query_capabilities else None
     plan_sets = build_local_demo_progress_repository(Path(args.ledger), projects=service.projects,
         source_path=args.catalog_source) if args.plan_set_progress else None
@@ -689,20 +1242,80 @@ def main() -> None:
             parser.error('DSH_LOCAL_CURSOR_SECRET must contain at least 32 bytes')
         first_search = LocalFirstSearch(service, catalog, ledger_path=Path(args.ledger),
             source_path=args.catalog_source, capabilities_path=args.query_capabilities,
-            fixture_path=args.local_first_search_fixture, cursor_secret=secret)
+            fixture_path=args.local_first_search_fixture, cursor_secret=secret,
+            legacy_fixture_path=args.local_first_search_legacy_fixture,
+            legacy_capabilities_path=args.local_first_search_legacy_capabilities,
+            clip_model_path=args.local_clip_model)
         plan_sets = first_search.repository
+    elif all(clip_values):
+        secret = os.environ.get('DSH_LOCAL_CURSOR_SECRET', '').encode()
+        if len(secret) < 32:
+            parser.error('DSH_LOCAL_CURSOR_SECRET must contain at least 32 bytes')
+        from .adapters.retrieval.clip_search import load_clip_search_endpoints
+        from .first_search_clip import CLIPFirstSearch
+        from .physical_index_registry import load_physical_indexes
+        registry = load_physical_indexes(args.clip_search_physical_indexes)
+        endpoints = load_clip_search_endpoints(args.clip_search_endpoints, registry)
+        first_search = CLIPFirstSearch(service, catalog, source_path=args.catalog_source,
+            capabilities_path=args.query_capabilities, registry=registry, endpoints=endpoints,
+            jobs_path=args.clip_search_jobs, cursor_secret=secret,
+            media_mappings_path=args.clip_search_media_mappings)
     commit, clean = source_version(Path(__file__).resolve().parents[2])
     if args.require_clean_source and (not commit or clean is not True):
         parser.error('--require-clean-source requires a clean Git checkout')
     build_info = {'commit': commit, 'source_clean': clean,
                   'started_at': datetime.now(timezone.utc).isoformat(),
                   'model_engine': runtime.status().get('engine'),
-                  'retrieval_mode': 'local_fixture' if first_search else 'unconfigured',
+                  'retrieval_mode': (getattr(first_search, 'mode', 'local_fixture')
+                                     if first_search else 'unconfigured'),
                   'identity_mode': 'demo' if args.demo_project else 'external'}
+    search_dispatch = (SearchDispatchCoordinator(repository, first_search)
+                       if first_search is not None and isinstance(repository, SQLiteTaskRepository)
+                       else None)
+    refill_runtime = (build_refill_runtime(args.ledger, service, first_search)
+                      if args.ledger and first_search is not None else None)
+    cleaning_reader = None
+    cleaning_service = None
+    cleaning_dispatch = None
+    delivery_service = None
+    refill_service = None
+    if isinstance(first_search, LocalFirstSearch):
+        from .adapters.task_storage.multi_rule import SQLiteMultiRuleApprovalRepository
+        cleaning_reader = SQLiteMultiRuleApprovalRepository(args.ledger,
+            projects=service.projects, authorization=first_search._authority())
+        if args.local_test_media_manifest:
+            from .cleaning_dispatch import CleaningDispatchCoordinator
+            from .confirmed_cleaning import ConfirmedCleaningService
+            from .local_test_media import LocalTestMediaCorpus
+            from .vlm_registry import ConfirmedTaskVLMRegistry
+            gateway = LocalTestMediaCorpus(args.local_test_media_manifest, service)
+            first_search.media_gateway = gateway
+            cleaning_service = ConfirmedCleaningService(
+                cleaning_reader, registry_provider=ConfirmedTaskVLMRegistry(runtime),
+                gateway=gateway)
+            cleaning_dispatch = CleaningDispatchCoordinator(
+                cleaning_reader, cleaning_service)
+            from .delivery import ImageDeliveryService
+            delivery_service = ImageDeliveryService(cleaning_reader, gateway)
+    if refill_runtime is not None and cleaning_reader is not None:
+        from .refill_service import ConfirmedRefillService
+        refill_service = ConfirmedRefillService(repository, cleaning_reader, refill_runtime)
+        refill_runtime.enable_auto(cleaning_reader, refill_service)
+        if cleaning_service is not None and cleaning_dispatch is not None:
+            refill_runtime.enable_auto_intake(
+                repository, first_search, cleaning_service, cleaning_dispatch,
+                refill_service)
     handler = create_handler(service, model_runtime=runtime, catalog_config=catalog,
                              routing_preview=routing, plan_set_repository=plan_sets,
-                             first_search=first_search, dialogue=dialogue, build_info=build_info)
+                             first_search=first_search, dialogue=dialogue, expansion_jobs=expansion_jobs,
+                             search_dispatch=search_dispatch, build_info=build_info,
+                             cleaning_reader=cleaning_reader,
+                             cleaning_service=cleaning_service,
+                             delivery_service=delivery_service,
+                             cleaning_dispatch=cleaning_dispatch,
+                             refill_service=refill_service)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    expansion_jobs.recover()
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
     try:
@@ -711,7 +1324,17 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        if search_dispatch:
+            search_dispatch.close()
+        if refill_runtime:
+            refill_runtime.close()
+        if cleaning_dispatch:
+            cleaning_dispatch.close()
+        if first_search:
+            first_search.close()
         dialogue.store.close()
+        if runtime.settings:
+            runtime.settings.close()
 
 
 if __name__ == "__main__":

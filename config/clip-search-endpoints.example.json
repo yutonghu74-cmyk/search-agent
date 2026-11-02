@@ -1,0 +1,28 @@
+{
+  "schema": "clip-search-endpoints@1",
+  "entries": [
+    {
+      "binding": {
+        "binding_id": "clip-images-simulated-v1",
+        "library_id": "clip-images-simulated",
+        "index_version": "simulated-index-v1",
+        "encoder_ref": "chinese-clip-vit-huge-patch14-simulated",
+        "vector_dimension": 4,
+        "metric": "IP"
+      },
+      "model_id": "chinese-clip-vit-huge-patch14",
+      "project_name": "simulated-project",
+      "dataset_path": "/mock/clip/dataset",
+      "shard_paths": ["shard_0.db", "shard_1.db"],
+      "filter_templates": {
+        "simulated-all": [],
+        "simulated-fashion": ["春季上新", "日常穿搭"]
+      },
+      "default_filter_template_ref": "simulated-all",
+      "max_results": 100,
+      "min_similarity": 0.1,
+      "wait_seconds": 40,
+      "base_url_env": "RETRIEVAL_CLIP_SEARCH_BASE_URL"
+    }
+  ]
+}

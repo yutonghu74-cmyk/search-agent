@@ -24,10 +24,10 @@ class RetrievalPlanSet:
         return digest(asdict(self))
 
 
-def validate_plan_set(actor: Actor, task: Task, plan_set: RetrievalPlanSet) -> None:
+def validate_plan_set(actor: Actor, task: Task, plan_set: RetrievalPlanSet, *, reading=False) -> None:
     if not isinstance(plan_set, RetrievalPlanSet):
         raise ServiceError('INVALID_PLAN_SET', 'Plan set required', 422)
-    validate_scope(actor, task, plan_set.scope)
+    validate_scope(actor, task, plan_set.scope, reading=reading)
     if (type(plan_set.epoch) is not int or plan_set.epoch < 1
             or not isinstance(plan_set.members, tuple) or not 1 <= len(plan_set.members) <= 64):
         raise ServiceError('INVALID_PLAN_SET', 'Plan set must contain 1-64 members', 422)

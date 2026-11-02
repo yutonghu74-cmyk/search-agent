@@ -1,4 +1,4 @@
-"""First v1.9 slice: text queries for images, no historical dedup or auto dispatch."""
+"""Confirmed v1.9 proposals with an explicitly approved refill progression."""
 from copy import deepcopy
 from dataclasses import dataclass
 import json
@@ -6,6 +6,7 @@ import json
 from .errors import ServiceError, invalid
 from .query_spec import normalize_query_spec, digest
 from .expansion_models import normalize_grouped_expansion
+from .refill_planning import normalize_refill_limits
 
 NODES = ("expansion", "retrieval", "cleaning", "refill", "packaging")
 
@@ -40,13 +41,43 @@ def normalize_proposal(body: dict) -> dict:
         raise invalid("invalid refill policy", "$.query_spec.refill_policy")
     if type(refill["target_count"]) is not int or refill["target_count"] != spec.get("target_count"):
         raise invalid("refill target must equal main target", "$.query_spec.refill_policy.target_count")
-    if refill["mode"] != "input_only" or refill["progression"] != "manual" or refill["approved_library_ids"] != []:
-        raise ServiceError("FEATURE_NOT_SUPPORTED", "this slice supports input_only/manual with no library expansion", 422)
+    libraries = refill.get("approved_library_ids")
+    if (not isinstance(libraries, list)
+            or any(not isinstance(item, str) or not item.strip() for item in libraries)
+            or len(libraries) != len(set(libraries))):
+        raise invalid("approved library ids must be unique non-empty strings",
+                      "$.query_spec.refill_policy.approved_library_ids")
     modes = body.get("node_modes", dict.fromkeys(NODES, "manual"))
-    if modes != dict.fromkeys(NODES, "manual"):
-        raise ServiceError("FEATURE_NOT_SUPPORTED", "this slice requires five explicit manual gates", 422)
+    if (not isinstance(modes, dict) or set(modes) != set(NODES)
+            or any(value not in {"manual", "auto"} for value in modes.values())
+            or modes["expansion"] != "manual" or modes["packaging"] != "manual"):
+        raise ServiceError("FEATURE_NOT_SUPPORTED",
+                           "expansion and packaging remain manual in this slice", 422)
+    if refill["mode"] == "input_only":
+        if (refill.get("progression") != "manual" or libraries
+                or any(modes[node] != "manual" for node in
+                       ("retrieval", "cleaning", "refill"))):
+            raise ServiceError("FEATURE_NOT_SUPPORTED",
+                               "input_only requires manual progression and no refill libraries", 422)
+    elif refill["mode"] == "maintain_target":
+        if (refill.get("progression") not in {"manual", "auto"} or not libraries
+                or modes["refill"] != refill["progression"]):
+            raise ServiceError("FEATURE_NOT_SUPPORTED",
+                               "maintain_target progression must match the confirmed refill node mode", 422)
+        if ((modes["retrieval"] == "auto") != (modes["cleaning"] == "auto")
+                or modes["retrieval"] == "auto" and modes["refill"] != "auto"):
+            raise ServiceError(
+                "FEATURE_NOT_SUPPORTED",
+                "automatic candidate intake requires retrieval, cleaning and refill together", 422)
+    else:
+        raise invalid("unsupported refill mode", "$.query_spec.refill_policy.mode")
+    try:
+        refill_limits = normalize_refill_limits(spec.get("refill_limits"))
+    except ValueError as error:
+        raise invalid(str(error), "$.query_spec.refill_limits") from None
     grouped_expansion = spec.get("grouped_expansion")
-    legacy = {k: v for k, v in spec.items() if k not in required | {"grouped_expansion"}}
+    legacy = {k: v for k, v in spec.items()
+              if k not in required | {"grouped_expansion", "refill_limits"}}
     legacy["schema_version"] = "query-spec@1"
     # Reuse field/rule validation, not the old wire contract or its defaults.
     legacy["allow_auto_refill"] = False
@@ -55,6 +86,7 @@ def normalize_proposal(body: dict) -> dict:
     normalized.pop("dedup_policy", None)
     normalized["schema_version"] = "query-spec@2"
     normalized.update({key: deepcopy(spec[key]) for key in required})
+    normalized["refill_limits"] = refill_limits
     if grouped_expansion is not None:
         try:
             normalized["grouped_expansion"] = normalize_grouped_expansion(grouped_expansion)

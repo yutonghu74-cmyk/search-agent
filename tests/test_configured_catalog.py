@@ -46,7 +46,7 @@ class ConfiguredCatalogTest(unittest.TestCase):
     def test_saved_aliases_route_to_distinct_encoders(self):
         preview = self.discover()
         self.assertEqual([[o.binding.library_id for o in r.options] for r in preview.routes],
-                         [['cats', 'dogs'], ['dogs'], ['cats']])
+                         [['cats', 'dogs'], ['dogs', 'cats'], ['cats', 'dogs']])
         self.assertTrue(preview.catalog_config_digest.startswith('sha256:'))
         plans = self.prepare(preview)
         self.assertEqual([len(p.plan.request.vector.values) for p in plans.members], [3, 2, 3])
@@ -85,9 +85,10 @@ class ConfiguredCatalogTest(unittest.TestCase):
             lambda scope: self.libraries, lambda *args: True)
         self.assert_code('CATALOG_SELECTION_REQUIRED', self.discover)
 
-    def test_no_match_and_wrong_media_return_empty(self):
+    def test_no_text_match_falls_back_to_authorized_preconfigured_indexes(self):
         catalog = self.router.preparer.catalog
-        self.assertEqual(catalog.find_libraries(self.context, '火箭', 'image'), ())
+        self.assertEqual([row.library_id for row in catalog.find_libraries(
+            self.context, '火箭', 'image')], ['cats', 'dogs'])
         self.assertEqual(catalog.find_libraries(self.context, '猫', 'video'), ())
         self.assertEqual(self.encodes, [])
 
@@ -106,7 +107,7 @@ class ConfiguredCatalogTest(unittest.TestCase):
         self.entries = self.entries[:1]
         self.save_config()
         preview = self.discover()
-        self.assertEqual(preview.routes[-1].options, ())
+        self.assertEqual([option.binding.library_id for option in preview.routes[-1].options], ['dogs'])
         self.router.preparer.capabilities.clear()
         self.assertTrue(all(not route.options for route in self.discover().routes))
 

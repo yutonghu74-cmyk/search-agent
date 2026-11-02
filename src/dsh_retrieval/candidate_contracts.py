@@ -10,6 +10,14 @@ from .query_spec import digest
 from .retrieval_contracts import RetrievalOperation, RetrievalScope
 
 
+def candidate_identity(media: MediaRecord) -> str:
+    """Stable opaque identity for one versioned business media unit."""
+    if type(media) is not MediaRecord:
+        raise TypeError("MediaRecord required")
+    return "candidate_" + digest((media.source_namespace, media.source_asset_id,
+                                  media.media_unit_id, media.asset_version)).removeprefix("sha256:")
+
+
 @dataclass(frozen=True, slots=True)
 class ManifestItem:
     media: MediaRecord
@@ -17,9 +25,7 @@ class ManifestItem:
 
     @property
     def candidate_id(self):
-        m = self.media
-        return "candidate_" + digest((m.source_namespace, m.source_asset_id,
-                                     m.media_unit_id, m.asset_version)).removeprefix("sha256:")
+        return candidate_identity(self.media)
 
 
 @dataclass(frozen=True, slots=True)

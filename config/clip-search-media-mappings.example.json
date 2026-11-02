@@ -1,0 +1,23 @@
+{
+  "schema": "clip-media-mappings@1",
+  "entries": [
+    {
+      "source": {
+        "binding_id": "clip-images-simulated-v1",
+        "index_version": "simulated-index-v1",
+        "dataset_key": "simulated-dataset-key",
+        "dataset_version": "simulated-dataset-v1",
+        "shard": "simulated-shard-0.db",
+        "full_path": "/simulated/not-a-real-asset/image-1.jpg"
+      },
+      "media": {
+        "media_unit_id": "simulated-unit-1",
+        "asset_version": "simulated-asset-v1",
+        "source_namespace": "simulated-assets",
+        "source_asset_id": "simulated-asset-1",
+        "authorized_media_ref": "media:simulated-asset-1@simulated-asset-v1",
+        "content_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ]
+}

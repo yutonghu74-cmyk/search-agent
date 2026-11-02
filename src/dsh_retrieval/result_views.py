@@ -7,6 +7,7 @@ from binascii import Error as Base64Error
 from dataclasses import dataclass, is_dataclass
 from hashlib import sha256
 import json
+import math
 
 
 VIEWS = {"accepted", "reserve"}
@@ -20,10 +21,15 @@ class ResultCursorError(ValueError):
 class ResultItem:
     candidate_id: str
     asset_version: str
+    candidate_ids: tuple[str, ...] = ()
+    sources: tuple[dict, ...] = ()
 
-    def to_view(self):
+    def to_view(self, near_duplicate_matches=()):
         return {"candidate_id": self.candidate_id, "asset_version": self.asset_version,
-                "preview_status": "unavailable"}
+                "preview_status": "unavailable",
+                "duplicate_candidate_count": max(0, len(self.candidate_ids) - 1),
+                "source_count": len(self.sources), "sources": list(self.sources),
+                "near_duplicate_matches": list(near_duplicate_matches)}
 
 
 def _positive(value, name):
@@ -84,13 +90,38 @@ def _decode_cursor(cursor, result_digest, view_type):
 def _item(value):
     if is_dataclass(value):
         candidate_id, asset_version = getattr(value, "candidate_id", None), getattr(value, "asset_version", None)
+        candidate_ids, sources = getattr(value, "candidate_ids", ()), getattr(value, "sources", ())
     elif isinstance(value, dict):
         candidate_id, asset_version = value.get("candidate_id"), value.get("asset_version")
+        candidate_ids, sources = value.get("candidate_ids", ()), value.get("sources", ())
     else:
         raise ValueError("result item is invalid")
     if not isinstance(candidate_id, str) or not candidate_id or not isinstance(asset_version, str) or not asset_version:
         raise ValueError("result item identity is invalid")
-    return ResultItem(candidate_id, asset_version)
+    candidate_ids = candidate_ids or (candidate_id,)
+    if (not isinstance(candidate_ids, (tuple, list))
+            or not candidate_ids or candidate_id not in candidate_ids
+            or len(set(candidate_ids)) != len(candidate_ids)
+            or any(not isinstance(item, str) or not item for item in candidate_ids)):
+        raise ValueError("fused candidate identities are invalid")
+    source_views = []
+    if not isinstance(sources, (tuple, list)):
+        raise ValueError("fused sources are invalid")
+    for source in sources:
+        get = (lambda key: getattr(source, key, None)) if is_dataclass(source) else (
+              lambda key: source.get(key) if isinstance(source, dict) else None)
+        row = {key: get(key) for key in (
+            "candidate_id", "binding_id", "library_id", "index_version",
+            "vector_id", "score")}
+        if (row["candidate_id"] not in candidate_ids
+                or any(not isinstance(row[key], str) or not row[key]
+                       for key in ("candidate_id", "binding_id", "library_id", "index_version"))
+                or type(row["vector_id"]) not in (str, int)
+                or type(row["score"]) not in (int, float)
+                or not math.isfinite(row["score"])):
+            raise ValueError("fused source evidence is invalid")
+        source_views.append(row)
+    return ResultItem(candidate_id, asset_version, tuple(candidate_ids), tuple(source_views))
 
 
 def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
@@ -113,7 +144,10 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
                 "result_set_digest": None, "counts": {
                     "eligible_unique": None, "accepted": None, "reserve": None,
                     "duplicate": None, "failed": None, "pending_review": None,
-                    "gap": None}, "counts_status": "unavailable", "stop_reason": None,
+                    "near_duplicate_review": None, "gap": None},
+                "counts_status": "unavailable", "stop_reason": None,
+                "near_duplicate_review": {"pending_clusters": None,
+                                          "decision_count": None},
                 "items": [], "next_cursor": None,
                 "note": "尚未发布绑定当前版本的权威结果集；不展示模拟素材或推算数量。"}
     if not isinstance(result_set, dict):
@@ -130,6 +164,32 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
         raise ValueError("result set metadata is inconsistent")
     accepted = tuple(_item(value) for value in result_set.get("accepted", ()))
     reserve = tuple(_item(value) for value in result_set.get("reserve", ()))
+    item_ids = {item.candidate_id for item in accepted + reserve}
+    raw_pairs = result_set.get("near_duplicate_pairs", ())
+    if not isinstance(raw_pairs, (tuple, list)):
+        raise ValueError("near-duplicate review pairs are invalid")
+    near_by_candidate = {candidate_id: [] for candidate_id in item_ids}
+    normalized_pairs = []
+    for pair in raw_pairs:
+        get = (lambda key: getattr(pair, key, None)) if is_dataclass(pair) else (
+              lambda key: pair.get(key) if isinstance(pair, dict) else None)
+        row = {key: get(key) for key in ("candidate_id", "other_candidate_id",
+               "hamming_distance", "review_threshold", "policy_ref")}
+        if (row["candidate_id"] not in item_ids or row["other_candidate_id"] not in item_ids
+                or row["candidate_id"] >= row["other_candidate_id"]
+                or type(row["hamming_distance"]) is not int
+                or type(row["review_threshold"]) is not int
+                or not 0 <= row["hamming_distance"] <= row["review_threshold"] <= 16
+                or row["policy_ref"] != "near-duplicate-review@1"):
+            raise ValueError("near-duplicate review pair is invalid")
+        normalized_pairs.append(row)
+        for candidate_id, other_id in ((row["candidate_id"], row["other_candidate_id"]),
+                                       (row["other_candidate_id"], row["candidate_id"])):
+            near_by_candidate[candidate_id].append({
+                "candidate_id": other_id,
+                "hamming_distance": row["hamming_distance"],
+                "review_threshold": row["review_threshold"],
+                "policy_ref": row["policy_ref"]})
     expected = {
         "eligible_unique_count": len(accepted) + len(reserve),
         "accepted_count": len(accepted),
@@ -140,6 +200,31 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
     numeric = ("duplicate_count", "failed_count", "pending_review_count", "gap")
     if any(type(result_set.get(name)) is not int or result_set[name] < 0 for name in numeric):
         raise ValueError("result set counts are invalid")
+    near_count = result_set.get("near_duplicate_review_count", len(normalized_pairs))
+    if type(near_count) is not int or near_count != len(normalized_pairs):
+        raise ValueError("near-duplicate review count is invalid")
+    adjacency = {}
+    for row in normalized_pairs:
+        adjacency.setdefault(row["candidate_id"], set()).add(row["other_candidate_id"])
+        adjacency.setdefault(row["other_candidate_id"], set()).add(row["candidate_id"])
+    computed_clusters = 0
+    unseen = set(adjacency)
+    while unseen:
+        computed_clusters += 1
+        frontier = [next(iter(unseen))]
+        visited = set()
+        while frontier:
+            candidate_id = frontier.pop()
+            if candidate_id in visited:
+                continue
+            visited.add(candidate_id)
+            frontier.extend(adjacency[candidate_id] - visited)
+        unseen -= visited
+    cluster_count = result_set.get("near_duplicate_cluster_count", computed_clusters)
+    decisions = result_set.get("near_duplicate_decisions", ())
+    if (type(cluster_count) is not int or cluster_count != computed_clusters
+            or not isinstance(decisions, (tuple, list))):
+        raise ValueError("near-duplicate review summary is invalid")
     rows = accepted if view_type == "accepted" else reserve
     offset = 0 if cursor is None else _decode_cursor(cursor, result_digest, view_type)
     if offset > len(rows):
@@ -148,12 +233,19 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
     next_offset = offset + len(page)
     next_cursor = _encode_cursor(result_digest, view_type, next_offset) if next_offset < len(rows) else None
     return {**base, "available": True, "result_set_id": result_set_id,
+            "publication_kind": result_set.get("kind", "preview"),
             "result_set_digest": result_digest, "counts": {
                 "eligible_unique": expected["eligible_unique_count"],
                 "accepted": expected["accepted_count"], "reserve": expected["reserve_count"],
                 "duplicate": result_set["duplicate_count"], "failed": result_set["failed_count"],
-                "pending_review": result_set["pending_review_count"], "gap": result_set["gap"]},
+                "pending_review": result_set["pending_review_count"],
+                "near_duplicate_review": near_count, "gap": result_set["gap"]},
             "counts_status": result_set.get("counts_status"),
             "stop_reason": result_set.get("stop_reason"),
-            "items": [item.to_view() for item in page], "next_cursor": next_cursor,
-            "note": "素材预览尚未接入授权媒体网关；这里只显示逻辑标识和权威统计。"}
+            "near_duplicate_review": {"pending_clusters": cluster_count,
+                                      "decision_count": len(decisions)},
+            "items": [item.to_view(tuple(sorted(near_by_candidate[item.candidate_id],
+                       key=lambda match: (match["hamming_distance"], match["candidate_id"]))))
+                      for item in page], "next_cursor": next_cursor,
+            "note": ("当前交付已发布，可在打包节点下载；访问仍受当前权限约束。" if result_set.get('kind') == 'delivery'
+                     else "当前为合格预览，入选不代表正式交付；图片可在清洗详情查看，此列表仅显示逻辑标识和权威统计。")}

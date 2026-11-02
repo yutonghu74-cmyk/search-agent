@@ -21,7 +21,7 @@ def prepare_released_multi_rule(repo, actor, task_id, manifest_ref, recipe, *, r
                         detector_release_digest=registry.release_digest)
 
 
-def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, registry):
+def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, registry, execution=None):
     """Return (current preview view, replayed) for an approved operation.
 
     The return is a preview, not a delivery. Only a trusted service/worker
@@ -58,8 +58,18 @@ def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, regi
         if exc.code != "NOT_FOUND":
             raise
         access = ApprovedManifestAccess(repo, actor, task_id, gateway)
+        completed = repo.start_cleaning_checkpoint(actor, task_id, operation_id,
+            execution or {'backend_refs': [step.backend_ref for step in job.recipe.steps]})
+        partial = (repo.get_cleaning_step_checkpoint(actor, task_id, operation_id)
+                   if callable(getattr(repo, 'get_cleaning_step_checkpoint', None)) else None)
+        save_step = getattr(repo, 'save_cleaning_step_checkpoint', None)
         result = GenericCleaningExecutor(guard=access, reader=access,
-                                         detectors=detectors).run(job)
+                                         detectors=detectors).run(job, completed=completed,
+            checkpoint=lambda item: repo.save_cleaning_checkpoint(actor, task_id, operation_id, item),
+            partial=partial,
+            step_checkpoint=(lambda candidate, step, verdicts: save_step(
+                actor, task_id, operation_id, candidate, step, verdicts))
+                if callable(save_step) else None)
         repo.publish_result(actor, task_id, operation_id, result)
 
     # This is a separate recoverable transaction. On retry, a published

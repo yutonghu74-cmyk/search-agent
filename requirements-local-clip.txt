@@ -1,0 +1,4 @@
+# Optional, isolated local-CLIP development runtime (Python 3.13 tested).
+torch==2.15.0
+transformers==5.22.1
+pillow==13.0.0

@@ -16,7 +16,7 @@ class ApprovedManifestAccess:
     def __init__(self, approvals, actor, task_id, gateway):
         if not callable(getattr(approvals, "get_current", None)):
             raise ValueError("current approval repository is required")
-        if not callable(getattr(approvals.manifests, "get", None)):
+        if not callable(getattr(approvals, "get_manifest", None)):
             raise ValueError("candidate manifest repository is required")
         if not callable(getattr(gateway, "open_read", None)):
             raise ValueError("authorized media gateway is required")
@@ -37,8 +37,8 @@ class ApprovedManifestAccess:
         approval = self._approval(binding)
         if type(candidate) is not CleaningCandidateRef or candidate not in approval.proposal.candidates:
             raise ServiceError("INPUT_SNAPSHOT_CHANGED", "Candidate outside approved input", 409)
-        manifest = self.approvals.manifests.get(self.actor, self.task_id,
-                                                approval.proposal.manifest_ref)
+        manifest = self.approvals.get_manifest(self.actor, self.task_id,
+                                               approval.proposal.manifest_ref)
         item = next((item for item in manifest.proposal.items
                      if item.candidate_id == candidate.candidate_id), None)
         if (item is None or item.media.asset_version != candidate.asset_version

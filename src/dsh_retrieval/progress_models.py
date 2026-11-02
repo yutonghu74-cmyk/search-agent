@@ -6,7 +6,7 @@ from dataclasses import dataclass
 NODE_DEFINITIONS = (
     ("expansion", "检索词扩词"),
     ("retrieval", "检索"),
-    ("cleaning", "清洗（DJ）"),
+    ("cleaning", "清洗"),
     ("refill", "补数"),
     ("packaging", "打包"),
 )
@@ -59,7 +59,8 @@ class TaskProgressSnapshot:
                 "counts": dict(self.counts), "note": self.note}
 
 
-def build_task_progress(task: dict, proposal: dict) -> TaskProgressSnapshot:
+def build_task_progress(task: dict, proposal: dict, result_set: dict | None = None,
+                        *, raw_returned: int | None = None) -> TaskProgressSnapshot:
     """Project existing authority without inventing worker events or counts."""
     if not isinstance(task, dict) or not isinstance(proposal, dict):
         raise ValueError("task and proposal must be objects")
@@ -78,6 +79,8 @@ def build_task_progress(task: dict, proposal: dict) -> TaskProgressSnapshot:
     target = query.get("target_count")
     if type(target) is not int or target < 1:
         raise ValueError("target count is invalid")
+    if raw_returned is not None and (type(raw_returned) is not int or raw_returned < 0):
+        raise ValueError("raw returned count is invalid")
 
     run_status = task.get("run_status")
     stage = task.get("stage")
@@ -105,10 +108,67 @@ def build_task_progress(task: dict, proposal: dict) -> TaskProgressSnapshot:
                 status, detail = "running", "当前权威运行阶段"
         nodes.append(ProgressNode(node, label, modes[node], status, gate, detail))
 
-    counts = {"target": target, "returned": None, "passed": None,
-              "duplicate": None, "accepted": None, "pending_review": None, "gap": None}
+    counts = {"target": target, "returned": raw_returned, "passed": None,
+              "duplicate": None, "accepted": None, "pending_review": None,
+              "near_duplicate_review": None, "gap": None}
+    note = "尚未发布权威结果计数；不显示估算百分比，null 表示未知。"
+    if result_set is not None:
+        from .result_views import build_result_page
+        page = build_result_page(task, proposal, result_set)
+        published = page["counts"]
+        counts.update(passed=published["eligible_unique"] + published["duplicate"],
+                      accepted=published["accepted"],
+                      reserve=published["reserve"], duplicate=published["duplicate"],
+                      pending_review=published["pending_review"],
+                      near_duplicate_review=published["near_duplicate_review"],
+                      gap=published["gap"])
+        note = "当前版本合格预览计数；入选与候补分开，尚不代表打包或正式交付完成。"
+        if result_set.get('kind') == 'delivery' and run_status in ('COMPLETED', 'PARTIAL'):
+            nodes = [ProgressNode(node.node, node.label, node.mode, 'succeeded', 'approved',
+                                 '当前版本交付已发布，可在打包节点下载') for node in nodes]
+            note = ('当前版本部分交付已发布；缺口与停止原因保留在交付清单中。'
+                    if run_status == 'PARTIAL' else
+                    '当前版本交付已发布；下载仍需重新校验当前权限和素材版本。')
+        elif normalized_stage == 'FINALIZING' and run_status == 'AWAITING_INPUT':
+            nodes[4] = ProgressNode('packaging', '打包', modes['packaging'], 'succeeded',
+                                    'awaiting_approval', '待发布包已生成；等待发起人确认发布，尚不可下载')
+        if normalized_stage == "REFILL" and run_status in ("RUNNING", "AWAITING_INPUT"):
+            policy = proposal['query_spec'].get('refill_policy', {})
+            automatic = (policy.get('mode') == 'maintain_target'
+                         and policy.get('progression') == 'auto'
+                         and modes['refill'] == 'auto')
+            if published['gap'] == 0:
+                detail = '已达到目标，无需补数；待打包门禁'
+            elif automatic:
+                reasons = {
+                    'EXECUTION_LIMIT_REACHED': '已达到补数轮次上限',
+                    'VLM_CALL_LIMIT_REACHED': '已达到 VLM 调用预算',
+                    'NO_PROGRESS': '连续补数没有新增有效结果',
+                    'SEARCH_STRATEGIES_EXHAUSTED': '当前批准的检索策略已耗尽',
+                }
+                reason = reasons.get(result_set.get('stop_reason'))
+                next_step = ('可部分交付' if published['accepted'] > 0
+                             else '当前无有效素材，请修改方案重新检索')
+                detail = (f"缺口 {published['gap']}；自动补数已停止：{reason}；{next_step}"
+                          if reason else
+                          f"缺口 {published['gap']}；自动补数已启用，逐轮证据见本节点输出")
+            else:
+                detail = (f"缺口 {published['gap']}；已确认范围仅限固定输入，可部分交付；"
+                          '继续检索需新方案确认')
+            nodes[3] = ProgressNode(
+                'refill', '补数', modes['refill'],
+                'succeeded' if published['gap'] == 0 else 'pending', 'blocked', detail)
+            if run_status == 'AWAITING_INPUT' and result_set.get('stop_reason'):
+                nodes[3] = ProgressNode('refill', '补数', modes['refill'], 'succeeded',
+                                        'approved', detail)
+                nodes[4] = ProgressNode(
+                    'packaging', '打包', modes['packaging'], 'pending',
+                    'awaiting_approval',
+                    ('请选择按当前有效素材部分交付，或修改方案后重新检索'
+                     if published['accepted'] > 0 else
+                     '当前无有效素材，不能生成空交付包；请修改方案后重新检索'))
     return TaskProgressSnapshot(
         task["task_id"], revision, task_version, generation, run_status, stage,
         tuple(nodes), counts,
-        "尚未发布权威结果计数；不显示估算百分比，null 表示未知。",
+        note,
     )

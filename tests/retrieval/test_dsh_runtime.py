@@ -21,14 +21,15 @@ class ProposalToolTest(unittest.TestCase):
     def test_context_required_and_no_arbitrary_tools_or_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'context.json').write_text('{"only":"this turn"}')
+            (root / 'context.json').write_text('{"only":"this turn","tool_mode":"proposal"}')
             tools = ProposalTools(root)
             for name, arguments in [('bash', {'command': 'ls'}),
-                                    ('get_context', {'task_id': 'other'}),
+                                    ('get_request_context', {'task_id': 'other'}),
                                     ('submit_proposal', {'proposal': {}})]:
                 with self.assertRaises(ValueError):
                     tools.call(name, arguments)
-            self.assertEqual(tools.call('get_context', {}), {'only': 'this turn'})
+            self.assertEqual(tools.call('get_request_context', {}),
+                             {'only': 'this turn', 'tool_mode': 'proposal'})
             self.assertFalse(tools.call('submit_proposal', {'proposal': {'action': 'clarify'}})['executed'])
             tools.call('submit_proposal', {'proposal': {'action': 'clarify'}})
             with self.assertRaises(ValueError):
@@ -40,8 +41,23 @@ class ProposalToolTest(unittest.TestCase):
         sink = io.StringIO()
         serve('/unused', source, sink)
         rows = [json.loads(line) for line in sink.getvalue().splitlines()]
-        self.assertEqual({t['name'] for t in rows[1]['result']['tools']}, {'get_context', 'submit_proposal'})
+        self.assertEqual({t['name'] for t in rows[1]['result']['tools']}, {
+            'get_request_context', 'update_request_draft', 'save_expansion_draft', 'submit_proposal'})
         self.assertEqual(rows[2]['error']['code'], -32601)
+
+    def test_draft_tools_are_scoped_by_server_selected_mode(self):
+        for mode, accepted, rejected in (
+                ('request_draft', 'update_request_draft', 'save_expansion_draft'),
+                ('expansion_draft', 'save_expansion_draft', 'update_request_draft')):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'context.json').write_text(json.dumps({'tool_mode': mode}))
+                tools = ProposalTools(root)
+                tools.call('get_request_context', {})
+                with self.assertRaises(ValueError):
+                    tools.call(rejected, {'proposal': {}})
+                result = tools.call(accepted, {'proposal': {'action': 'draft'}})
+                self.assertEqual(result, {'status': 'pending_backend_validation', 'executed': False})
 
 
 class RuntimeTest(unittest.TestCase):
@@ -249,7 +265,7 @@ class NativeRuntimeTest(unittest.TestCase):
                 calls.append(body)
                 number = len(calls)
                 if number <= 2:
-                    name = 'mcp__retrieval__get_context' if number == 1 else 'mcp__retrieval__submit_proposal'
+                    name = 'mcp__retrieval__get_request_context' if number == 1 else 'mcp__retrieval__submit_proposal'
                     args = {} if number == 1 else {'proposal': proposal}
                     delta = {'role': 'assistant', 'tool_calls': [{'index': 0, 'id': 'call_' + str(number),
                         'type': 'function', 'function': {'name': name, 'arguments': json.dumps(args)}}]}
@@ -287,7 +303,10 @@ class NativeRuntimeTest(unittest.TestCase):
                 self.assertEqual(calls[0].get('max_tokens'), 12000)
                 self.assertNotIn('temperature', calls[0])
                 names = {item['function']['name'] for item in calls[0]['tools']}
-                self.assertEqual(names, {'mcp__retrieval__get_context', 'mcp__retrieval__submit_proposal'})
+                self.assertEqual(names, {'mcp__retrieval__get_request_context',
+                                         'mcp__retrieval__update_request_draft',
+                                         'mcp__retrieval__save_expansion_draft',
+                                         'mcp__retrieval__submit_proposal'})
                 self.assertNotIn('dsh_session_log', calls[0])
                 self.assertNotIn('dsh_plugin_packages', calls[0])
                 self.assertIn('找猫图片', json.dumps(calls[1], ensure_ascii=False))

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from core import test_multi_rule_approval as fixture
 from dsh_retrieval.errors import ServiceError
+from dsh_retrieval.confirmed_cleaning import ConfirmedCleaningService
 from dsh_retrieval.detector_artifacts import (
     DetectorArtifact, DetectorArtifactBinding, DetectorArtifactManifest,
 )
@@ -17,7 +18,11 @@ from dsh_retrieval.intent_review import Capability
 from dsh_retrieval.multi_rule_contracts import (
     CleaningCandidateVerdict, CleaningJobResult, CleaningRuleVerdict, DetectionResult,
 )
+from dsh_retrieval.near_duplicates import (ALGORITHM, NearDuplicatePair,
+                                           PerceptualFingerprint)
+from dsh_retrieval.result_contracts import ExactRepresentative, near_duplicate_clusters
 from dsh_retrieval.multi_rule_pipeline import prepare_released_multi_rule, run_approved_multi_rule
+from dsh_retrieval.recipe_bridge import compile_confirmed_recipe, confirmed_rules_digest
 from dsh_retrieval.released_detectors import ReleasedDetectorRegistry
 
 
@@ -135,6 +140,27 @@ class MultiRulePipelineTests(unittest.TestCase):
                 self.f.recipe, registry=self.registry,
                 detector_release_digest="sha256:" + "0" * 64)
 
+    def test_confirmed_task_compiles_only_server_released_recipe(self):
+        task = self.repo.tasks.get(self.actor, self.task_id)
+        recipe = compile_confirmed_recipe(task, self.registry)
+        self.assertEqual(recipe.source_review_digest, confirmed_rules_digest(task))
+        self.assertEqual(recipe.registry_digest, self.registry.registry_digest)
+        self.assertEqual(
+            [(rule.rule_id, rule.predicate_ref, rule.value) for rule in recipe.rules],
+            [(rule.rule_id, rule.predicate_ref, rule.value) for rule in self.f.recipe.rules],
+        )
+        self.assertEqual({step.backend_ref for step in recipe.steps},
+                         {self.detector.backend_ref})
+
+    def test_confirmed_recipe_rejects_unreleased_rule_before_approval(self):
+        task = self.repo.tasks.get(self.actor, self.task_id)
+        registry = ReleasedDetectorRegistry(self.capabilities[:1], self.bindings[:1],
+            {self.detector.backend_ref: self.detector}, self.artifact_manifest)
+        with patch.object(self.repo, "prepare") as prepare:
+            self.assert_code("DETECTOR_NOT_RELEASED",
+                             lambda: compile_confirmed_recipe(task, registry))
+            prepare.assert_not_called()
+
     def test_prepare_entry_rejects_untrusted_registry_before_ledger(self):
         with patch.object(self.f.repo, "prepare") as prepare:
             with self.assertRaisesRegex(ValueError, "trusted released"):
@@ -165,10 +191,112 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.assertFalse(replayed)
         self.assertEqual((view["accepted_count"], view["gap"], view["kind"]),
                          (1, 9, "preview"))
+        representative = view["accepted"][0]
+        self.assertEqual(representative.candidate_ids,
+                         (representative.candidate_id,))
+        self.assertEqual(len(representative.sources), 1)
+        self.assertEqual(representative.sources[0].candidate_id,
+                         representative.candidate_id)
         self.assertEqual((self.gateway.reads, self.detector.calls), (1, 1))
         self.assertEqual(self.run_pipeline(), (view, True))
         self.assertEqual((self.gateway.reads, self.detector.calls), (1, 1))
         self.assertEqual(len(self.f.state()["result_sets"]), 1)
+
+    def test_owner_near_duplicate_merge_is_versioned_idempotent_and_restartable(self):
+        view, _ = self.run_pipeline()
+        def seed(memory, retrieval, candidates, state):
+            result_set_id = state["current_result_sets"][self.task_id]
+            preview, published_version = state["result_sets"][result_set_id]
+            original = preview.accepted[0]
+            second_id = original.candidate_id + "z"
+            first = replace(original, fingerprint=PerceptualFingerprint(
+                original.candidate_id, ALGORITHM, 64, "0000000000000000",
+                640, 480, 4.0))
+            second = ExactRepresentative(
+                second_id, "v1", "sha256:" + "2" * 64,
+                fingerprint=PerceptualFingerprint(
+                    second_id, ALGORITHM, 64, "0000000000000003",
+                    1280, 720, 8.0))
+            pair = NearDuplicatePair(original.candidate_id, second_id, 2, 6)
+            seeded = replace(preview, accepted=(first, second), gap=8,
+                             near_duplicate_pairs=(pair,))
+            state["result_sets"][result_set_id] = (seeded, published_version)
+            event = next(item for item in state["events"]
+                         if item.get("result_set_id") == result_set_id)
+            event.update(accepted_count=2, gap=8)
+            return result_set_id, seeded, published_version
+        old_id, seeded, version = self.repo._transaction(True, seed)
+        cluster = near_duplicate_clusters(seeded)[0]
+        reviewed, replayed = self.repo.review_near_duplicate_cluster(
+            self.actor, self.task_id, key="near-review",
+            expected_task_version=version,
+            result_set_digest=seeded.result_set_digest,
+            cluster_id=cluster.cluster_id, action="merge",
+            representative_candidate_id=cluster.recommended_candidate_id)
+        self.assertFalse(replayed)
+        self.assertNotEqual(reviewed["result_set_id"], old_id)
+        self.assertEqual((reviewed["counts"]["accepted"],
+                          reviewed["counts"]["duplicate"],
+                          reviewed["counts"]["gap"]), (1, 1, 9))
+        replay, replayed = self.repo.review_near_duplicate_cluster(
+            self.actor, self.task_id, key="near-review",
+            expected_task_version=version,
+            result_set_digest=seeded.result_set_digest,
+            cluster_id=cluster.cluster_id, action="merge",
+            representative_candidate_id=cluster.recommended_candidate_id)
+        self.assertTrue(replayed)
+        self.assertEqual(replay, reviewed)
+        reopened = self.f.reopen()
+        state = self.f.state()
+        current_id = state["current_result_sets"][self.task_id]
+        current, current_version = state["result_sets"][current_id]
+        self.assertEqual((len(current.near_duplicate_decisions), current_version),
+                         (1, version + 1))
+
+    def test_confirmed_cleaning_service_executes_without_client_recipe(self):
+        service = ConfirmedCleaningService(
+            self.repo, registry=self.registry, gateway=self.gateway)
+        view, replayed = service.execute(self.actor, self.task_id, self.operation_id)
+        self.assertFalse(replayed)
+        self.assertEqual((view["kind"], view["accepted_count"]),
+                         ("cleaning_preview", 1))
+        self.assertNotIn("authorized_media_ref", str(view))
+        self.assertTrue(service.steps(self.actor, self.task_id)["available"])
+
+    def test_prepare_exposes_frozen_execution_without_running_detector(self):
+        from types import SimpleNamespace
+        execution = {"model": {"id": "vision", "provider": "fixture", "name": "v1"},
+                     "instruction": "完整的已确认条件", "prompt_version": "v1",
+                     "config_digest": "sha256:" + "1" * 64}
+        provider = SimpleNamespace(build=lambda actor, task: self.registry,
+                                   describe=lambda task: execution)
+        service = ConfirmedCleaningService(self.repo, registry_provider=provider,
+                                           gateway=self.gateway)
+        with patch('dsh_retrieval.confirmed_cleaning.compile_confirmed_recipe',
+                   return_value=self.approval.proposal.recipe), patch(
+                       'dsh_retrieval.confirmed_cleaning.prepare_released_multi_rule',
+                       return_value=self.approval.proposal):
+            view = service.prepare(self.actor, self.task_id,
+                                   self.approval.proposal.manifest_ref)
+        self.assertEqual(view['execution'], execution)
+        self.assertEqual(view['detector_release_digest'], self.registry.release_digest)
+        self.assertEqual(view['unknown_policy'], 'hold_for_review')
+        self.assertEqual(view['steps'][0]['backend_ref'], self.detector.backend_ref)
+        self.assertEqual((self.gateway.reads, self.detector.calls), (0, 0))
+
+    def test_prepare_model_drift_does_not_persist_an_approval_card(self):
+        from types import SimpleNamespace
+        def changed(task):
+            raise ServiceError('MODEL_BINDING_CHANGED', 'reconfirm required', 409)
+        provider = SimpleNamespace(build=lambda actor, task: self.registry, describe=changed)
+        service = ConfirmedCleaningService(self.repo, registry_provider=provider,
+                                           gateway=self.gateway)
+        with patch('dsh_retrieval.confirmed_cleaning.compile_confirmed_recipe',
+                   return_value=self.approval.proposal.recipe), patch(
+                       'dsh_retrieval.confirmed_cleaning.prepare_released_multi_rule') as prepare:
+            self.assert_code('MODEL_BINDING_CHANGED', lambda: service.prepare(
+                self.actor, self.task_id, self.approval.proposal.manifest_ref))
+        prepare.assert_not_called()
 
     def test_result_already_persisted_skips_media_and_detector(self):
         result = self.make_result()

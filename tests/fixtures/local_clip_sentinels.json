@@ -1,0 +1,95 @@
+{
+  "schema": "local-clip-sentinels@1",
+  "note": "Visual inspection of eighteen frozen Commons test images; partial judgments only, not a 500-image ground truth set.",
+  "assets": [
+    {"file": "images/dog-001.jpg", "content_digest": "sha256:79ffa912e9c9ee6d9682976d46617dcf95746aecc47995be8586d8e6041f99f0"},
+    {"file": "images/dog-004.jpg", "content_digest": "sha256:d722a3fd27fa9cd864c063a5bf3c09f659abf649f5ea3355431f61dc42d2a7c5"},
+    {"file": "images/cat-001.jpg", "content_digest": "sha256:8d2e40b5bd546bd6b038810dcb32f5793c969bc31a416eb9cf48fa4c71292251"},
+    {"file": "images/cat-002.png", "content_digest": "sha256:ffdf3a04162470c69f5292a9aaf69e80c0d7f94157816e89fe20e0e70128c4f9"},
+    {"file": "images/parrot-035.jpg", "content_digest": "sha256:d7c437c645f5333a68f0c323758a8b215f20e98307f1d1bc4bf4d13a092dcfae"},
+    {"file": "images/horse-036.jpg", "content_digest": "sha256:d8ad043364e3abcfbd4cb1374d1e692fc5c310cae9c40a2325ccc02a7e354edd"},
+    {"file": "images/horse-037.jpg", "content_digest": "sha256:1186e127e7995a2b550612b31beada7c490ca5f696df7b5c1f22590787a28ff8"},
+    {"file": "images/dog_person-001.jpg", "content_digest": "sha256:cb9c93f283c90af50abdd99a6474246efa4166913b7755cc7c88c9bbd6812a06"},
+    {"file": "images/cat-014.jpg", "content_digest": "sha256:9b90778175f29fd8538f14ceedc905148925f899e4928ddc03d5405253d2b746"},
+    {"file": "images/dog-012.jpg", "content_digest": "sha256:73863870b100bc594b3c9eef1a504cb81a962efa75b13900db20a67b33d72434"},
+    {"file": "images/dog-008.jpg", "content_digest": "sha256:f5cef8586d368864151aea2c618ab3aabe8446fc5ff5fcce94899e30c91b4f81"},
+    {"file": "images/dog-015.jpg", "content_digest": "sha256:7de26454c9158d984fd35f27736ab55a666ed8581a4ea71957053bfc212ba2fd"},
+    {"file": "images/cat-026.jpg", "content_digest": "sha256:551231bdda566a8055874b10d0435ba53b8df095add816f553f1ba4b7d32c5ff"},
+    {"file": "images/fox-015.jpg", "content_digest": "sha256:a674c7405c19ad3d20db3839a1d14c0f4cdc2e9b78a305fbd52bb62759ceb5ce"},
+    {"file": "images/cat-045.jpg", "content_digest": "sha256:dbb5792984c2d4a86adbdfeef477737d915f9a1727527b1101a40a13246ba6b5"},
+    {"file": "images/fox-016.jpg", "content_digest": "sha256:54a6a4df972b21dbad920e322c0c8a1664cf04f8f849eed5cd5594726c23593a"},
+    {"file": "images/dog-013.jpg", "content_digest": "sha256:08831828fcdd75505271b6d7459440254ece7cf1ee5ad4f4318c3d2e454a9411"},
+    {"file": "images/dog-016.jpg", "content_digest": "sha256:6176af787262d9764d2aa718ca7ef5d5552e93dec19095d12afa300030fa3528"}
+  ],
+  "queries": [
+    {
+      "text": "一张猫的照片",
+      "relevance": {
+        "commons-143571500": false,
+        "commons-100150891": false,
+        "commons-150140769": false,
+        "commons-132382904": false,
+        "commons-137634068": true,
+        "commons-103310246": true,
+        "commons-12675442": true,
+        "commons-190398213": false,
+        "commons-18549200": false,
+        "commons-26331460": false,
+        "commons-124859918": false,
+        "commons-175183512": false,
+        "commons-92560612": false,
+        "commons-131641155": false,
+        "commons-82310887": false,
+        "commons-116519886": false,
+        "commons-26592914": false,
+        "commons-33793081": false
+      }
+    },
+    {
+      "text": "一张狗的照片",
+      "relevance": {
+        "commons-143571500": true,
+        "commons-100150891": true,
+        "commons-150140769": true,
+        "commons-132382904": true,
+        "commons-137634068": false,
+        "commons-103310246": false,
+        "commons-12675442": false,
+        "commons-190398213": false,
+        "commons-18549200": true,
+        "commons-26331460": true,
+        "commons-124859918": true,
+        "commons-175183512": true,
+        "commons-92560612": true,
+        "commons-131641155": true,
+        "commons-82310887": true,
+        "commons-116519886": true,
+        "commons-26592914": true,
+        "commons-33793081": true
+      }
+    },
+    {
+      "text": "小孩抱着狗的照片",
+      "relevance": {
+        "commons-143571500": true,
+        "commons-100150891": false,
+        "commons-150140769": false,
+        "commons-132382904": false,
+        "commons-137634068": false,
+        "commons-103310246": false,
+        "commons-12675442": false,
+        "commons-190398213": false,
+        "commons-18549200": false,
+        "commons-26331460": false,
+        "commons-124859918": false,
+        "commons-175183512": false,
+        "commons-92560612": false,
+        "commons-131641155": false,
+        "commons-82310887": false,
+        "commons-116519886": false,
+        "commons-26592914": false,
+        "commons-33793081": false
+      }
+    }
+  ]
+}

@@ -8,7 +8,7 @@ import re
 
 from .errors import ServiceError
 from .model_runtime import ModelRuntime, PROMPT_VERSION
-from .multi_rule_contracts import DetectionResult
+from .multi_rule_contracts import DetectionResult, bounded_reason
 from .query_spec import digest
 
 
@@ -20,7 +20,7 @@ class VLMRequirementDetector:
 
     def __init__(self, runtime: ModelRuntime, requirement: str, model_binding: dict,
                  source_review_digest: str, artifact_binding_digest: str):
-        if type(runtime) is not ModelRuntime:
+        if not isinstance(runtime, ModelRuntime):
             raise ValueError("trusted model runtime required")
         if not isinstance(requirement, str) or not 1 <= len(requirement.strip()) <= 2000:
             raise ValueError("bounded reviewed requirement required")
@@ -59,7 +59,11 @@ class VLMRequirementDetector:
         if mime is None:
             raise ServiceError("INVALID_MEDIA", "Bounded PNG/JPEG bytes required", 422)
         result = self._runtime.assess(self._requirement, content, mime, self._model_binding)
+        # Passing rules need no explanation by default. Preserve only the
+        # observable short reason for fail/unknown, never the full response.
+        summary, truncated = bounded_reason(
+            result.get("reason") if result["verdict"] != "pass" else None)
         if result["verdict"] == "unknown":
-            return DetectionResult({}, None, self.validator_ref, "unknown")
+            return DetectionResult({}, None, self.validator_ref, "unknown", summary, truncated)
         return DetectionResult({self.predicate_ref: result["verdict"] == "pass"},
-                               self.evidence_ref, self.validator_ref, "ok")
+                               self.evidence_ref, self.validator_ref, "ok", summary, truncated)

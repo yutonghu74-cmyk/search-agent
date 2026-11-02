@@ -19,6 +19,52 @@ class MemoryCleaningMixin:
         self._cleaning_events = []
         self._cleaning_cancel_keys = {}
 
+    def _purge_cleaning_for_tasks(self, task_ids):
+        """Drop every cleaning record scoped to the given task ids, in place.
+
+        Operation/proposal/cancel-key indexes are rebuilt from the surviving
+        operations so the next read sees a consistent ledger. Returns a summary
+        of how many records were removed; an empty task set is a no-op.
+        """
+        if not task_ids:
+            return {'cleaning_proposals': 0, 'cleaning_operations': 0,
+                    'cleaning_results': 0, 'cleaning_keys': 0,
+                    'cleaning_proposal_ops': 0, 'cleaning_events': 0,
+                    'cleaning_cancel_keys': 0}
+        before_proposals = len(self._cleaning_proposals)
+        before_ops = len(self._cleaning_operations)
+        before_results = len(self._cleaning_results)
+        before_keys = len(self._cleaning_keys)
+        before_proposal_ops = len(self._cleaning_proposal_ops)
+        before_events = len(self._cleaning_events)
+        before_cancel_keys = len(self._cleaning_cancel_keys)
+
+        surviving_ops = {op_id for op_id, op in self._cleaning_operations.items()
+                         if op.proposal.task_id not in task_ids}
+        self._cleaning_proposals = {pid: p for pid, p in self._cleaning_proposals.items()
+                                    if p.task_id not in task_ids}
+        self._cleaning_operations = {op_id: op for op_id, op in self._cleaning_operations.items()
+                                     if op_id in surviving_ops}
+        self._cleaning_proposal_ops = {pid: op_id for pid, op_id in self._cleaning_proposal_ops.items()
+                                       if op_id in surviving_ops}
+        for task_id in task_ids:
+            self._cleaning_results.pop(task_id, None)
+        self._cleaning_keys = {scope: value for scope, value in self._cleaning_keys.items()
+                               if scope[2] not in task_ids}
+        self._cleaning_events = [(op_id, status) for op_id, status in self._cleaning_events
+                                 if op_id in surviving_ops]
+        self._cleaning_cancel_keys = {scope: value for scope, value in self._cleaning_cancel_keys.items()
+                                      if scope[2] in surviving_ops}
+        return {
+            'cleaning_proposals': before_proposals - len(self._cleaning_proposals),
+            'cleaning_operations': before_ops - len(self._cleaning_operations),
+            'cleaning_results': before_results - len(self._cleaning_results),
+            'cleaning_keys': before_keys - len(self._cleaning_keys),
+            'cleaning_proposal_ops': before_proposal_ops - len(self._cleaning_proposal_ops),
+            'cleaning_events': before_events - len(self._cleaning_events),
+            'cleaning_cancel_keys': before_cancel_keys - len(self._cleaning_cancel_keys),
+        }
+
     def put_cleaning_proposal(self, actor, proposal):
         with self._lock:
             task = self.get(actor, proposal.task_id)

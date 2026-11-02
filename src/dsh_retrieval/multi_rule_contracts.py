@@ -7,12 +7,34 @@ from dataclasses import dataclass
 import hashlib
 import math
 import re
+import unicodedata
 
 from .query_spec import digest
+from .near_duplicates import PerceptualFingerprint
 
 
 _IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,127}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
+
+def _validate_reason(summary, truncated):
+    if (type(truncated) is not bool
+            or summary is None and truncated
+            or summary is not None and (
+                not isinstance(summary, str) or not 1 <= len(summary) <= 50
+                or summary != summary.strip()
+                or any(unicodedata.category(char).startswith('C') for char in summary))):
+        raise ValueError("invalid bounded cleaning reason")
+
+
+def bounded_reason(value):
+    """Normalize display text before persistence; never retain a full answer."""
+    if not isinstance(value, str):
+        return None, False
+    cleaned = ' '.join(''.join(
+        ' ' if unicodedata.category(char).startswith('C') else char
+        for char in value).split())
+    return (cleaned[:50].rstrip() or None, len(cleaned) > 50)
 
 
 def _name(value):
@@ -97,12 +119,17 @@ class CleaningRecipe:
     registry_digest: str
     steps: tuple[DetectionStep, ...]
     rules: tuple[CleaningRule, ...]
+    instructions: tuple[str, ...] = ()
 
     def __post_init__(self):
         if (self.media_type not in {"image", "video", "text"}
                 or not _hash(self.source_review_digest) or not _hash(self.registry_digest)
                 or not isinstance(self.steps, tuple) or not self.steps
                 or not isinstance(self.rules, tuple) or not self.rules
+                or not isinstance(self.instructions, tuple)
+                or self.instructions and (len(self.instructions) != len(self.steps)
+                    or any(not isinstance(text, str) or not 1 <= len(text) <= 1000
+                           for text in self.instructions))
                 or not all(type(step) is DetectionStep for step in self.steps)
                 or not all(type(rule) is CleaningRule for rule in self.rules)):
             raise ValueError("invalid cleaning recipe")
@@ -114,7 +141,7 @@ class CleaningRecipe:
 
     @property
     def recipe_digest(self):
-        return digest({"schema_version": "multi-rule-recipe@1", "media_type": self.media_type,
+        value = {"schema_version": "multi-rule-recipe@1", "media_type": self.media_type,
                        "source_review_digest": self.source_review_digest,
                        "registry_digest": self.registry_digest,
                        "steps": [{"step_id": s.step_id, "backend_ref": s.backend_ref,
@@ -122,7 +149,11 @@ class CleaningRecipe:
                                  for s in self.steps],
                        "rules": [{"rule_id": r.rule_id, "step_id": r.step_id,
                                   "predicate_ref": r.predicate_ref, "operator": r.operator,
-                                  "value": r.value, "hardness": r.hardness} for r in self.rules]})
+                                  "value": r.value, "hardness": r.hardness} for r in self.rules]}
+        if self.instructions:
+            value['schema_version'] = 'multi-rule-recipe@2'
+            value['instructions'] = list(self.instructions)
+        return digest(value)
 
 
 def candidate_manifest_digest(candidates):
@@ -229,8 +260,11 @@ class DetectionResult:
     evidence_ref: str | None
     validator_ref: str
     status: str
+    reason_summary: str | None = None
+    reason_truncated: bool = False
 
     def __post_init__(self):
+        _validate_reason(self.reason_summary, self.reason_truncated)
         if (self.status not in {"ok", "unknown"} or not _name(self.validator_ref)
                 or not isinstance(self.facts, dict)
                 or self.status == "ok" and (not _name(self.evidence_ref) or not self.facts)
@@ -247,8 +281,11 @@ class CleaningRuleVerdict:
     verdict: str
     reason_code: str
     evidence_ref: str | None
+    reason_summary: str | None = None
+    reason_truncated: bool = False
 
     def __post_init__(self):
+        _validate_reason(self.reason_summary, self.reason_truncated)
         if (not _name(self.rule_id) or self.verdict not in {"pass", "fail", "unknown"}
                 or not _name(self.reason_code)
                 or (self.verdict == "unknown" and self.evidence_ref is not None)
@@ -281,12 +318,20 @@ class CleaningCandidateVerdict:
 class CleaningJobResult:
     binding: CleaningBinding
     candidates: tuple[CleaningCandidateVerdict, ...]
+    fingerprints: tuple[PerceptualFingerprint, ...] = ()
 
     def __post_init__(self):
         if (type(self.binding) is not CleaningBinding
                 or not isinstance(self.candidates, tuple) or not self.candidates
                 or not all(type(candidate) is CleaningCandidateVerdict for candidate in self.candidates)
-                or len({candidate.candidate_id for candidate in self.candidates}) != len(self.candidates)):
+                or len({candidate.candidate_id for candidate in self.candidates}) != len(self.candidates)
+                or not isinstance(self.fingerprints, tuple)
+                or any(type(item) is not PerceptualFingerprint for item in self.fingerprints)
+                or len({item.candidate_id for item in self.fingerprints}) != len(self.fingerprints)
+                or tuple(item.candidate_id for item in self.fingerprints)
+                != tuple(candidate.candidate_id for candidate in self.candidates
+                         if any(item.candidate_id == candidate.candidate_id
+                                for item in self.fingerprints))):
             raise ValueError("invalid cleaning job result")
 
     @property
@@ -315,6 +360,20 @@ class CleaningJobResult:
         if binding.detector_release_digest is not None:
             value["schema_version"] = "multi-rule-cleaning-result@2"
             value["binding"]["detector_release_digest"] = binding.detector_release_digest
+        # Keep legacy digests byte-for-byte stable when no summary was saved.
+        # New explanations are immutable output, not mutable UI decorations.
+        for candidate, encoded in zip(self.candidates, value["candidates"]):
+            for rule, encoded_rule in zip(candidate.rules, encoded["rules"]):
+                if rule.reason_summary is not None:
+                    value["schema_version"] = "multi-rule-cleaning-result@3"
+                    encoded_rule.update(reason_summary=rule.reason_summary,
+                                        reason_truncated=rule.reason_truncated)
+        if self.fingerprints:
+            value["schema_version"] = "multi-rule-cleaning-result@4"
+            value["perceptual_fingerprints"] = [
+                {"candidate_id": item.candidate_id, "algorithm": item.algorithm,
+                 "bit_length": item.bit_length, "value": item.value}
+                for item in self.fingerprints]
         return digest(value)
 
 

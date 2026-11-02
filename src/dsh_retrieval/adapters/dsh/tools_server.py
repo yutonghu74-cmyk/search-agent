@@ -9,8 +9,14 @@ from pathlib import Path
 import sys
 
 TOOLS = [
-    {'name': 'get_context', 'description': 'Read the current authorized conversation context. No task has been executed by this tool.',
+    {'name': 'get_request_context', 'description': 'Read the current authorized request, candidate terms, confirmed version and execution facts. No task is executed.',
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'name': 'update_request_draft', 'description': 'Save one provisional request-draft proposal for backend validation. This never confirms or executes it.',
+     'inputSchema': {'type': 'object', 'properties': {'proposal': {'type': 'object'}},
+                     'required': ['proposal'], 'additionalProperties': False}},
+    {'name': 'save_expansion_draft', 'description': 'Save one complete provisional keyword-list proposal for backend validation. This never confirms or starts search.',
+     'inputSchema': {'type': 'object', 'properties': {'proposal': {'type': 'object'}},
+                     'required': ['proposal'], 'additionalProperties': False}},
     {'name': 'submit_proposal', 'description': 'Submit the JSON response described in the system instructions for backend validation. This NEVER approves or executes a task. Call once after reading context.',
      'inputSchema': {'type': 'object', 'properties': {'proposal': {'type': 'object'}},
                      'required': ['proposal'], 'additionalProperties': False}},
@@ -21,12 +27,18 @@ class ProposalTools:
     def __init__(self, turn_dir):
         self.root = Path(turn_dir)
         self.context_read = False
+        self.mode = None
 
     def call(self, name, arguments):
-        if name == 'get_context' and arguments == {}:
+        if name == 'get_request_context' and arguments == {}:
             self.context_read = True
-            return json.loads((self.root / 'context.json').read_text())
-        if (name != 'submit_proposal' or not self.context_read
+            context = json.loads((self.root / 'context.json').read_text())
+            self.mode = context.get('tool_mode', 'proposal')
+            return context
+        allowed = {'request_draft': 'update_request_draft',
+                   'expansion_draft': 'save_expansion_draft',
+                   'proposal': 'submit_proposal'}.get(self.mode)
+        if (name != allowed or not self.context_read
                 or not isinstance(arguments, dict) or set(arguments) != {'proposal'}
                 or not isinstance(arguments['proposal'], dict)):
             raise ValueError('Unknown tool, invalid arguments, or context not read')

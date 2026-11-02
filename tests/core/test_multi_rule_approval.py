@@ -37,13 +37,25 @@ class MultiRuleApprovalTest(unittest.TestCase):
         self.f.proposal = self.f.propose(plan_id="rules-plan")
         plan, _ = self.f.confirm(self.f.proposal)
         oid, _ = self.f.repo.reserve_page(self.f.actor, plan, plan.request, "page")
-        self.f.repo.commit_page(self.f.actor, oid, plan, plan.request, self.f.first)
+        candidate_count = getattr(self, "fixture_candidate_count", 1)
+        hits = tuple(
+            self.f.hit if index == 0 else replace(
+                self.f.hit, vector_id=index + 1,
+                score=self.f.hit.score - index / 100)
+            for index in range(candidate_count))
+        source_page = replace(self.f.first, hits=hits)
+        self.f.repo.commit_page(self.f.actor, oid, plan, plan.request, source_page)
         operation = self.f.repo.get_operation(self.f.actor, self.f.tid, oid)
-        media = MediaRecord("unit", "v1", "source", "asset", "trusted:ref",
-                            "sha256:" + sha256(b"fixture").hexdigest())
-        item = ManifestItem(media, self.f.first.hits)
-        candidate = Candidate(item.candidate_id, "v1", "", media.content_digest)
-        page = MaterializedPage(operation, (MaterializedCandidate(candidate, media, item.hits),))
+        materialized = []
+        for index, hit in enumerate(hits):
+            suffix = "" if index == 0 else f"-duplicate-{index}"
+            media = MediaRecord("unit" + suffix, "v1", "source", "asset" + suffix,
+                                "trusted:ref",
+                                "sha256:" + sha256(b"fixture").hexdigest())
+            item = ManifestItem(media, (hit,))
+            candidate = Candidate(item.candidate_id, "v1", "", media.content_digest)
+            materialized.append(MaterializedCandidate(candidate, media, item.hits))
+        page = MaterializedPage(operation, tuple(materialized))
         self.manifest_proposal = CandidateManifestProposal.from_materialized(page)
         manifests = SQLiteCandidateManifestRepository(self.f.path, projects=self.f.projects,
                                                        authorization=self.f.auth)

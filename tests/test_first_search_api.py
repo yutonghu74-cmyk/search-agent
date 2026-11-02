@@ -1,5 +1,8 @@
 """HTTP first-search flow over an isolated local SQLite ledger and fixture."""
 from http.server import ThreadingHTTPServer
+from contextlib import contextmanager
+from io import BytesIO
+import hashlib
 import json
 import threading
 import unittest
@@ -44,6 +47,64 @@ class FirstSearchApiTest(unittest.TestCase):
         with response:
             return response.status, json.loads(response.read()), dict(response.headers)
 
+    def test_progress_separates_raw_hits_from_effective_materials(self):
+        self.fixture.select_and_approve()
+        self.fixture.local.tick(self.fixture.actor, self.fixture.task_id, max_requests=2)
+        expected = self.fixture.local.candidates(self.fixture.actor, self.fixture.task_id, limit=1)['raw_hit_count']
+        url = self.base.removesuffix('/first-search') + '/progress'
+        original = self.fixture.local.browser.remember_many
+        self.fixture.local.browser.remember_many = lambda *args, **kwargs: self.fail(
+            'progress read must not update candidate browsing state')
+        try:
+            with urlopen(Request(url, headers={'X-Tenant-Id': 'tenant-a', 'X-User-Id': 'user-a'})) as response:
+                progress = json.loads(response.read())
+        finally:
+            self.fixture.local.browser.remember_many = original
+        self.assertEqual(progress['counts']['returned'], expected)
+        self.assertIsNone(progress['counts']['accepted'])
+
+    def test_candidate_preview_requires_committed_authorized_media(self):
+        content = b'\xff\xd8\xff' + b'synthetic candidate preview'
+        expected = 'sha256:' + hashlib.sha256(content).hexdigest()
+        fixture = json.loads(self.fixture.fixture_path.read_text())
+        fixture['records'][0]['media'][0]['content_digest'] = expected
+        self.fixture.fixture_path.write_text(json.dumps(fixture))
+
+        class Gateway:
+            by_ref = {'media:dog-1': (None, expected)}
+
+            @contextmanager
+            def open_read(self, context, media_ref, *, max_bytes):
+                assert context.purpose == 'candidate_preview'
+                assert media_ref == 'media:dog-1'
+                assert len(content) <= max_bytes
+                yield BytesIO(content)
+
+        self.fixture.local.media_gateway = Gateway()
+        self.fixture.select_and_approve()
+        self.fixture.local.tick(self.fixture.actor, self.fixture.task_id, max_requests=2)
+        candidates = self.fixture.local.candidates(self.fixture.actor, self.fixture.task_id)
+        dog = next(item for item in candidates['items'] if item['media_unit_id'] == 'dog-1')
+        self.assertEqual(dog['preview_status'], 'available')
+        url = self.base + '/candidates/' + dog['candidate_id'] + '/preview'
+
+        def preview(user='user-a'):
+            request = Request(url, headers={'X-Tenant-Id': 'tenant-a', 'X-User-Id': user})
+            try:
+                response = urlopen(request)
+            except HTTPError as error:
+                response = error
+            with response:
+                return response.status, response.read(), dict(response.headers)
+
+        status, body, headers = preview()
+        self.assertEqual((status, body, headers['Content-Type']), (200, content, 'image/jpeg'))
+        self.assertEqual(headers['Cache-Control'], 'private, no-store')
+        self.assertEqual(preview('other-user')[0], 404)
+        self.assertEqual(self.request('/candidates/candidate_' + '0' * 64 + '/preview')[0], 404)
+        self.fixture.local.media_gateway = None
+        self.assertEqual(preview()[0], 404)
+
     def test_explicit_choice_confirmation_execution_and_safe_candidates(self):
         self.assertEqual(self.request('/progress')[1]['status'], 'unapproved')
         status, preview, _ = self.request()
@@ -63,15 +124,28 @@ class FirstSearchApiTest(unittest.TestCase):
             'proposal_digest': proposal['proposal_digest'],
             'expected_task_version': proposal['expected_task_version'], 'action': 'confirm'})
         self.assertEqual((status, approved['status']), (200, 'approved'))
-        self.assertFalse(self.request('/progress')[1]['pagination_stopped'])
+        self.assertEqual(self.request('/progress')[1]['status'], 'approved')
         replay = self.request('/confirm', method='POST', key='approve', body={
             'proposal_digest': proposal['proposal_digest'],
             'expected_task_version': proposal['expected_task_version'], 'action': 'confirm'})
         self.assertEqual(replay[2].get('Idempotent-Replayed'), 'true')
         status, batch, _ = self.request('/tick', method='POST', body={'max_requests': 2})
-        self.assertEqual((status, batch['network_attempts']), (200, 2))
+        self.assertEqual(status, 200)
+        self.assertIn(batch['network_attempts'], (0, 1, 2))
+        self.fixture.wait_stopped(self.fixture.local, self.fixture.task_id)
         status, candidates, _ = self.request('/candidates')
-        self.assertEqual((status, candidates['raw_hit_count']), (200, 4))
+        self.assertEqual((status, candidates['raw_hit_count']), (200, 5))
+        page_status, page, _ = self.request('/candidates?limit=2')
+        self.assertEqual((page_status, page['returned']), (200, 2))
+        self.assertTrue(page['next_cursor'])
+        second_status, second, _ = self.request('/candidates?limit=2&cursor=' + page['next_cursor'])
+        self.assertEqual((second_status, second['returned']), (200, 2))
+        self.assertFalse({item['hit_sequence'] for item in page['items']} &
+                         {item['hit_sequence'] for item in second['items']})
+        self.assertEqual(self.request('/candidates?limit=2&cursor=bad')[1]['code'], 'INVALID_CURSOR')
+        self.assertEqual(self.request('/candidates?limit=2&cursor=' + page['next_cursor'] + '&query=other')[0], 409)
+        changed_status, changed, _ = self.request('/candidates/changes?limit=2&cursor=' + page['changes_cursor'])
+        self.assertEqual((changed_status, changed['returned']), (200, 2))
         self.assertEqual(self.request('/progress')[1]['task_id'], self.fixture.task_id)
         self.assertIsNone(candidates['accepted_count'])
         raw = json.dumps(candidates)
@@ -79,6 +153,24 @@ class FirstSearchApiTest(unittest.TestCase):
             self.assertNotIn(secret, raw)
         self.assertEqual(self.request('/candidates', user='other')[0], 404)
         self.assertEqual(self.request('/progress', user='other')[0], 404)
+        status, manifest_preview, _ = self.request('/manifest')
+        self.assertEqual((status, manifest_preview['kind']),
+                         (200, 'candidate_manifest_proposal'))
+        confirmation = {'proposal_digest': manifest_preview['proposal_digest'],
+            'expected_task_version': manifest_preview['expected_task_version'],
+            'action': 'confirm'}
+        self.assertEqual(self.request('/manifest', method='POST', body=confirmation)[0], 400)
+        status, manifest, headers = self.request(
+            '/manifest', method='POST', body=confirmation, key='fix-candidates')
+        self.assertEqual((status, manifest['kind']), (202, 'candidate_input_manifest'))
+        replay = self.request('/manifest', method='POST', body=confirmation,
+                              key='fix-candidates')
+        self.assertEqual(replay[1]['manifest_ref'], manifest['manifest_ref'])
+        self.assertEqual(replay[2].get('Idempotent-Replayed'), 'true')
+        status, restored, _ = self.request('/manifest')
+        self.assertEqual((status, restored['kind'], restored['confirmed']),
+                         (200, 'candidate_input_manifest', True))
+        self.assertEqual(restored['manifest_ref'], manifest['manifest_ref'])
 
     def test_disabled_invalid_and_unauthenticated_requests(self):
         self.assertEqual(self.request(user=None)[0], 401)

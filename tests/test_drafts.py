@@ -114,7 +114,7 @@ class DraftTest(unittest.TestCase):
             body = deepcopy(BODY)
             body["query_spec"]["target_count"] = value
             cases.append(body)
-        for mode in ("maintain_target", "auto"):
+        for mode in ("auto",):
             body = deepcopy(BODY)
             body["query_spec"]["refill_policy"]["mode"] = mode
             cases.append(body)
@@ -129,6 +129,53 @@ class DraftTest(unittest.TestCase):
                 self.service.save_draft(self.actor, "demo", str(index), body)
         self.assertEqual(self.repo._drafts, {})
         self.assertEqual(self.repo._tasks, {})
+
+    def test_confirmed_refill_progression_is_frozen_and_must_match_node_mode(self):
+        body = deepcopy(BODY)
+        body["query_spec"]["refill_policy"] = {
+            "mode": "maintain_target", "target_count": 10,
+            "approved_library_ids": ["library-a"], "progression": "manual",
+        }
+        draft, _ = self.service.save_draft(self.actor, "demo", "refill-scope", body)
+        self.assertEqual(draft["proposal"]["query_spec"]["refill_policy"],
+                         body["query_spec"]["refill_policy"])
+        task, _ = self.service.create_task(self.actor, "refill-task", {
+            "draft_id": draft["draft_id"], "expected_draft_version": draft["draft_version"],
+            "proposal_digest": draft["proposal_digest"], "action": "confirm",
+        })
+        frozen = self.repo.get(self.actor, task["task_id"])
+        self.assertEqual(json.loads(frozen.confirmed_proposal_json)["query_spec"]["refill_policy"]["mode"],
+                         "maintain_target")
+        body["query_spec"]["refill_policy"]["progression"] = "auto"
+        with self.assertRaises(ServiceError) as error:
+            self.service.save_draft(self.actor, "demo", "auto-refill", body)
+        self.assertEqual(error.exception.code, "FEATURE_NOT_SUPPORTED")
+        body["node_modes"]["refill"] = "auto"
+        auto, _ = self.service.save_draft(self.actor, "demo", "auto-refill-confirmed", body)
+        self.assertEqual(auto["proposal"]["query_spec"]["refill_policy"]["progression"], "auto")
+        self.assertEqual(auto["proposal"]["node_modes"]["refill"], "auto")
+
+        body["node_modes"]["retrieval"] = "auto"
+        with self.assertRaises(ServiceError):
+            self.service.save_draft(self.actor, "demo", "partial-auto-intake", body)
+        body["node_modes"]["cleaning"] = "auto"
+        automatic, _ = self.service.save_draft(
+            self.actor, "demo", "full-auto-intake", body)
+        self.assertEqual(
+            {node: automatic["proposal"]["node_modes"][node]
+             for node in ("retrieval", "cleaning", "refill")},
+            dict.fromkeys(("retrieval", "cleaning", "refill"), "auto"))
+        self.assertEqual(automatic["proposal"]["query_spec"]["refill_limits"], {
+            "max_rounds": None, "max_vlm_calls": None, "no_progress_rounds": 2})
+        body["query_spec"]["refill_limits"] = {
+            "max_rounds": 3, "max_vlm_calls": 60, "no_progress_rounds": 1}
+        limited, _ = self.service.save_draft(
+            self.actor, "demo", "bounded-auto-intake", body)
+        self.assertEqual(limited["proposal"]["query_spec"]["refill_limits"],
+                         body["query_spec"]["refill_limits"])
+        body["query_spec"]["refill_limits"]["max_rounds"] = 0
+        with self.assertRaises(ServiceError):
+            self.service.save_draft(self.actor, "demo", "invalid-bounds", body)
 
     def test_same_draft_key_changed_body_conflicts(self):
         confirmation(self.service, self.actor)

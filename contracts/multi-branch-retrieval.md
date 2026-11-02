@@ -35,4 +35,21 @@ commit_page 必须验证预留 operation 归属、集合摘要/epoch、成员 pl
 
 仅 `--local-first-search-fixture` 启用时，`GET /v1/retrieval/tasks/{id}/first-search` 返回当前授权路由选择；`POST .../prepare` 接收路由摘要和明确的 `(branch_id,binding_id,batch_size)` 列表，后端重验后存待确认整组；`POST .../confirm` 要求摘要、期望任务版本、`action=confirm` 与幂等键；`POST .../tick` 有界执行当前已批准集合。确认与执行分离，不能由预览或准备自动触发。`GET .../progress` 为同一受信本地账本的只读状态，用于页面重开后区分未批准、未完成和已结束的分支；不触发检索。`GET .../candidates` 读取当前集合已提交的页链并重新授权映射，仅返回绑定、主键、分数、映射状态与可公开的素材标识，不返回向量、过滤模板、游标或私有媒体引用；展示上限 200 条，`accepted_count=null`。
 
+词表由发起人明确确认后，业务入口可采用 `smart_authorized` 策略把每个查询分支当前全部可执行的预制授权索引组成整组并一次批准、排队；这不是模型批准，也不接受用户提交任意 binding。候选响应增加实际使用的预制来源摘要，供页面在检索节点简洁展示。最多 64 个词/索引组合，超限不截断。当前会执行已纳入计划的全部来源，尚未根据清洗有效新增率分阶段启用次选库。
+
 本地 fixture 的内容摘要绑定进服务端过滤模板引用；更换向量、映射或配置后旧计划返回 `INDEX_SNAPSHOT_EXPIRED`，不从第一页静默重查。SQLite `list_committed_pages` 在授权读取和当前集合版本校验下投影已提交页，仍不是正式候选发布或媒体访问凭证。此入口只用于本地单操作者手动 tick；没有生产租约、持久尝试/费用账本、真实缩略图或自动清洗，不能宣称真实 Milvus 联测。
+
+## 固定候选清单
+
+LOCAL_EXACT 全部分支停止后，`GET /v1/retrieval/tasks/{task_id}/first-search/manifest`
+基于当前已批准计划和全部已提交页生成候选快照。只有可解析为统一 `MediaRecord`、拥有稳定
+候选身份且 `content_digest` 为 SHA-256 的命中可以进入；原始路径、缺失映射或缺摘要命中
+不会进入清洗输入。响应是待确认 proposal；若当前计划已经确认过，则返回同一个持久
+`candidate_input_manifest`。
+
+发起人以 `Idempotency-Key` 调用同路径 `POST`，提交 `proposal_digest`、
+`expected_task_version` 和显式 `action=confirm`。服务端在同一 SQLite 候选账本事务中重新校验
+当前计划、完整页链、命中子集、素材读取授权和内容摘要，再发布不可变 manifest；空清单拒绝
+确认，同一键重试和同一 proposal 的再次确认均复用已有结果。新计划/版本不会读取旧清单。
+该确认只固定待清洗输入，不批准清洗规则，也不启动清洗、补数或打包。组合式 CLIP 暂未开放
+此端点的清单发布能力。

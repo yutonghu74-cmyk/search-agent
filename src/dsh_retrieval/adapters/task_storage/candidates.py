@@ -70,6 +70,33 @@ def load_state(row):
         raise ServiceError("STORAGE_CORRUPT", "Invalid candidate ledger; refusing reset", 500) from exc
 
 
+def purge_for_tasks(state, task_ids):
+    """Drop every candidate manifest scoped to the given task ids, in place.
+
+    ``load_state`` strictly revalidates ``events`` against the surviving
+    manifests, so events are rebuilt from the filtered manifests rather than
+    just filtered. A no-op for an empty task set. Returns the mutated state.
+    """
+    if not task_ids:
+        return state
+    surviving_manifests = {ref: m for ref, m in state["manifests"].items()
+                           if m.proposal.scope.task_id not in task_ids}
+    surviving_digests = {m.proposal.proposal_digest for m in surviving_manifests.values()}
+    state["manifests"] = surviving_manifests
+    state["published"] = {digest: ref for digest, ref in state["published"].items()
+                          if digest in surviving_digests}
+    state["proposals"] = {digest: p for digest, p in state["proposals"].items()
+                          if digest in surviving_digests}
+    state["keys"] = {key: v for key, v in state["keys"].items()
+                     if key[2] not in task_ids}
+    state["events"] = [{"event_id": "candidate-published:" + ref,
+                        "kind": "candidate_manifest_published", "manifest_ref": ref,
+                        "task_id": m.proposal.scope.task_id,
+                        "proposal_digest": m.proposal.proposal_digest}
+                       for ref, m in surviving_manifests.items()]
+    return state
+
+
 class SQLiteCandidateManifestRepository:
     def __init__(self, path, *, projects, authorization):
         self.retrieval = SQLiteRetrievalPlanRepository(path, projects=projects, authorization=authorization)
@@ -101,7 +128,7 @@ class SQLiteCandidateManifestRepository:
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "Candidate transaction failed", 503, retryable=True) from exc
 
-    def _check(self, memory, retrieval, actor, proposal, *, reading=False):
+    def _check(self, memory, retrieval, actor, proposal, *, reading=False, delivery_read=False):
         task = self.retrieval._authorize(memory, actor, proposal.scope.task_id,
                                          action="read" if reading else "approve")
         record = retrieval["operations"].get(proposal.operation_id)
@@ -115,7 +142,7 @@ class SQLiteCandidateManifestRepository:
             # but does not change the approved input's stable identity/lifetime.
             if task.task_version < proposal.scope.task_version:
                 raise ServiceError("REVISION_CONFLICT", "Task version regressed", 409)
-            validate_scope(actor, replace(task, task_version=proposal.scope.task_version), proposal.scope)
+            validate_scope(actor, replace(task, task_version=proposal.scope.task_version), proposal.scope, reading=delivery_read)
             if current != operation.plan:
                 raise ServiceError("PLAN_NOT_CURRENT", "Manifest plan superseded", 409)
         else:
