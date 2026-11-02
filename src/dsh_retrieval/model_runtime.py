@@ -12,7 +12,8 @@ import urllib.request
 
 from .errors import ServiceError
 from .dialogue import PROMPT as DIALOGUE_PROMPT, explicit_category_targets, resolve_count_edits
-from .expansion_models import MAX_EXPANSIONS, normalize_grouped_expansion, preview_edited_groups
+from .expansion_models import (MAX_EXPANSIONS, normalize_grouped_expansion,
+                               preview_edited_groups, seal_explicit_targets)
 from .intent_model import IntentModelClient, ModelConfig, NoRedirect
 from .query_spec import digest
 
@@ -582,7 +583,8 @@ class ModelRuntime:
                 failure_code = 'EXPANSION_UNCHANGED'
                 failure = '上次候选词表与旧词表完全相同，没有落实用户反馈；请实际调整对应词'
                 continue
-            return self.bind(result, binding, generated=True)
+            return self.bind(seal_explicit_targets(result, raw_request, target_count),
+                             binding, generated=True)
         explanation = {'TERM_COUNT_MISMATCH': '新词表的数量仍不符合要求，原词表已保留。可以重试这条建议。',
                        'EXPANSION_UNCHANGED': '这次模型没有调整检索词，原词表已保留。可以重试这条建议。',
                        'MODEL_OUTPUT_INVALID': '这次生成的词表格式不完整，自动修复后仍未通过校验。原词表已保留，请重试。'}

@@ -94,7 +94,12 @@ class ConfirmedCleaningService:
             instructions = generate(task) if callable(generate) else None
             registry = self._registry(actor, task, instructions=instructions)
             recipe = compile_confirmed_recipe(task, registry)
-            estimated_calls = len(manifest.proposal.items) * len(recipe.steps)
+            # Group checks run only for a candidate's origin groups; this figure
+            # also reserves refill VLM budget, so it must not count skipped ones.
+            estimated_calls = (
+                sum(len(item.group_ids) for item in manifest.proposal.items)
+                if any(rule.group_id is not None for rule in recipe.rules)
+                else len(manifest.proposal.items) * len(recipe.steps))
             describe = getattr(self.registry_provider, "describe", None)
             execution = (describe(task, instructions=instructions) if instructions is not None
                          else describe(task)) if callable(describe) else None

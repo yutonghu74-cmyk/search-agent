@@ -17,6 +17,7 @@ from .candidate_contracts import (CandidateManifestProposal, ManifestItem,
 from .errors import ServiceError
 from .integration_models import AccessContext, MediaRecord, QueryVector
 from .local_catalog import LocalCatalogSource
+from .multi_branch_contracts import plan_origin_groups
 from .physical_query_preparation import TextQueryCapability
 from .query_routing import QueryRouteChoice
 from .query_spec import digest
@@ -606,6 +607,12 @@ class LocalFirstSearch:
         seen = (self.repository.candidate_manifest_candidate_ids(actor, task_id, approved)
                 if downstream else frozenset())
         grouped = {}
+        origin_groups = plan_origin_groups(task, approved)
+        hit_groups = {}
+        for plan_id, page in pages:
+            for hit in page.hits:
+                hit_groups.setdefault(digest(asdict(hit)), set()).update(origin_groups[plan_id])
+        quota_task = any(origin_groups.values())
         for resolution in resolutions:
             media = resolution.media
             if (resolution.status != 'resolved' or media is None
@@ -621,13 +628,19 @@ class LocalFirstSearch:
                 raise ServiceError('MAPPING_CONFLICT', 'Candidate identity maps to multiple versions', 409)
             else:
                 old[1].append(resolution.hit)
-        if len(grouped) > 100 or sum(len(value[1]) for value in grouped.values()) > 100:
+        # Frozen here so every later check, count and rebuild sees the same groups.
+        items = []
+        for media, hits in grouped.values():
+            groups = tuple(sorted(set().union(*(hit_groups[digest(asdict(hit))] for hit in hits))))
+            # Hit only by the whole-request query: no group to attribute it to
+            # (§8.6), so it is not worth a model call it could never count for.
+            if groups or not quota_task:
+                items.append(ManifestItem(media, tuple(hits), groups))
+        if len(items) > 100 or sum(len(item.hits) for item in items) > 100:
             raise ServiceError('INPUT_LIMIT', 'Candidate manifest supports at most 100 items/hits', 422)
         proposal = CandidateManifestProposal(
             RetrievalScope.from_task(task), self.repository.candidate_source_id(approved),
-            approved.proposal_digest,
-            tuple(ManifestItem(media, tuple(hits))
-                  for media, hits in grouped.values()))
+            approved.proposal_digest, tuple(items))
         # A concurrent plan/page change must not survive either side of mapping.
         if self.repository.get_browse_current(actor, task_id) != approved:
             raise ServiceError('PLAN_NOT_CURRENT', 'Search plan changed during candidate mapping', 409)

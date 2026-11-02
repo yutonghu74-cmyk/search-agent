@@ -12,6 +12,10 @@ def cleaning_step_view(job, result):
         counts = dict(input=len(job.candidates), retained=0, rejected=0, review=0)
         for candidate in result.candidates:
             verdicts = [rule for rule in candidate.rules if rule.rule_id in ids]
+            if verdicts and all(rule.verdict == 'not_applicable' for rule in verdicts):
+                # This group's check was never owed: not this step's input at all.
+                counts['input'] -= 1
+                continue
             status = ('rejected' if any(rule.verdict == 'fail' for rule in verdicts)
                       else 'review' if not verdicts or any(rule.verdict == 'unknown' for rule in verdicts)
                       else 'retained')

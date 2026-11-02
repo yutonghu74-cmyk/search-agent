@@ -124,6 +124,30 @@ def _item(value):
     return ResultItem(candidate_id, asset_version, tuple(candidate_ids), tuple(source_views))
 
 
+def _group_progress(proposal, result_set):
+    """Per-group target/accepted/gap for display; a total alone can hide a shortfall."""
+    grouped = proposal.get("query_spec", {}).get("grouped_expansion") or {}
+    groups = [row for row in grouped.get("groups", []) if row.get("delivery_target") is not None]
+    if not groups:
+        return []
+    if result_set is None:
+        return [{"group_id": row["group_id"], "label": row["primary_label"],
+                 "target_count": row["delivery_target"], "accepted_count": None,
+                 "eligible_reserve_count": None, "gap": None} for row in groups]
+    saved = {row.group_id: row for row in result_set.get("group_quotas", ())}
+    # A quota task must never fall back to showing only the misleading total.
+    if (set(saved) != {row["group_id"] for row in groups}
+            or any(saved[row["group_id"]].target_count != row["delivery_target"] for row in groups)
+            or sum(row.accepted_count for row in saved.values()) != result_set.get("accepted_count")
+            or sum(row.gap for row in saved.values()) != result_set.get("gap")):
+        raise ValueError("result set group quotas are inconsistent")
+    return [{"group_id": row["group_id"], "label": row["primary_label"],
+             "target_count": row["delivery_target"],
+             "accepted_count": saved[row["group_id"]].accepted_count,
+             "eligible_reserve_count": saved[row["group_id"]].eligible_reserve_count,
+             "gap": saved[row["group_id"]].gap} for row in groups]
+
+
 def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
                       view_type: str = "accepted", limit: int = 20,
                       cursor: str | None = None) -> dict:
@@ -137,6 +161,9 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
             "revision": revision, "task_version": task_version,
             "run_generation": generation, "view": view_type,
             "target_count": target}
+    group_progress = _group_progress(proposal, result_set)
+    if group_progress:
+        base["group_progress"] = group_progress
     if result_set is None:
         if cursor is not None:
             raise ResultCursorError("cursor cannot be used before results are published")

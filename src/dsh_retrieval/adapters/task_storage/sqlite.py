@@ -27,7 +27,7 @@ from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal,
                                      CleaningRule, CleaningRuleVerdict, DetectionStep)
 from ...retrieval_contracts import RetrievalPlan, RetrievalScope
 from ...result_contracts import (ExactRepresentative, ExactResultSetPreview,
-                                 FusedSourceEvidence)
+                                 FusedSourceEvidence, GroupQuotaProgress)
 from ...near_duplicates import (NearDuplicateDecision, NearDuplicatePair,
                                 PerceptualFingerprint)
 from ...conversation_models import ConversationConfirmation, ConversationMessage
@@ -43,6 +43,7 @@ TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal,
                               CleaningRule, DetectionStep, CleaningRuleVerdict,
                               CleaningCandidateVerdict, CleaningJobResult,
                               ExactRepresentative, ExactResultSetPreview, FusedSourceEvidence,
+                              GroupQuotaProgress,
                               NearDuplicateDecision, NearDuplicatePair, PerceptualFingerprint,
                               ConversationConfirmation, ConversationMessage, PreparedQuery, RetrievalPlanSet)}
 ENUMS = {t.__name__: t for t in (TaskLifecycle, RunStatus)}
@@ -81,6 +82,15 @@ def decode(value):
         cls = TYPES[kind]
         expected = {f.name for f in fields(cls)}
         missing = expected - set(data) if isinstance(data, dict) else set()
+        if kind == "CleaningRuleVerdict" and "group_id" in missing:
+            data = {**data, "group_id": None}
+            missing = missing - {"group_id"}
+        if kind == "CleaningRule" and missing == {"group_id"}:
+            data = {**data, "group_id": None}
+        if kind == "CleaningCandidateRef" and missing == {"group_ids"}:
+            data = {**data, "group_ids": encode(())}
+        if kind == "ManifestItem" and missing == {"group_ids"}:
+            data = {**data, "group_ids": encode(())}
         if kind == "CleaningRuleVerdict" and missing == {"reason_summary", "reason_truncated"}:
             data = {**data, "reason_summary": None, "reason_truncated": False}
         if (kind in {"CleaningApprovalProposal", "CleaningBinding"}
@@ -93,20 +103,23 @@ def decode(value):
         if kind == "ExactResultSetPreview":
             legacy = {"parent_result_set_id", "parent_result_set_digest",
                       "source_operation_ids", "near_duplicate_pairs",
-                      "near_duplicate_decisions"}
+                      "near_duplicate_decisions", "group_quotas"}
             if missing <= legacy:
                 defaults = {"parent_result_set_id": None,
                             "parent_result_set_digest": None,
                             "source_operation_ids": encode(()),
                             "near_duplicate_pairs": encode(()),
-                            "near_duplicate_decisions": encode(())}
+                            "near_duplicate_decisions": encode(()),
+                            "group_quotas": encode(())}
                 data = {**data, **{key: value for key, value in defaults.items()
                                    if key in missing}}
         if kind == "ExactRepresentative":
-            legacy = {"candidate_ids", "sources", "fingerprint"}
+            legacy = {"candidate_ids", "sources", "fingerprint", "group_ids",
+                      "assigned_group_id"}
             if missing <= legacy:
                 defaults = {"candidate_ids": encode(()), "sources": encode(()),
-                            "fingerprint": None}
+                            "fingerprint": None, "group_ids": encode(()),
+                            "assigned_group_id": None}
                 data = {**data, **{key: value for key, value in defaults.items()
                                    if key in missing}}
         if kind == "PerceptualFingerprint":

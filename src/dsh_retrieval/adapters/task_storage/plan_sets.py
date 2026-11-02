@@ -14,7 +14,7 @@ from ...candidate_contracts import (CandidateManifest, CandidateManifestProposal
 from ...integration_models import AccessContext, MediaRecord, SearchHit
 from ...models import RunStatus
 from ...models import Actor
-from ...multi_branch_contracts import (PlanSetMemberProgress, validate_plan_set,
+from ...multi_branch_contracts import (PlanSetMemberProgress, plan_origin_groups, validate_plan_set,
                                         validate_set_confirmation, validate_member_execution)
 from ...query_spec import digest
 from ...retrieval_contracts import RetrievalScope, validate_page
@@ -569,6 +569,8 @@ class SQLitePlanSetApprovalRepository:
             validate_plan_set(actor, self._execution_task(task, approved, True), approved)
 
         raw_hits = []
+        origin_groups = plan_origin_groups(task, approved)
+        hit_groups = {}
         for member in approved.members:
             plan_id = member.plan.request.plan_id
             chain = {}
@@ -586,6 +588,8 @@ class SQLitePlanSetApprovalRepository:
                 if page is None:
                     raise ServiceError('SEARCH_IN_PROGRESS', 'Search pages are still pending', 409)
                 raw_hits.extend(page.hits)
+                for hit in page.hits:
+                    hit_groups.setdefault(digest(asdict(hit)), set()).update(origin_groups[plan_id])
                 if page.next_cursor is None:
                     break
                 cursor = page.next_cursor
@@ -623,6 +627,15 @@ class SQLitePlanSetApprovalRepository:
         selected = Counter(digest(asdict(hit)) for hit in manifest_hits)
         if selected - available:
             raise ServiceError('MANIFEST_INVALID', 'Candidate hit is outside current search', 422)
+        # Origin groups decide which VLM checks run and so what can be counted:
+        # re-derive them from the approved plan rather than trust the proposal.
+        quota_task = any(origin_groups.values())
+        for item in proposal.items:
+            derived = tuple(sorted(set().union(*(hit_groups[digest(asdict(hit))]
+                                                 for hit in item.hits))))
+            if item.group_ids != derived or (quota_task and not derived):
+                raise ServiceError('MANIFEST_INVALID',
+                                   'Candidate quota groups differ from approved search', 422)
         self._authorize(memory, actor, task.task_id, approved,
                         'read' if reading else 'approve')
         return task, approved

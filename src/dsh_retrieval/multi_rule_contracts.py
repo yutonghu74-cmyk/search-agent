@@ -75,10 +75,17 @@ class CleaningCandidateRef:
     candidate_id: str
     asset_version: str
     content_digest: str
+    # Confirmed quota groups whose queries retrieved this candidate. A hit is
+    # only a reason to ask the group's check, never proof of group membership.
+    group_ids: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not _name(self.candidate_id) or not _name(self.asset_version) or not _hash(self.content_digest):
             raise ValueError("invalid candidate identity")
+        if (not isinstance(self.group_ids, tuple)
+                or any(not _name(value) for value in self.group_ids)
+                or list(self.group_ids) != sorted(set(self.group_ids))):
+            raise ValueError("invalid candidate origin groups")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,13 +109,15 @@ class CleaningRule:
     operator: str
     value: object
     hardness: str = "hard"
+    group_id: str | None = None
 
     def __post_init__(self):
         if (not all(_name(value) for value in (self.rule_id, self.step_id, self.predicate_ref))
                 or self.operator != "eq" or self.hardness != "hard"
                 or type(self.value) not in (bool, int, float, str)
                 or isinstance(self.value, float) and not math.isfinite(self.value)
-                or isinstance(self.value, str) and len(self.value) > 1024):
+                or isinstance(self.value, str) and len(self.value) > 1024
+                or self.group_id is not None and not _name(self.group_id)):
             raise ValueError("unsupported hard rule")
 
 
@@ -138,6 +147,12 @@ class CleaningRecipe:
         if (len(step_ids) != len(set(step_ids)) or len(rule_ids) != len(set(rule_ids))
                 or any(rule.step_id not in step_ids for rule in self.rules)):
             raise ValueError("duplicate or unmapped cleaning rule")
+        # One detector call serves one step, so a step cannot mix quota groups:
+        # the executor must be able to skip it for candidates outside the group.
+        for step_id in step_ids:
+            scopes = {rule.group_id for rule in self.rules if rule.step_id == step_id}
+            if len(scopes) > 1:
+                raise ValueError("cleaning step mixes quota group scopes")
 
     @property
     def recipe_digest(self):
@@ -153,13 +168,26 @@ class CleaningRecipe:
         if self.instructions:
             value['schema_version'] = 'multi-rule-recipe@2'
             value['instructions'] = list(self.instructions)
+        if any(rule.group_id is not None for rule in self.rules):
+            value['schema_version'] = 'multi-rule-recipe@3'
+            for encoded, rule in zip(value['rules'], self.rules):
+                if rule.group_id is not None:
+                    encoded['group_id'] = rule.group_id
         return digest(value)
 
 
+def _candidate_digest_payload(candidate):
+    payload = {"candidate_id": candidate.candidate_id,
+               "asset_version": candidate.asset_version,
+               "content_digest": candidate.content_digest}
+    # Absent for ungrouped jobs so existing manifest digests stay byte-stable.
+    if candidate.group_ids:
+        payload["group_ids"] = list(candidate.group_ids)
+    return payload
+
+
 def candidate_manifest_digest(candidates):
-    return digest({"candidates": [{"candidate_id": c.candidate_id,
-        "asset_version": c.asset_version, "content_digest": c.content_digest}
-        for c in candidates]})
+    return digest({"candidates": [_candidate_digest_payload(c) for c in candidates]})
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,14 +311,38 @@ class CleaningRuleVerdict:
     evidence_ref: str | None
     reason_summary: str | None = None
     reason_truncated: bool = False
+    group_id: str | None = None
 
     def __post_init__(self):
         _validate_reason(self.reason_summary, self.reason_truncated)
-        if (not _name(self.rule_id) or self.verdict not in {"pass", "fail", "unknown"}
+        without_evidence = self.verdict in {"unknown", "not_applicable"}
+        if (not _name(self.rule_id)
+                or self.verdict not in {"pass", "fail", "unknown", "not_applicable"}
                 or not _name(self.reason_code)
-                or (self.verdict == "unknown" and self.evidence_ref is not None)
-                or (self.verdict != "unknown" and not _name(self.evidence_ref))):
+                or (without_evidence and self.evidence_ref is not None)
+                or (not without_evidence and not _name(self.evidence_ref))
+                or self.group_id is not None and not _name(self.group_id)
+                or (self.verdict == "not_applicable" and self.group_id is None)):
             raise ValueError("invalid cleaning rule verdict")
+
+
+def aggregate_rule_verdicts(rules):
+    """Combine task-wide rules (all must pass) with per-group checks (any may pass).
+
+    A candidate retrieved for two groups may legitimately be a dog and not a
+    cat, so one failing group check must not reject it. A candidate with no
+    applicable group check has no evidence of membership and stays unknown.
+    """
+    shared = [rule.verdict for rule in rules if rule.group_id is None]
+    scoped = [rule.verdict for rule in rules if rule.group_id is not None]
+    applicable = [verdict for verdict in scoped if verdict != "not_applicable"]
+    if "fail" in shared:
+        return "fail"
+    if scoped and "pass" not in applicable:
+        if "unknown" not in applicable and applicable:
+            return "fail"
+        return "unknown"
+    return "unknown" if "unknown" in shared else "pass"
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,11 +359,16 @@ class CleaningCandidateVerdict:
                 or not all(type(rule) is CleaningRuleVerdict for rule in self.rules)
                 or len({rule.rule_id for rule in self.rules}) != len(self.rules)):
             raise ValueError("invalid cleaning candidate verdict")
-        expected = ("fail" if any(rule.verdict == "fail" for rule in self.rules)
-                    else "unknown" if any(rule.verdict == "unknown" for rule in self.rules)
-                    else "pass")
-        if self.verdict != expected:
+        if self.verdict != aggregate_rule_verdicts(self.rules):
             raise ValueError("candidate verdict does not match rule verdicts")
+
+    @property
+    def passed_group_ids(self):
+        """Groups this candidate may count toward; empty unless it passed overall."""
+        if self.verdict != "pass":
+            return ()
+        return tuple(sorted({rule.group_id for rule in self.rules
+                             if rule.group_id is not None and rule.verdict == "pass"}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,6 +431,11 @@ class CleaningJobResult:
                 {"candidate_id": item.candidate_id, "algorithm": item.algorithm,
                  "bit_length": item.bit_length, "value": item.value}
                 for item in self.fingerprints]
+        for candidate, encoded in zip(self.candidates, value["candidates"]):
+            for rule, encoded_rule in zip(candidate.rules, encoded["rules"]):
+                if rule.group_id is not None:
+                    value["schema_version"] = "multi-rule-cleaning-result@5"
+                    encoded_rule["group_id"] = rule.group_id
         return digest(value)
 
 
@@ -404,6 +466,16 @@ def require_complete_cleaning_result(job, result):
     if any(tuple(rule.rule_id for rule in candidate.rules) != expected_rules
            for candidate in result.candidates):
         raise ValueError("cleaning result rules are incomplete or reordered")
+    for reference, candidate in zip(job.candidates, result.candidates):
+        for rule, saved in zip(job.recipe.rules, candidate.rules):
+            if saved.group_id != rule.group_id:
+                raise ValueError("cleaning result rule group differs from recipe")
+            # Skipping is only legal outside the origin groups, and a group
+            # verdict outside them would credit a check that was never owed.
+            if rule.group_id is not None and (
+                    (saved.verdict == "not_applicable")
+                    != (rule.group_id not in reference.group_ids)):
+                raise ValueError("cleaning result group applicability is invalid")
     return result
 
 

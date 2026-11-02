@@ -18,6 +18,7 @@ from .plan_sets import SQLitePlanSetApprovalRepository, restore as load_plan_set
 from .retrieval import load_state as load_retrieval
 from .sqlite import MAX_BYTES, decode, dump, encode
 from ...errors import ServiceError
+from ...expansion_models import delivery_targets
 from ...models import RunStatus
 from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal,
                                      CleaningCandidateRef, CleaningCandidateVerdict, CleaningJobResult, CleaningRecipe,
@@ -320,7 +321,8 @@ class SQLiteMultiRuleApprovalRepository:
     def _same_inputs(task, manifest, proposal):
         scope = manifest.proposal.scope
         refs = tuple(CleaningCandidateRef(item.candidate_id, item.media.asset_version,
-                                          item.media.content_digest) for item in manifest.proposal.items)
+                                          item.media.content_digest, item.group_ids)
+                     for item in manifest.proposal.items)
         if ((task.tenant_id, task.owner_user_id, task.project_id, task.task_id,
              task.confirmed_revision, task.run_generation, task.request_digest)
                 != (proposal.tenant_id, proposal.owner_user_id, proposal.project_id,
@@ -345,11 +347,17 @@ class SQLiteMultiRuleApprovalRepository:
             require_confirmed_rules(task, recipe)
             if not 1 <= len(manifest.proposal.items) <= 100:
                 raise ServiceError("INPUT_LIMIT", "Cleaning requires 1..100 candidates", 422)
+            if (self._group_targets(task) is not None
+                    and any(not item.group_ids for item in manifest.proposal.items)):
+                # e.g. a manifest from a path that cannot attribute hits to groups.
+                raise ServiceError("MANIFEST_INVALID",
+                                   "Quota task requires candidates with origin groups", 422)
             proposal = CleaningApprovalProposal(task.tenant_id, task.owner_user_id,
                 task.project_id, task.task_id, task.confirmed_revision, task.run_generation,
                 task.task_version, task.request_digest, manifest_ref, recipe,
                 tuple(CleaningCandidateRef(item.candidate_id, item.media.asset_version,
-                                           item.media.content_digest) for item in manifest.proposal.items),
+                                           item.media.content_digest, item.group_ids)
+                      for item in manifest.proposal.items),
                 detector_release_digest)
             self._same_inputs(task, manifest, proposal)
             self._check_manifest(memory, retrieval, candidates, actor, manifest)
@@ -530,6 +538,8 @@ class SQLiteMultiRuleApprovalRepository:
                             {'step_id': step.step_id,
                              'verdict': ('fail' if any(rule.verdict == 'fail' for rule in verdicts)
                                          else 'unknown' if any(rule.verdict == 'unknown' for rule in verdicts)
+                                         else 'not_applicable' if all(
+                                             rule.verdict == 'not_applicable' for rule in verdicts)
                                          else 'pass'),
                              'reasons': [{'rule_id': rule.rule_id, 'reason_code': rule.reason_code,
                                           'reason_summary': rule.reason_summary}
@@ -932,6 +942,15 @@ class SQLiteMultiRuleApprovalRepository:
         return task.target_count, policy, node_mode
 
     @staticmethod
+    def _group_targets(task):
+        """Confirmed (group_id, target) pairs, or None for a task without quotas."""
+        try:
+            grouped = json.loads(task.confirmed_proposal_json)["query_spec"].get("grouped_expansion")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ServiceError("TASK_CORRUPT", "Confirmed query is unavailable", 500) from exc
+        return delivery_targets(grouped) or None
+
+    @staticmethod
     def _publication_current(task, state, result_set_id, published_version):
         from ...delivery import publication_is_current
         return publication_is_current(task, state, result_set_id, published_version)
@@ -1010,7 +1029,8 @@ class SQLiteMultiRuleApprovalRepository:
             refill_policy=policy, node_mode=node_mode,
             legacy_lineage=not preview.source_operation_ids,
             source_evidence_by_candidate=(self._source_evidence(manifest)
-                                          if enriched else None))
+                                          if enriched else None),
+            group_targets=self._group_targets(current))
         if preview.parent_result_set_id is not None:
             parent = self._rebuild_result_set(
                 memory, retrieval, candidates, state, actor, task_id,
@@ -1065,6 +1085,7 @@ class SQLiteMultiRuleApprovalRepository:
                 "near_duplicate_decisions": preview.near_duplicate_decisions,
                 "currently_accessible_count": preview.accepted_count, "counts_status": "fresh",
                 "gap": preview.gap, "stop_reason": preview.stop_reason,
+                "group_quotas": tuple(preview.group_quotas),
                 "accepted": tuple(preview.accepted), "reserve": tuple(preview.reserve),
                 "refill_dispatched": False}
 
@@ -1088,7 +1109,8 @@ class SQLiteMultiRuleApprovalRepository:
             target, policy, node_mode = self._counting_binding(task)
             preview = build_exact_result_set(
                 approval.job, result, target, refill_policy=policy, node_mode=node_mode,
-                source_evidence_by_candidate=self._source_evidence(manifest))
+                source_evidence_by_candidate=self._source_evidence(manifest),
+                group_targets=self._group_targets(task))
             parent_result_set_id = state["current_result_sets"].get(task_id)
             if parent_result_set_id is not None:
                 parent_record = state["result_sets"].get(parent_result_set_id)

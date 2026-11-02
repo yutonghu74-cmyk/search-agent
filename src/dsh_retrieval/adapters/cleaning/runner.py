@@ -13,6 +13,7 @@ from ...multi_rule_contracts import (
     CleaningJobResult as JobVerdict,
     CleaningRuleVerdict as RuleVerdict,
     DetectionResult,
+    aggregate_rule_verdicts,
     bytes_digest,
     require_complete_cleaning_result,
 )
@@ -85,6 +86,18 @@ class GenericCleaningExecutor:
                         raise ServiceError('STORAGE_CORRUPT', 'Step checkpoint mismatches recipe', 500)
                     by_rule.update((item.rule_id, item) for item in saved)
                     continue
+                scopes = {rule.group_id for rule in step_rules}
+                if None not in scopes and not scopes & set(candidate.group_ids):
+                    # Outside this candidate's origin groups: no model call.
+                    # Checkpoint it anyway so step indexes stay aligned on resume.
+                    saved = tuple(RuleVerdict(rule.rule_id, 'not_applicable',
+                                              'GROUP_NOT_APPLICABLE', None,
+                                              group_id=rule.group_id)
+                                  for rule in step_rules)
+                    by_rule.update((item.rule_id, item) for item in saved)
+                    if step_checkpoint is not None:
+                        step_checkpoint(candidate, step, saved)
+                    continue
                 error = None
                 try:
                     observed = self._detectors[step.backend_ref].detect(content, candidate, job.binding)
@@ -103,23 +116,22 @@ class GenericCleaningExecutor:
                         explicit_unknown = observed is not None and observed.status == 'unknown'
                         saved.append(RuleVerdict(rule.rule_id, 'unknown', error or 'FACT_UNAVAILABLE', None,
                                                  observed.reason_summary if explicit_unknown else None,
-                                                 observed.reason_truncated if explicit_unknown else False))
+                                                 observed.reason_truncated if explicit_unknown else False,
+                                                 rule.group_id))
                     else:
                         passed = fact == rule.value
                         saved.append(RuleVerdict(rule.rule_id, 'pass' if passed else 'fail',
                                                  'MATCH' if passed else 'MISMATCH', observed.evidence_ref,
                                                  observed.reason_summary if not passed else None,
-                                                 observed.reason_truncated if not passed else False))
+                                                 observed.reason_truncated if not passed else False,
+                                                 rule.group_id))
                 by_rule.update((item.rule_id, item) for item in saved)
                 self._guard.require_current(job.binding)
                 if step_checkpoint is not None:
                     step_checkpoint(candidate, step, tuple(saved))
             rules = [by_rule[rule.rule_id] for rule in job.recipe.rules]
-            overall = ("fail" if any(rule.verdict == "fail" for rule in rules)
-                       else "unknown" if any(rule.verdict == "unknown" for rule in rules)
-                       else "pass")
             verdicts.append(CandidateVerdict(candidate.candidate_id, candidate.asset_version,
-                                             overall, tuple(rules)))
+                                             aggregate_rule_verdicts(rules), tuple(rules)))
             self._guard.require_current(job.binding)
             if checkpoint is not None:
                 checkpoint(verdicts[-1])

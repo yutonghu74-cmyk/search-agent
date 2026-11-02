@@ -108,7 +108,9 @@ def preview_edited_groups(parent_label, groups):
         raise ValueError("provide 1-20 groups")
     rows = []
     for group in groups:
-        if not isinstance(group, dict) or set(group) != {"primary_label", "auxiliary_terms"}:
+        if (not isinstance(group, dict)
+                or not {"primary_label", "auxiliary_terms"} <= set(group)
+                or set(group) - {"primary_label", "auxiliary_terms", "delivery_target"}):
             raise ValueError("each group requires primary_label and auxiliary_terms")
         label, terms = group["primary_label"], group["auxiliary_terms"]
         if not isinstance(label, str) or not isinstance(terms, list):
@@ -118,7 +120,8 @@ def preview_edited_groups(parent_label, groups):
         label, terms = label.strip(), [term.strip() for term in terms]
         rows.append({"group_id": _group_id(parent_label, label), "primary_label": label,
                      "requested_expansion_count": len(terms), "auxiliary_terms": terms,
-                     "package_name": label, "package_mode": "separate", "delivery_target": None})
+                     "package_name": label, "package_mode": "separate",
+                     "delivery_target": group.get("delivery_target")})
     payload = _plan_payload(parent_label, rows, "user-edited@1")
     return {"recognized": True,
             "plan": normalize_grouped_expansion({**payload, "plan_digest": digest(payload)}),
@@ -170,12 +173,17 @@ def normalize_grouped_expansion(value: dict) -> dict:
             raise ValueError("auxiliary terms are invalid")
         if (group["group_id"] != _group_id(parent, label) or group["group_id"] in group_ids
                 or group["package_name"] != label or group["package_mode"] != "separate"
-                or group["delivery_target"] is not None):
+                or (group["delivery_target"] is not None
+                    and (type(group["delivery_target"]) is not int
+                         or group["delivery_target"] < 1))):
             raise ValueError("label group packaging is invalid")
         labels.add(label)
         group_ids.add(group["group_id"])
         normalized.append({key: (list(terms) if key == "auxiliary_terms" else group[key])
                            for key in fields})
+    # A partial allocation would leave some groups with no way to be complete.
+    if len({group["delivery_target"] is None for group in normalized}) != 1:
+        raise ValueError("delivery targets must be set for every group or none")
     payload = _plan_payload(parent, normalized, generator)
     if binding is not None:
         payload['model_binding'] = dict(binding)
@@ -186,3 +194,56 @@ def normalize_grouped_expansion(value: dict) -> dict:
             or value["plan_digest"] != digest(payload)):
         raise ValueError("grouped expansion digest or policy is invalid")
     return {**payload, "plan_digest": value["plan_digest"]}
+
+
+def explicit_group_targets(raw_request, labels, target_count):
+    """Read "狗20张、猫30张" or "20张狗和30张猫" against the plan's own labels.
+
+    Matching known labels avoids guessing a label from surrounding words ("帮我
+    找狗"). All-or-nothing: an unmatched, ambiguous or non-summing request yields
+    None, so the owner sees an unallocated plan instead of an invented split.
+    """
+    if not isinstance(raw_request, str) or not labels:
+        return None
+    unit = r"(?:张|只)"
+    noun = r"(?:的)?(?:图片|照片|图像|图)?"
+    forms = (lambda label: rf"([1-9][0-9]{{0,4}})\s*{unit}\s*{noun}\s*{re.escape(label)}",
+             lambda label: rf"{re.escape(label)}\s*{noun}\s*(?:要|需要)?\s*([1-9][0-9]{{0,4}})\s*{unit}")
+    # Try one form across all labels: mixing them misreads "20张狗30张猫" as dog=30.
+    for form in forms:
+        found = {label: re.findall(form(label), raw_request) for label in labels}
+        if all(len(values) == 1 for values in found.values()):
+            targets = {label: int(values[0]) for label, values in found.items()}
+            return targets if sum(targets.values()) == target_count else None
+    return None
+
+
+def seal_explicit_targets(result, raw_request, target_count):
+    """Attach explicit per-group image targets to a preview, when the user gave them."""
+    plan = result["plan"]
+    targets = explicit_group_targets(
+        raw_request, [group["primary_label"] for group in plan["groups"]], target_count)
+    return result if targets is None else {**result, "plan": with_delivery_targets(plan, targets)}
+
+
+def with_delivery_targets(plan: dict, targets: dict) -> dict:
+    """Re-seal a plan with explicit per-group image targets from the user.
+
+    Every group must be named: targets are never inferred or split evenly.
+    """
+    current = normalize_grouped_expansion(plan)
+    labels = {group["primary_label"] for group in current["groups"]}
+    if not isinstance(targets, dict) or set(targets) != labels:
+        raise ValueError("delivery targets must name exactly the plan's groups")
+    payload = {key: value for key, value in current.items() if key != "plan_digest"}
+    payload["groups"] = [{**group, "delivery_target": targets[group["primary_label"]]}
+                         for group in current["groups"]]
+    return normalize_grouped_expansion({**payload, "plan_digest": digest(payload)})
+
+
+def delivery_targets(plan: dict | None) -> tuple[tuple[str, int], ...]:
+    """(group_id, target) in plan order; empty when the task has no quotas."""
+    if plan is None:
+        return ()
+    return tuple((group["group_id"], group["delivery_target"]) for group in plan["groups"]
+                 if group["delivery_target"] is not None)

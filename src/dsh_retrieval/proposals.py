@@ -2,13 +2,15 @@
 from copy import deepcopy
 from dataclasses import dataclass
 import json
+import os
 
 from .errors import ServiceError, invalid
 from .query_spec import normalize_query_spec, digest
-from .expansion_models import normalize_grouped_expansion
+from .expansion_models import delivery_targets, normalize_grouped_expansion
 from .refill_planning import normalize_refill_limits
 
 NODES = ("expansion", "retrieval", "cleaning", "refill", "packaging")
+GROUP_QUOTAS_ENV = "DSH_GROUP_QUOTAS"
 
 
 def normalize_proposal(body: dict) -> dict:
@@ -92,6 +94,17 @@ def normalize_proposal(body: dict) -> dict:
             normalized["grouped_expansion"] = normalize_grouped_expansion(grouped_expansion)
         except ValueError as error:
             raise invalid(str(error), "$.query_spec.grouped_expansion") from None
+        targets = delivery_targets(normalized["grouped_expansion"])
+        if targets:
+            if os.environ.get(GROUP_QUOTAS_ENV, "on") == "off":
+                # Refuse rather than drop: silently ignoring a confirmed quota
+                # would report a total as if the requested split had been met.
+                raise ServiceError("QUOTA_NOT_SUPPORTED",
+                                   "group quotas are disabled in this deployment", 422,
+                                   field_path="$.query_spec.grouped_expansion")
+            if sum(target for _, target in targets) != normalized["target_count"]:
+                raise invalid("group delivery targets must sum to target_count",
+                              "$.query_spec.grouped_expansion")
     return {"dimension_id": dimension, "query_spec": normalized, "node_modes": dict(modes)}
 
 

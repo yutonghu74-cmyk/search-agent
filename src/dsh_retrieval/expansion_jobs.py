@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .dialogue import resolve_count_edits
 from .errors import ServiceError
-from .expansion_models import MAX_EXPANSIONS, preview_edited_groups
+from .expansion_models import MAX_EXPANSIONS, preview_edited_groups, seal_explicit_targets
 from .explicit_term_edits import explicit_term_list
 from .query_spec import digest
 from .model_runtime import _INITIAL_GROUP_TERMS, _grounded_followup_term_count, _number_value
@@ -313,7 +313,8 @@ class ExpansionJobs:
                                 and {group['primary_label']: set(group['auxiliary_terms']) for group in current}
                                 == {group['primary_label']: set(group['auxiliary_terms']) for group in groups}):
                             raise ServiceError('EXPANSION_UNCHANGED', '新词表没有落实修改，旧词表已保留', 422)
-                        result = preview_edited_groups(None, groups)
+                        result = seal_explicit_targets(preview_edited_groups(None, groups),
+                                                       payload['raw_request'], payload['target_count'])
                         state['result'] = self.runtime.bind(result, state['model_binding'],
                                                             generated=not (payload.get('term_count_only') or state.get('direct_edit')))
                         if payload.get('term_count_only'):

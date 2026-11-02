@@ -122,6 +122,11 @@ def build_task_progress(task: dict, proposal: dict, result_set: dict | None = No
                       pending_review=published["pending_review"],
                       near_duplicate_review=published["near_duplicate_review"],
                       gap=published["gap"])
+        group_progress = page.get("group_progress") or []
+        if group_progress:
+            counts["groups"] = group_progress
+        short = [f"{row['label']} {row['gap']}" for row in group_progress if row["gap"]]
+        gap_text = f"缺口 {published['gap']}" + (f"（{'、'.join(short)}）" if short else "")
         note = "当前版本合格预览计数；入选与候补分开，尚不代表打包或正式交付完成。"
         if result_set.get('kind') == 'delivery' and run_status in ('COMPLETED', 'PARTIAL'):
             nodes = [ProgressNode(node.node, node.label, node.mode, 'succeeded', 'approved',
@@ -149,11 +154,11 @@ def build_task_progress(task: dict, proposal: dict, result_set: dict | None = No
                 reason = reasons.get(result_set.get('stop_reason'))
                 next_step = ('可部分交付' if published['accepted'] > 0
                              else '当前无有效素材，请修改方案重新检索')
-                detail = (f"缺口 {published['gap']}；自动补数已停止：{reason}；{next_step}"
+                detail = (f"{gap_text}；自动补数已停止：{reason}；{next_step}"
                           if reason else
-                          f"缺口 {published['gap']}；自动补数已启用，逐轮证据见本节点输出")
+                          f"{gap_text}；自动补数已启用，逐轮证据见本节点输出")
             else:
-                detail = (f"缺口 {published['gap']}；已确认范围仅限固定输入，可部分交付；"
+                detail = (f"{gap_text}；已确认范围仅限固定输入，可部分交付；"
                           '继续检索需新方案确认')
             nodes[3] = ProgressNode(
                 'refill', '补数', modes['refill'],

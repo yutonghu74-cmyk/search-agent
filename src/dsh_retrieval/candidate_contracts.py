@@ -22,6 +22,8 @@ def candidate_identity(media: MediaRecord) -> str:
 class ManifestItem:
     media: MediaRecord
     hits: tuple[SearchHit, ...]
+    # Quota groups frozen with the manifest: which group checks this item owes.
+    group_ids: tuple[str, ...] = ()
 
     @property
     def candidate_id(self):
@@ -37,14 +39,22 @@ class CandidateManifestProposal:
 
     @property
     def proposal_digest(self):
-        return digest(asdict(self))
+        value = asdict(self)
+        # Published manifests are addressed by this digest, so ungrouped items
+        # must keep hashing exactly as they did before the field existed.
+        for item in value["items"]:
+            if not item["group_ids"]:
+                del item["group_ids"]
+        return digest(value)
 
     def view(self):
         return {"kind": "candidate_manifest_proposal", "operation_id": self.operation_id,
                 "proposal_digest": self.proposal_digest, "expected_task_version": self.scope.task_version,
                 "candidate_count": len(self.items), "accepted_count": None,
                 "candidates": [{"candidate_id": i.candidate_id, "asset_version": i.media.asset_version,
-                                "content_digest": i.media.content_digest} for i in self.items]}
+                                "content_digest": i.media.content_digest,
+                                **({"group_ids": list(i.group_ids)} if i.group_ids else {})}
+                               for i in self.items]}
 
     @classmethod
     def from_materialized(cls, page: MaterializedPage):

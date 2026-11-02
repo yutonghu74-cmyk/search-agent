@@ -7,10 +7,12 @@ may later attach the recipe to an explicitly approved task and manifest.
 import json
 
 from .errors import ServiceError
+from .expansion_models import delivery_targets
 from .models import Task, TaskLifecycle
 from .multi_rule_contracts import CleaningRecipe, CleaningRule, DetectionStep
 from .query_spec import digest
-from .vlm_instruction_plan import instruction_plan, with_model_instructions
+from .vlm_instruction_plan import (confirmed_instruction_plan, instruction_plan,
+                                   with_model_instructions)
 
 
 def _reject():
@@ -126,6 +128,26 @@ def compile_confirmed_recipe(task: Task, registry) -> CleaningRecipe:
     # A single confirmed semantic image rule can be evaluated through several
     # source-grounded checks. Each is a separate VLM call and rule verdict.
     plan = getattr(registry, 'instruction_plan', ())
+    if delivery_targets(proposal["query_spec"].get("grouped_expansion")):
+        expected = confirmed_instruction_plan(proposal["query_spec"])
+        if (len(hard) != 1 or hard[0].get('predicate_ref') != 'image.semantic-match@1'
+                or hard[0].get('operator') != 'eq' or hard[0].get('value') is not True
+                or tuple((node['node_id'], node['backend_ref'], node['predicate_ref'],
+                          node['group_id']) for node in plan)
+                != tuple((node['node_id'], node['backend_ref'], node['predicate_ref'],
+                          node['group_id']) for node in expected)):
+            raise ServiceError('RECIPE_RULE_MISMATCH',
+                               'Group checks differ from confirmed quotas', 409)
+        steps = tuple(DetectionStep(node['node_id'], node['backend_ref'],
+                                    'vlm.boolean@1', 'vlm.observation@1') for node in plan)
+        rules = tuple(CleaningRule(node['rule_id'], node['node_id'], node['predicate_ref'],
+                                   'eq', True, group_id=node['group_id']) for node in plan)
+        recipe = CleaningRecipe(task.media_type, review_digest,
+                                registry.registry_digest, steps, rules,
+                                registry.frozen_instructions)
+        registry.require_recipe(recipe)
+        require_confirmed_rules(task, recipe)
+        return recipe
     if len(plan) > 1:
         if (len(hard) != 1 or hard[0].get('predicate_ref') != 'image.semantic-match@1'
                 or hard[0].get('operator') != 'eq' or hard[0].get('value') is not True
@@ -207,8 +229,25 @@ def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
             mismatch()
         hard = [row for row in spec["rules"] if row["hardness"] == "hard"]
         if recipe.instructions:
-            with_model_instructions(instruction_plan(task.raw_request),
+            with_model_instructions(confirmed_instruction_plan(spec),
                                     recipe.instructions)
+        if delivery_targets(spec.get("grouped_expansion")):
+            plan = confirmed_instruction_plan(spec)
+            if (len(hard) != 1 or hard[0].get('predicate_ref') != 'image.semantic-match@1'
+                    or hard[0].get('operator') != 'eq' or hard[0].get('value') is not True
+                    or len(plan) != len(recipe.rules) or len(plan) != len(recipe.steps)):
+                mismatch()
+            for node, step, rule in zip(plan, recipe.steps, recipe.rules):
+                if ((step.step_id, step.backend_ref, step.validator_ref, step.evidence_ref)
+                        != (node['node_id'], node['backend_ref'], 'vlm.boolean@1', 'vlm.observation@1')
+                        or (rule.rule_id, rule.step_id, rule.predicate_ref, rule.operator,
+                            rule.value, rule.hardness, rule.group_id)
+                        != (node['rule_id'], node['node_id'], node['predicate_ref'],
+                            'eq', True, 'hard', node['group_id'])):
+                    mismatch()
+            return
+        if any(rule.group_id is not None for rule in recipe.rules):
+            mismatch()
         if (len(hard) == 1 and hard[0].get('predicate_ref') == 'image.semantic-match@1'
                 and len(recipe.rules) > 1):
             plan = instruction_plan(task.raw_request)

@@ -8,6 +8,7 @@ instruction before approving the resulting recipe.
 import re
 
 from .errors import ServiceError
+from .expansion_models import delivery_targets
 
 
 MAX_NODES = 8
@@ -48,6 +49,43 @@ def instruction_plan(raw_request):
                      'predicate_ref': f'image.semantic-match.node{index}@1',
                      'rule_id': f'semantic-match-node{index}'})
     return tuple(plan)
+
+
+def group_instruction_plan(raw_request, grouped):
+    """One check per quota group, each asked only of candidates that group retrieved.
+
+    The punctuation splitter cannot serve quota tasks: "狗20张，猫30张" would
+    become two nodes ANDed together and require a dog photo to also be a cat.
+    Each check instead carries the whole request as context, so conditions that
+    apply to every group still bind without being parsed out of the text.
+    """
+    source = raw_request.strip() if isinstance(raw_request, str) else ''
+    groups = grouped['groups']
+    if not source or len(source) > MAX_SOURCE_CHARS or len(groups) > MAX_NODES:
+        raise ServiceError('VLM_PLAN_LIMIT',
+                           'Group quotas need at most eight groups and a request of 320 characters; revise and confirm the request', 422)
+    plan = []
+    for index, group in enumerate(groups, 1):
+        group_id = group['group_id']
+        node_source = f'类别「{group["primary_label"]}」；已确认需求：{source}'
+        plan.append({'node_id': f'step_{index}', 'source': node_source,
+                     'instruction': ('判断当前单张图片是否属于本节点类别，并符合已确认需求中'
+                                     '适用于该类别的可观察画面条件；其他类别的条件不适用于本节点。'
+                                     '无法从画面判断则返回 unknown；忽略张数、检索与打包。'
+                                     + node_source),
+                     'backend_ref': f'vlm.group.{group_id}@1',
+                     'predicate_ref': f'image.group.{group_id}@1',
+                     'rule_id': f'group-check-{group_id}',
+                     'group_id': group_id})
+    return tuple(plan)
+
+
+def confirmed_instruction_plan(spec):
+    """The plan a confirmed query spec owes, quota-aware. Single source of truth."""
+    grouped = spec.get('grouped_expansion')
+    if delivery_targets(grouped):
+        return group_instruction_plan(spec['raw_request'], grouped)
+    return instruction_plan(spec['raw_request'])
 
 
 def with_model_instructions(plan, instructions):

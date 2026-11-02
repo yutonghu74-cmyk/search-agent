@@ -4,6 +4,7 @@ import json
 from typing import Protocol
 
 from .errors import ServiceError
+from .expansion_models import delivery_targets
 from .integration_models import SearchPage, SearchRequest
 from .models import Actor, Task
 from .physical_query_preparation import PreparedQuery
@@ -22,6 +23,21 @@ class RetrievalPlanSet:
     def proposal_digest(self):
         # Order is part of the displayed dispatch order, not silently canonicalized.
         return digest(asdict(self))
+
+
+def plan_origin_groups(task, plan_set):
+    """Map each approved plan to the quota groups its query was generated for.
+
+    Empty for tasks without quotas. The original request branch belongs to no
+    group: its hits cannot be attributed, so they are not owed a group check.
+    """
+    spec = json.loads(task.confirmed_proposal_json)['query_spec']
+    if not delivery_targets(spec.get('grouped_expansion')):
+        return {member.plan.request.plan_id: () for member in plan_set.members}
+    branches = {branch['branch_id']: branch for branch in compile_query_branches(spec)['branches']}
+    return {member.plan.request.plan_id: tuple(sorted({
+        origin['group_id'] for origin in branches[member.branch_id]['origins']
+        if origin['group_id'] is not None})) for member in plan_set.members}
 
 
 def validate_plan_set(actor: Actor, task: Task, plan_set: RetrievalPlanSet, *, reading=False) -> None:

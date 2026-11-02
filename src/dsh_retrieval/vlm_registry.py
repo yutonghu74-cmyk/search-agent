@@ -17,7 +17,7 @@ from .recipe_bridge import confirmed_rules_digest
 from .released_detectors import ReleasedDetectorRegistry
 from .vlm_detector import VLMRequirementDetector
 from .vlm_node_detector import VLMNodeDetector
-from .vlm_instruction_plan import instruction_plan, with_model_instructions
+from .vlm_instruction_plan import confirmed_instruction_plan, with_model_instructions
 
 
 class ConfirmedTaskVLMRegistry:
@@ -68,7 +68,7 @@ class ConfirmedTaskVLMRegistry:
         if not requirement or len(requirement) > 2000:
             raise ServiceError("VLM_RULE_REQUIRED",
                                "Confirmed semantic requirement is invalid", 409)
-        return instruction_plan(requirement), binding
+        return confirmed_instruction_plan({**spec, 'raw_request': requirement}), binding
 
     def generate(self, task):
         plan, binding = self._confirmed(task)
@@ -93,7 +93,8 @@ class ConfirmedTaskVLMRegistry:
                                "VLM detector implementation unavailable", 503) from exc
         artifact = DetectorArtifact("implementation", self._artifact_name, content_digest)
         node_artifact = None
-        if len(plan) > 1:
+        # A one-group quota still needs its group's own predicate identity.
+        if len(plan) > 1 or plan[0].get('group_id') is not None:
             node_path = self._artifact_root / 'vlm_node_detector.py'
             try:
                 node_artifact = DetectorArtifact('implementation', node_path.name,
