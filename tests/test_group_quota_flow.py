@@ -101,6 +101,8 @@ class ExplicitTargetParsingTests(unittest.TestCase):
 
 
 class QuotaLedgerFlowTests(unittest.TestCase):
+    POLICY = None
+
     def setUp(self):
         self.fixture = FirstSearchLocalTest()
         self.fixture.setUp()
@@ -123,6 +125,8 @@ class QuotaLedgerFlowTests(unittest.TestCase):
         body['query_spec'].update(raw_request=raw, target_count=4, rules=[SEMANTIC],
                                   grouped_expansion=plan)
         body['query_spec']['refill_policy']['target_count'] = 4
+        if self.POLICY:
+            body['query_spec']['refill_policy'] = {**self.POLICY, 'target_count': 4}
         created, _ = f.tasks.create_task(f.actor, 'quota-task',
                                          confirmation(f.tasks, f.actor, key='quota-draft', body=body))
         self.task_id = created['task_id']
@@ -242,3 +246,135 @@ class QuotaLedgerFlowTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+PNG = b'\x89PNG\r\n\x1a\n'
+
+
+class GroupedDeliveryTests(QuotaLedgerFlowTests):
+    """R18: a short quota task packages each group in its own folder as a partial delivery."""
+    POLICY = {'mode': 'maintain_target', 'approved_library_ids': ['dogs', 'cats'],
+              'progression': 'manual'}
+
+    def setUp(self):
+        # Delivery accepts only real image bytes, so give each fixture media PNG
+        # content whose digest the ledger records before anything is searched.
+        from hashlib import sha256
+        probe = FirstSearchLocalTest(); probe.setUp(); self.addCleanup(probe.doCleanups)
+        records = json.loads(probe.fixture_path.read_text())['records']
+        self.bytes_by_ref = {}
+        for record in records:
+            for media in record['media']:
+                content = PNG + media['media_unit_id'].encode()
+                self.bytes_by_ref[media['authorized_media_ref']] = content
+        original = FirstSearchLocalTest.setUp
+        bytes_by_ref = self.bytes_by_ref
+
+        def png_setup(fixture):
+            original(fixture)
+            data = json.loads(fixture.fixture_path.read_text())
+            for record in data['records']:
+                for media in record['media']:
+                    media['content_digest'] = 'sha256:' + sha256(
+                        bytes_by_ref[media['authorized_media_ref']]).hexdigest()
+            fixture.fixture_path.write_text(json.dumps(data, ensure_ascii=False))
+            fixture.local = fixture.make_local()
+        from unittest import mock
+        with mock.patch.object(FirstSearchLocalTest, 'setUp', png_setup):
+            super().setUp()
+
+    def gateway(self):
+        from contextlib import contextmanager
+        from io import BytesIO
+        contents = self.bytes_by_ref
+
+        class Gateway:
+            @contextmanager
+            def open_read(inner, context, ref, *, max_bytes):
+                if context.purpose != 'delivery_export':
+                    raise ServiceError('ACCESS_DENIED', 'delivery reads only', 403)
+                yield BytesIO(contents[ref])
+        return Gateway()
+
+    def stop_and_package(self):
+        import sqlite3
+        from contextlib import closing
+        from dsh_retrieval.delivery import ImageDeliveryService
+        f = self.fixture
+        repo, _, view = self.publish_all_passing()
+        task = self.task()
+        with closing(sqlite3.connect(f.ledger)) as db, db:
+            db.execute('''CREATE TABLE IF NOT EXISTS refill_execution_stops (
+                task_id TEXT NOT NULL, revision INTEGER NOT NULL, generation INTEGER NOT NULL,
+                stop_reason TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(task_id,revision,generation))''')
+            db.execute('INSERT INTO refill_execution_stops VALUES (?,?,?,?,?)',
+                       (self.task_id, task.confirmed_revision, task.run_generation,
+                        'NO_PROGRESS', '2026-11-04T00:00:00+00:00'))
+        repo.finalize_refill_stop(f.actor, self.task_id, 'NO_PROGRESS')
+        delivery = ImageDeliveryService(repo, self.gateway())
+        current = repo.get_current_result_set(f.actor, self.task_id)
+        package, _ = delivery.prepare(f.actor, self.task_id,
+                                      expected_task_version=self.task().task_version,
+                                      result_set_digest=current['result_set_digest'])
+        return repo, delivery, package
+
+    def test_short_group_packages_per_group_folders_as_partial(self):
+        from io import BytesIO
+        from zipfile import ZipFile
+        from dsh_retrieval.models import RunStatus
+        f = self.fixture
+        repo, delivery, package = self.stop_and_package()
+        manifest = package['manifest']
+        self.assertEqual((manifest['schema'], manifest['completion'], manifest['gap'],
+                          manifest['stop_reason']), ('image-delivery@3', 'partial', 1, 'NO_PROGRESS'))
+        self.assertEqual([(g['label'], g['directory'], g['packaged_file_count'], g['target_count'], g['gap'])
+                          for g in manifest['groups']],
+                         [('狗', 'images/01-狗', 2, 3, 1), ('猫', 'images/02-猫', 1, 1, 0)])
+        published, _ = delivery.publish(f.actor, self.task_id, package_id=package['package_id'],
+                                        manifest_digest=package['manifest_digest'],
+                                        expected_task_version=package['current_version'],
+                                        action='confirm')
+        self.assertEqual(published['status'], 'published')
+        self.assertEqual(self.task().run_status, RunStatus.PARTIAL)
+        content = delivery.download(f.actor, self.task_id, package['package_id'])
+        with ZipFile(BytesIO(content)) as archive:
+            names = archive.namelist()
+            self.assertEqual(names, ['images/01-狗/0001.png', 'images/01-狗/0002.png',
+                                     'images/02-猫/0001.png', 'manifest.json'])
+            groups = {g['group_id']: g['directory'] for g in manifest['groups']}
+            for member in manifest['members']:
+                self.assertTrue(member['file'].startswith(groups[member['group_id']] + '/'))
+                self.assertEqual(archive.read(member['file']),
+                                 self.bytes_by_ref[repo.get_published_candidate(
+                                     f.actor, self.task_id, manifest['operation_id'],
+                                     member['candidate_id'])[1]])
+        # The published result and package must still read back after a restart.
+        restarted = self.repo()
+        self.assertEqual(restarted.get_current_result_set(f.actor, self.task_id)['kind'], 'delivery')
+
+    def test_unallocated_multi_group_task_is_still_refused(self):
+        from dsh_retrieval.delivery import ImageDeliveryService
+        repo, _, _ = self.publish_all_passing()
+        task = self.task()
+        proposal = json.loads(task.confirmed_proposal_json)
+        for group in proposal['query_spec']['grouped_expansion']['groups']:
+            group['delivery_target'] = None
+        delivery = ImageDeliveryService(repo, self.gateway())
+        with mock_task_proposal(repo, proposal):
+            with self.assertRaises(ServiceError) as raised:
+                delivery.prepare(self.fixture.actor, self.task_id,
+                                 expected_task_version=task.task_version,
+                                 result_set_digest='sha256:' + '0' * 64)
+        self.assertEqual(raised.exception.code, 'FEATURE_NOT_SUPPORTED')
+
+
+def mock_task_proposal(repo, proposal):
+    from dataclasses import replace
+    from unittest import mock
+    real_get = repo.tasks.get
+
+    def get(actor, task_id):
+        task = real_get(actor, task_id)
+        return replace(task, confirmed_proposal_json=json.dumps(proposal, ensure_ascii=False))
+    return mock.patch.object(repo.tasks, 'get', get)

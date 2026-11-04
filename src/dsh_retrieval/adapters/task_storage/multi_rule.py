@@ -992,8 +992,11 @@ class SQLiteMultiRuleApprovalRepository:
             members = delivery['manifest']['members']
             if (delivery['source_digest'] != preview.result_set_digest
                     or delivery['source_version'] != published_version
-                    or [(item['candidate_id'], item['asset_version'], item['content_digest']) for item in members]
-                    != [(item.candidate_id, item.asset_version, item.content_digest) for item in preview.accepted]):
+                    # Grouped packages order members by group folder; the
+                    # set must still match exactly, with no extras or losses.
+                    or sorted((item['candidate_id'], item['asset_version'], item['content_digest']) for item in members)
+                    != sorted((item.candidate_id, item.asset_version, item.content_digest) for item in preview.accepted)
+                    or len(members) != len(preview.accepted)):
                 raise ServiceError('STORAGE_CORRUPT', 'Delivery members differ from qualified result', 500)
             if delivery['status'] == 'published':
                 view.update(kind='delivery', result_set_id=delivery['delivery_result_id'],

@@ -27,6 +27,29 @@ def digest(content):
     return 'sha256:' + sha256(content).hexdigest()
 
 
+def _group_directory(index, label):
+    """Readable, filesystem-safe folder name; the index keeps it unique."""
+    safe = ''.join('_' if char in '/\\:*?"<>|' or ord(char) < 32 else char
+                   for char in label).strip(' .') or 'group'
+    return f'images/{index:02d}-{safe[:40]}'
+
+
+def expected_member_files(manifest):
+    """Allowed file name per member, in order, for both package layouts."""
+    members = manifest['members']
+    if manifest.get('schema') != 'image-delivery@3':
+        return [(f'images/{index:04d}.jpg', f'images/{index:04d}.png')
+                for index, _ in enumerate(members, 1)]
+    directories = {group['group_id']: group['directory'] for group in manifest['groups']}
+    seen, allowed = {}, []
+    for member in members:
+        directory = directories[member['group_id']]
+        seen[directory] = seen.get(directory, 0) + 1
+        stem = f'{directory}/{seen[directory]:04d}'
+        allowed.append((stem + '.jpg', stem + '.png'))
+    return allowed
+
+
 def load_delivery_records(db):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name='image_deliveries'").fetchone():
         return {}
@@ -157,8 +180,12 @@ class ImageDeliveryService:
         if proposal['node_modes']['packaging'] != 'manual':
             raise ServiceError('FEATURE_NOT_SUPPORTED', 'This slice requires manual package approval', 422)
         groups = (proposal['query_spec'].get('grouped_expansion') or {}).get('groups', [])
-        if len(groups) > 1:
-            raise ServiceError('FEATURE_NOT_SUPPORTED', 'Multi-group packaging is not yet supported', 422)
+        quota_groups = [group for group in groups if group.get('delivery_target') is not None]
+        if len(groups) > 1 and not quota_groups:
+            # Without confirmed per-group targets nothing says which folder an
+            # image belongs in; a flat package would hide the requested split.
+            raise ServiceError('FEATURE_NOT_SUPPORTED',
+                               'Multi-group packaging requires confirmed per-group targets', 422)
         result = self.repo.get_current_result_set(actor, task_id)
         if result['result_set_digest'] != result_set_digest or result['as_of_task_version'] != expected_task_version:
             raise ServiceError('REVISION_CONFLICT', 'Qualified result changed', 409)
@@ -180,6 +207,27 @@ class ImageDeliveryService:
             raise ServiceError('FEATURE_NOT_SUPPORTED',
                                'A full result or a legally stopped non-empty partial result is required', 422)
         completion = 'partial' if result['gap'] else 'full'
+        group_rows, accepted = [], list(result['accepted'])
+        if quota_groups:
+            progress = {row.group_id: row for row in result.get('group_quotas', ())}
+            if set(progress) != {group['group_id'] for group in quota_groups}:
+                raise ServiceError('STORAGE_CORRUPT', 'Result group quotas differ from the confirmed plan', 500)
+            order = {group['group_id']: index for index, group in enumerate(quota_groups)}
+            if any(item.assigned_group_id not in order for item in accepted):
+                raise ServiceError('STORAGE_CORRUPT', 'Accepted image has no confirmed group', 500)
+            # Stable: plan group order, then the result's own deterministic order.
+            accepted.sort(key=lambda item: order[item.assigned_group_id])
+            for index, group in enumerate(quota_groups, 1):
+                row = progress[group['group_id']]
+                files = sum(item.assigned_group_id == group['group_id'] for item in accepted)
+                if files != row.accepted_count:
+                    raise ServiceError('STORAGE_CORRUPT', 'Group file count differs from result', 500)
+                group_rows.append({'group_id': group['group_id'], 'label': group['primary_label'],
+                                   'directory': _group_directory(index, group['primary_label']),
+                                   'target_count': row.target_count,
+                                   'accepted_count': row.accepted_count,
+                                   'eligible_reserve_count': row.eligible_reserve_count,
+                                   'gap': row.gap, 'packaged_file_count': files})
         near_duplicate_pairs = [{
             'candidate_id': pair.candidate_id,
             'other_candidate_id': pair.other_candidate_id,
@@ -193,7 +241,7 @@ class ImageDeliveryService:
             'action': decision.action,
             'representative_candidate_id': decision.representative_candidate_id,
         } for decision in result.get('near_duplicate_decisions', ())]
-        manifest = {'schema': 'image-delivery@2', 'task_id': task_id,
+        manifest = {'schema': 'image-delivery@3' if group_rows else 'image-delivery@2', 'task_id': task_id,
                     'revision': task.confirmed_revision, 'generation': task.run_generation,
                     'source_result_id': result['result_set_id'], 'source_result_digest': result_set_digest,
                     'request_digest': task.request_digest, 'operation_id': result['operation_id'],
@@ -211,15 +259,25 @@ class ImageDeliveryService:
                     'near_duplicate_pairs': near_duplicate_pairs,
                     'near_duplicate_decisions': near_duplicate_decisions,
                     'members': []}
+        if group_rows:
+            manifest['groups'] = group_rows
+        directories = {row['group_id']: row['directory'] for row in group_rows}
+        per_group = {}
         output = BytesIO()
         with ZipFile(output, 'w', compression=ZIP_STORED) as archive:
-            for index, item in enumerate(result['accepted'], 1):
+            for index, item in enumerate(accepted, 1):
                 data, extension, metadata = self._image(actor, task_id, result['operation_id'], item)
-                filename = f'images/{index:04d}' + extension
+                if group_rows:
+                    directory = directories[item.assigned_group_id]
+                    per_group[directory] = per_group.get(directory, 0) + 1
+                    filename = f'{directory}/{per_group[directory]:04d}' + extension
+                else:
+                    filename = f'images/{index:04d}' + extension
                 if output.tell() + len(data) > MAX_PACKAGE_BYTES - 1024 * 1024:
                     raise ServiceError('PACKAGE_LIMIT_EXCEEDED', 'Local package limit is 64 MiB', 413)
                 archive.writestr(ZipInfo(filename, date_time=(1980, 1, 1, 0, 0, 0)), data)
                 manifest['members'].append({'file': filename, 'candidate_id': item.candidate_id,
+                    **({'group_id': item.assigned_group_id} if group_rows else {}),
                     'asset_version': item.asset_version, 'content_digest': item.content_digest,
                     'candidate_ids': list(item.candidate_ids or (item.candidate_id,)),
                     'retrieval_sources': [
@@ -296,8 +354,8 @@ class ImageDeliveryService:
                     members = record['manifest']['members']
                     expected = [item['file'] for item in members] + ['manifest.json']
                     if (archive.namelist() != expected or len(set(expected)) != len(expected)
-                            or any(item['file'] not in (f'images/{index:04d}.jpg', f'images/{index:04d}.png')
-                                   for index, item in enumerate(members, 1))
+                            or any(item['file'] not in allowed
+                                   for item, allowed in zip(members, expected_member_files(record['manifest'])))
                             or any(item.compress_type != ZIP_STORED for item in archive.infolist())
                             or sum(item.file_size for item in archive.infolist()) > MAX_PACKAGE_BYTES
                             or archive.read('manifest.json') != canonical(record['manifest'])

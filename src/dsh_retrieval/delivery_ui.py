@@ -20,7 +20,7 @@ async function openDelivery(taskId){
       const text=document.createElement('p');text.textContent='生成待发布 ZIP，仅包含当前版本入选图片及可核对的 manifest.json；候补不进入包。生成后需发起人确认发布才可下载。合法停止时可部分交付，清单会保留目标、缺口和停止原因。';box.append(text);
       if(!results.available||results.counts.accepted===0){const note=document.createElement('p');note.textContent='当前没有可交付的有效素材，请修改方案后重新检索。';box.append(note);return}
       if(results.counts.gap!==0&&task.run_status!=='AWAITING_INPUT'){const note=document.createElement('p');note.textContent='补数尚未合法停止，暂不能部分交付。';box.append(note);return}
-      card('打包范围',[['合格唯一素材',results.counts.eligible_unique],['入选图片',results.counts.accepted],['候补（不打包）',results.counts.reserve],['SHA-256 自动合并',results.counts.duplicate],['去重规则','完全一致内容自动合并，无需人工复核'],['结果版本',results.result_set_digest]],[],box);
+      card('打包范围',[['合格唯一素材',results.counts.eligible_unique],['入选图片',results.counts.accepted],['候补（不打包）',results.counts.reserve],['SHA-256 自动合并',results.counts.duplicate],...(results.group_progress||[]).map(row=>[row.label+' 文件数',`${row.accepted_count} / 目标 ${row.target_count}${row.gap?`（缺 ${row.gap}）`:''}`]),['去重规则','完全一致内容自动合并，无需人工复核'],['结果版本',results.result_set_digest]],[],box);
       action(results.counts.gap===0?'生成待发布包':'按当前有效素材生成部分交付包',async()=>{await api(endpoint+'/prepare',{method:'POST',body:{expected_task_version:task.task_version,result_set_digest:results.result_set_digest}});await refresh()});return;
     }
     const eligible=delivery.manifest.eligible_unique_count??((delivery.manifest.accepted_count??0)+(delivery.manifest.reserve_count??0));
@@ -28,7 +28,7 @@ async function openDelivery(taskId){
     const packaged=delivery.manifest.packaged_file_count??(delivery.manifest.members||[]).length;
     card(delivery.status==='published'?'交付已发布':'待发起人确认发布',[
       ['包 ID',delivery.package_id],['绑定版本',`revision ${delivery.revision} / generation ${delivery.generation}`],
-      ['交付类型',delivery.manifest.completion==='partial'?'部分交付':'完整交付'],['合格唯一素材',eligible],['入选图片',delivery.manifest.accepted_count],['候补（不打包）',delivery.manifest.reserve_count],['SHA-256 自动合并',duplicates],['包内图片文件',packaged],['缺口',delivery.manifest.gap??0],
+      ['交付类型',delivery.manifest.completion==='partial'?'部分交付':'完整交付'],['合格唯一素材',eligible],['入选图片',delivery.manifest.accepted_count],['候补（不打包）',delivery.manifest.reserve_count],['SHA-256 自动合并',duplicates],['包内图片文件',packaged],...(delivery.manifest.groups||[]).map(row=>[row.label+' 目录',`${row.directory}/ · ${row.packaged_file_count} 个文件 / 目标 ${row.target_count}${row.gap?`（缺 ${row.gap}）`:''}`]),['缺口',delivery.manifest.gap??0],
       ['大小',`${(delivery.byte_count/1024).toFixed(1)} KiB`],['清单摘要',delivery.manifest_digest],['ZIP 摘要',delivery.zip_digest]],[],box);
     const list=document.createElement('details'),title=document.createElement('summary');title.textContent='查看包内成员';list.append(title);
     for(const member of delivery.manifest.members){const aliases=Math.max(0,(member.candidate_ids?.length||1)-1),row=document.createElement('p');row.textContent=member.file+' · '+member.candidate_id+' · '+member.content_digest+' · SHA-256 重复副本 '+aliases;list.append(row)}box.append(list);
