@@ -872,6 +872,17 @@ class SQLiteMultiRuleApprovalRepository:
 
     def get_published_candidate(self, actor, task_id, operation_id, candidate_id):
         """Resolve media only from the current, completely published result set."""
+        return self.get_published_candidates(actor, task_id, operation_id, (candidate_id,))[0]
+
+    def get_published_candidates(self, actor, task_id, operation_id, candidate_ids):
+        """Resolve several candidates under one authorization and lineage rebuild.
+
+        Same checks as the single lookup, done once per call instead of once per
+        image: a 10-image package download had spent 150 s re-running them.
+        """
+        candidate_ids = tuple(candidate_ids)
+        if not candidate_ids or any(not isinstance(item, str) for item in candidate_ids):
+            raise ServiceError('PREVIEW_UNAVAILABLE', 'Cleaning candidate is unavailable', 404)
         def read(memory, retrieval, candidates, state):
             task = self.manifests.retrieval._authorize(memory, actor, task_id, action='read')
             result_set_id = state['current_result_sets'].get(task_id)
@@ -886,7 +897,7 @@ class SQLiteMultiRuleApprovalRepository:
             target, policy, node_mode = self._counting_binding(task)
             self._rebuild_result_set(memory, retrieval, candidates, state, actor, task_id,
                                      result_set_id, target, policy, node_mode)
-            matches = []
+            matches = {candidate_id: [] for candidate_id in candidate_ids}
             for source_operation_id in (published[0].source_operation_ids
                                         or (published[0].operation_id,)):
                 approval = state['approvals'][source_operation_id]
@@ -895,24 +906,29 @@ class SQLiteMultiRuleApprovalRepository:
                     memory, retrieval, candidates, actor, task_id,
                     approval.proposal.manifest_ref, 'read', state=state)
                 self._same_inputs(current, manifest, approval.proposal)
-                candidate = next((item for item in approval.job.candidates
-                                  if item.candidate_id == candidate_id), None)
-                verdict = next((item for item in result.candidates
-                                if item.candidate_id == candidate_id), None)
-                media = next((item.media for item in manifest.proposal.items
-                              if item.candidate_id == candidate_id), None)
-                if candidate is None and verdict is None and media is None:
-                    continue
-                if (candidate is None or verdict is None or media is None
-                        or media.asset_version != candidate.asset_version
-                        or media.content_digest != candidate.content_digest):
-                    raise ServiceError('INPUT_SNAPSHOT_CHANGED',
-                                       'Cleaning candidate binding changed', 409)
-                matches.append((candidate, media.authorized_media_ref))
-            if not matches or any(match != matches[0] for match in matches[1:]):
-                raise ServiceError('PREVIEW_UNAVAILABLE',
-                                   'Cleaning candidate is not in the current result', 404)
-            return matches[0]
+                jobs = {item.candidate_id: item for item in approval.job.candidates}
+                verdicts = {item.candidate_id: item for item in result.candidates}
+                media_by_id = {item.candidate_id: item.media for item in manifest.proposal.items}
+                for candidate_id in candidate_ids:
+                    candidate = jobs.get(candidate_id)
+                    verdict = verdicts.get(candidate_id)
+                    media = media_by_id.get(candidate_id)
+                    if candidate is None and verdict is None and media is None:
+                        continue
+                    if (candidate is None or verdict is None or media is None
+                            or media.asset_version != candidate.asset_version
+                            or media.content_digest != candidate.content_digest):
+                        raise ServiceError('INPUT_SNAPSHOT_CHANGED',
+                                           'Cleaning candidate binding changed', 409)
+                    matches[candidate_id].append((candidate, media.authorized_media_ref))
+            resolved = []
+            for candidate_id in candidate_ids:
+                found = matches[candidate_id]
+                if not found or any(match != found[0] for match in found[1:]):
+                    raise ServiceError('PREVIEW_UNAVAILABLE',
+                                       'Cleaning candidate is not in the current result', 404)
+                resolved.append(found[0])
+            return tuple(resolved)
         return self._transaction(False, read)
 
     @staticmethod

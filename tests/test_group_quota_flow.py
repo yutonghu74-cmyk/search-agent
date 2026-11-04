@@ -378,3 +378,23 @@ def mock_task_proposal(repo, proposal):
         task = real_get(actor, task_id)
         return replace(task, confirmed_proposal_json=json.dumps(proposal, ensure_ascii=False))
     return mock.patch.object(repo.tasks, 'get', get)
+
+
+class DeliveryCostTests(GroupedDeliveryTests):
+    def test_download_rebuilds_lineage_a_bounded_number_of_times(self):
+        # A real 10-image download re-ran the full rebuild per image (~150 s).
+        from unittest import mock
+        f = self.fixture
+        repo, delivery, package = self.stop_and_package()
+        delivery.publish(f.actor, self.task_id, package_id=package['package_id'],
+                         manifest_digest=package['manifest_digest'],
+                         expected_task_version=package['current_version'], action='confirm')
+        real, calls = repo._rebuild_result_set, []
+
+        def counted(*args, **kwargs):
+            if kwargs.get('seen') is None and len(args) < 11:
+                calls.append(1)  # top-level only, not the recursion into parents
+            return real(*args, **kwargs)
+        with mock.patch.object(repo, '_rebuild_result_set', counted):
+            delivery.download(f.actor, self.task_id, package['package_id'])
+        self.assertLessEqual(len(calls), 3, 'independent of the number of images')

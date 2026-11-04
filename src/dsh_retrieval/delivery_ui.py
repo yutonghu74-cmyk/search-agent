@@ -14,15 +14,18 @@ async function openDelivery(taskId){
   const refresh=async()=>{const task=await api(`/v1/retrieval/tasks/${taskId}`);if(!current())return;state.task=task;await refreshTaskSidebar();if(current())await openDelivery(taskId)};
   try{
     const [task,delivery]=await Promise.all([api(`/v1/retrieval/tasks/${taskId}`),api(endpoint)]);
-    if(!current())return;box.replaceChildren();
+    if(!current())return;
     if(!delivery.available){
-      const results=await api(`/v1/retrieval/tasks/${taskId}/results?view=accepted&limit=1`);if(!current())return;
+      // Keep the loading hint until the slower result read returns; clearing
+      // first left the dialog blank for seconds on a loaded task.
+      const results=await api(`/v1/retrieval/tasks/${taskId}/results?view=accepted&limit=1`);if(!current())return;box.replaceChildren();
       const text=document.createElement('p');text.textContent='生成待发布 ZIP，仅包含当前版本入选图片及可核对的 manifest.json；候补不进入包。生成后需发起人确认发布才可下载。合法停止时可部分交付，清单会保留目标、缺口和停止原因。';box.append(text);
       if(!results.available||results.counts.accepted===0){const note=document.createElement('p');note.textContent='当前没有可交付的有效素材，请修改方案后重新检索。';box.append(note);return}
       if(results.counts.gap!==0&&task.run_status!=='AWAITING_INPUT'){const note=document.createElement('p');note.textContent='补数尚未合法停止，暂不能部分交付。';box.append(note);return}
       card('打包范围',[['合格唯一素材',results.counts.eligible_unique],['入选图片',results.counts.accepted],['候补（不打包）',results.counts.reserve],['SHA-256 自动合并',results.counts.duplicate],...(results.group_progress||[]).map(row=>[row.label+' 文件数',`${row.accepted_count} / 目标 ${row.target_count}${row.gap?`（缺 ${row.gap}）`:''}`]),['去重规则','完全一致内容自动合并，无需人工复核'],['结果版本',results.result_set_digest]],[],box);
       action(results.counts.gap===0?'生成待发布包':'按当前有效素材生成部分交付包',async()=>{await api(endpoint+'/prepare',{method:'POST',body:{expected_task_version:task.task_version,result_set_digest:results.result_set_digest}});await refresh()});return;
     }
+    box.replaceChildren();
     const eligible=delivery.manifest.eligible_unique_count??((delivery.manifest.accepted_count??0)+(delivery.manifest.reserve_count??0));
     const duplicates=delivery.manifest.exact_duplicate_count??(delivery.manifest.members||[]).reduce((total,member)=>total+Math.max(0,(member.candidate_ids?.length||1)-1),0);
     const packaged=delivery.manifest.packaged_file_count??(delivery.manifest.members||[]).length;

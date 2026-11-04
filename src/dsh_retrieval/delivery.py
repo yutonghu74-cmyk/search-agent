@@ -132,8 +132,18 @@ class ImageDeliveryService:
             return {'available': True, **self.view(record)}
         return self.repo._transaction(False, read)
 
-    def _image(self, actor, task_id, operation_id, item):
-        candidate, media_ref = self.repo.get_published_candidate(
+    def _bindings(self, actor, task_id, operation_id, items):
+        # One authorization and lineage rebuild for the whole package.
+        batch = getattr(self.repo, 'get_published_candidates', None)
+        if callable(batch):
+            return dict(zip((item.candidate_id for item in items),
+                            batch(actor, task_id, operation_id,
+                                  tuple(item.candidate_id for item in items))))
+        return {item.candidate_id: self.repo.get_published_candidate(
+            actor, task_id, operation_id, item.candidate_id) for item in items}
+
+    def _image(self, actor, task_id, operation_id, item, binding=None):
+        candidate, media_ref = binding or self.repo.get_published_candidate(
             actor, task_id, operation_id, item.candidate_id)
         if (candidate.asset_version != item.asset_version
                 or candidate.content_digest != item.content_digest):
@@ -264,9 +274,11 @@ class ImageDeliveryService:
         directories = {row['group_id']: row['directory'] for row in group_rows}
         per_group = {}
         output = BytesIO()
+        bindings = self._bindings(actor, task_id, result['operation_id'], accepted)
         with ZipFile(output, 'w', compression=ZIP_STORED) as archive:
             for index, item in enumerate(accepted, 1):
-                data, extension, metadata = self._image(actor, task_id, result['operation_id'], item)
+                data, extension, metadata = self._image(actor, task_id, result['operation_id'], item,
+                                                        bindings[item.candidate_id])
                 if group_rows:
                     directory = directories[item.assigned_group_id]
                     per_group[directory] = per_group.get(directory, 0) + 1
@@ -367,8 +379,9 @@ class ImageDeliveryService:
         return self.repo._transaction(False, read, with_connection=True)
 
     def _revalidate_media(self, actor, task_id, result):
+        bindings = self._bindings(actor, task_id, result['operation_id'], result['accepted'])
         for item in result['accepted']:
-            self._image(actor, task_id, result['operation_id'], item)
+            self._image(actor, task_id, result['operation_id'], item, bindings[item.candidate_id])
 
     def publish(self, actor, task_id, *, package_id, manifest_digest, expected_task_version, action):
         require_version(expected_task_version)
