@@ -13,6 +13,7 @@ import test_multi_rule_pipeline as pipeline_fixture
 from dsh_retrieval.delivery import ImageDeliveryService
 from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.models import Actor, RunStatus
+from dsh_retrieval.result_views import build_result_page
 
 
 IMAGE = b'\xff\xd8\xffsynthetic-jpeg-test'
@@ -62,11 +63,31 @@ class DeliveryTest(unittest.TestCase):
             operation()
         self.assertEqual(caught.exception.code, code)
 
+    def test_delivery_node_page_uses_bounded_projection_and_rejects_stale_cursor(self):
+        from unittest.mock import patch
+        from dsh_retrieval.result_views import _encode_cursor
+        from dsh_retrieval.models import Actor
+        package, _ = self.prepare()
+        def read(actor=None, cursor=None):
+            return self.repo.tasks.node_read_page(actor or self.actor, self.task_id,
+                'packaging', limit=1, cursor=cursor, projects=self.repo.manifests.retrieval.projects)
+        with patch.object(self.repo.tasks, '_load', side_effect=AssertionError('full ledger read')):
+            page = read()
+        self.assertEqual(page['items'], package['manifest']['members'])
+        self.assertNotIn('members', page['manifest'])
+        self.assertEqual(page['item_count'], 1)
+        cursor = _encode_cursor(page['output_version'], 'packaging', 0)
+        self.publish(package)
+        self.assert_code('NODE_VERSION_CHANGED', lambda: read(cursor=cursor))
+        self.assert_code('NOT_FOUND', lambda: read(Actor(self.actor.tenant_id, 'other')))
+
     def test_staged_gate_publication_zip_restart_and_idempotency(self):
         package, replayed = self.prepare()
         self.assertFalse(replayed)
         self.assertEqual(package['status'], 'staged')
         member = package['manifest']['members'][0]
+        self.assertEqual(self.repo.get_current_preview_candidate(
+            self.actor, self.task_id, member['candidate_id'])[1], 'trusted:ref')
         self.assertEqual(package['manifest']['schema'], 'image-delivery@2')
         self.assertEqual(package['manifest']['near_duplicate_review_count'], 0)
         self.assertEqual(package['manifest']['near_duplicate_pairs'], [])
@@ -87,9 +108,26 @@ class DeliveryTest(unittest.TestCase):
         self.service = ImageDeliveryService(self.fixture.f.reopen(), self.gateway)
         published, replayed = self.publish(package)
         self.assertFalse(replayed)
+        self.assertEqual(self.repo.get_current_preview_candidate(
+            self.actor, self.task_id, member['candidate_id'])[1], 'trusted:ref')
         self.assertEqual(self.publish(package), (published, True))
         result = self.repo.get_current_result_set(self.actor, self.task_id)
         self.assertEqual(result['kind'], 'delivery')
+        read_view = self.repo.get_current_result_read_snapshot(self.actor, self.task_id)
+        self.assertEqual((read_view['kind'], read_view['result_set_digest'],
+                          read_view['as_of_task_version']),
+                         (result['kind'], result['result_set_digest'],
+                          result['as_of_task_version']))
+        task = self.repo.tasks.get(self.actor, self.task_id)
+        from dsh_retrieval.progress_models import build_task_progress
+        saved_progress = self.repo.tasks.list_task_read_page(
+            self.actor, task.project_id, limit=20)[0]['progress']
+        self.assertEqual(saved_progress, build_task_progress(task.to_summary(),
+            json.loads(task.confirmed_proposal_json), result).to_view())
+        self.assertEqual(self.repo.get_result_read_page(
+            self.actor, self.task_id, limit=1),
+            build_result_page(task.to_summary(), json.loads(task.confirmed_proposal_json),
+                              result, limit=1))
         self.assertNotEqual(result['result_set_id'], self.preview['result_set_id'])
         self.assertTrue(self.repo.step_results(self.actor, self.task_id)['available'])
         content = self.service.download(self.actor, self.task_id, package['package_id'])
@@ -243,6 +281,13 @@ class DeliveryTest(unittest.TestCase):
         with request('/delivery/prepare', {'expected_task_version': self.preview['as_of_task_version'],
                      'result_set_digest': self.preview['result_set_digest']}) as response:
             staged = json.load(response)
+        with request('/nodes/packaging/items?limit=1') as response:
+            page = json.load(response)
+        self.assertEqual(page['items'], staged['manifest']['members'])
+        self.assertNotIn('members', page['manifest'])
+        with self.assertRaises(HTTPError) as invalid:
+            request('/nodes/packaging/items?limit=101')
+        self.assertEqual(invalid.exception.code, 422)
         with request('/progress') as response:
             progress = json.load(response)
         self.assertEqual(progress['nodes'][4]['gate_status'], 'awaiting_approval')

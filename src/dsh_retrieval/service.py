@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from binascii import Error as Base64Error
 from copy import deepcopy
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
 
 from .conversation_models import ConversationMessage
@@ -14,6 +17,35 @@ from .ports import TaskRepository, ProjectContextProvider
 from .proposals import Draft, normalize_proposal
 from .adapters.memory import InMemoryTaskRepository  # compatibility import
 from .adapters.projects import LocalProjectAccess
+
+
+def _revision_changes(previous: dict[str, Any], current: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Bounded semantic diff for revision history; excludes appended prose noise."""
+    old = previous.get("query_spec", {})
+    new = current.get("query_spec", {})
+    paths = (
+        ("target_count", "目标数量"),
+        ("grouped_expansion", "分组与配额"),
+        ("conditions", "清洗条件"),
+        ("constraints", "清洗约束"),
+        ("refill_policy", "补数策略"),
+    )
+    rows = []
+    for field, label in paths:
+        if old.get(field) != new.get(field):
+            rows.append({"field": field, "label": label,
+                         "before": deepcopy(old.get(field)),
+                         "after": deepcopy(new.get(field))})
+    if old.get("raw_request") != new.get("raw_request"):
+        feedback = str(new.get("raw_request", "")).removeprefix(
+            str(old.get("raw_request", ""))).removeprefix("\n追加反馈：")
+        rows.append({"field": "feedback", "label": "用户反馈",
+                     "before": None, "after": feedback[:2000]})
+    if previous.get("node_modes") != current.get("node_modes"):
+        rows.append({"field": "node_modes", "label": "节点执行方式",
+                     "before": deepcopy(previous.get("node_modes")),
+                     "after": deepcopy(current.get("node_modes"))})
+    return tuple(rows)
 
 
 def require_key(key: str) -> None:
@@ -32,9 +64,11 @@ def require_positive(value: Any, field: str) -> None:
 
 
 class TaskService:
-    def __init__(self, repository: TaskRepository, projects: ProjectContextProvider | None = None) -> None:
+    def __init__(self, repository: TaskRepository, projects: ProjectContextProvider | None = None,
+                 query_images=None) -> None:
         self.repository = repository
         self.projects = projects if projects is not None else LocalProjectAccess()
+        self.query_images = query_images
 
     def save_draft(self, actor: Actor, project_id: str, key: str, body: dict,
                    draft_id: str | None = None) -> tuple[dict, bool]:
@@ -50,6 +84,11 @@ class TaskService:
                 raise ServiceError("NOT_FOUND", "draft was not found", 404)
         proposal = normalize_proposal(raw)
         self.projects.require_access(actor, project_id, proposal["dimension_id"], "create")
+        query_input = proposal["query_spec"].get("query_input")
+        if query_input is not None:
+            if self.query_images is None:
+                raise ServiceError("QUERY_IMAGES_UNAVAILABLE", "参考图输入尚未启用", 503)
+            self.query_images.require_input(actor, project_id, query_input)
         resolved_draft_id = draft_id or "draft_" + uuid.uuid4().hex
         conversation_id = (existing.conversation_id if draft_id else None) or "conversation_" + uuid.uuid4().hex
         try:
@@ -100,6 +139,21 @@ class TaskService:
         result = task.to_summary()
         result["pending_draft"] = self.repository.get_pending_feedback(actor, task_id)
         return result
+
+    def current_read_binding(self, actor: Actor, task_id: str) -> tuple[dict, dict]:
+        """Read the confirmed task and query without a separate revisions scan."""
+        reader = getattr(self.repository, 'get_task_read_binding', self.repository.get)
+        task = reader(actor, task_id)
+        self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
+        if task.confirmed_revision is None or not task.confirmed_proposal_json:
+            raise ServiceError("REVISION_CONFLICT", "Task has no confirmed query", 409)
+        try:
+            proposal = json.loads(task.confirmed_proposal_json)
+        except (ValueError, TypeError) as exc:
+            raise ServiceError("TASK_CORRUPT", "Confirmed query is invalid", 500) from exc
+        if not isinstance(proposal, dict):
+            raise ServiceError("TASK_CORRUPT", "Confirmed query is invalid", 500)
+        return {**task.to_summary(), "created_at": task.created_at.isoformat()}, proposal
 
     def save_feedback(self, actor: Actor, task_id: str, key: str, body: dict[str, Any],
                       draft_id: str | None = None) -> tuple[dict[str, Any], bool]:
@@ -191,13 +245,28 @@ class TaskService:
     def list_revisions(self, actor: Actor, task_id: str) -> tuple[dict[str, Any], ...]:
         task = self.repository.get(actor, task_id)
         self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
-        return self.repository.list_revisions(actor, task_id)
+        revisions = self.repository.list_revisions(actor, task_id)
+        result = []
+        previous = None
+        for item in revisions:
+            current = item["proposal"]
+            changes = () if previous is None else _revision_changes(previous, current)
+            result.append({**item, "changes": changes,
+                           "recompute_required": bool(changes),
+                           "revision_note": ("初始确认版本" if previous is None else
+                               "新版本只接受绑定本 revision/generation 的结果；旧结果与交付包保持历史只读。")})
+            previous = current
+        return tuple(result)
 
     def list_tasks(self, actor: Actor, project_id: str) -> tuple[dict[str, Any], ...]:
         if not isinstance(project_id, str) or not project_id.strip():
             raise invalid("project_id is required", "$.project_id")
         result = []
-        for task in self.repository.list_tasks(actor, project_id):
+        combined = getattr(self.repository, 'list_tasks_with_feedback', None)
+        rows = (combined(actor, project_id) if callable(combined)
+                else tuple((task, self.repository.get_pending_feedback(actor, task.task_id))
+                           for task in self.repository.list_tasks(actor, project_id)))
+        for task, pending in rows:
             try:
                 self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
             except ServiceError as error:
@@ -211,9 +280,98 @@ class TaskService:
                 raise ServiceError("STORAGE_CORRUPT", "confirmed proposal is invalid", 500) from None
             view = task.to_summary()
             view.update(raw_request=raw_request, created_at=task.created_at.isoformat(),
-                        pending_draft=self.repository.get_pending_feedback(actor, task.task_id))
+                        pending_draft=pending)
             result.append(view)
         return tuple(result)
+
+    def task_read_summary(self, actor: Actor, task_id: str):
+        reader = getattr(self.repository, 'get_task_read_summary', None)
+        summary = reader(actor, task_id) if callable(reader) else None
+        if summary is None:
+            task = self.repository.get(actor, task_id)
+            summary = task.to_summary()
+        self.projects.require_access(actor, summary['project_id'],
+                                     summary['dimension_id'], 'read')
+        return summary
+
+    def list_tasks_page(self, actor: Actor, project_id: str, *, limit=20,
+                        cursor=None) -> dict[str, Any]:
+        if not isinstance(project_id, str) or not project_id.strip():
+            raise invalid('project_id is required', '$.project_id')
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise invalid('task page limit must be 1-100', '$.limit')
+        after = None
+        if cursor is not None:
+            try:
+                if not isinstance(cursor, str) or not 0 < len(cursor) <= 2048:
+                    raise ValueError
+                data = json.loads(urlsafe_b64decode(cursor + '=' * (-len(cursor) % 4)))
+                payload = data['payload']
+                canonical = json.dumps(payload, sort_keys=True,
+                                       separators=(',', ':')).encode()
+                if (set(data) != {'payload', 'checksum'}
+                        or data['checksum'] != sha256(canonical).hexdigest()
+                        or set(payload) != {'tenant_id', 'user_id', 'project_id',
+                                            'created_at', 'task_id'}
+                        or (payload['tenant_id'], payload['user_id'],
+                            payload['project_id']) !=
+                           (actor.tenant_id, actor.user_id, project_id)
+                        or not isinstance(payload['task_id'], str)
+                        or not payload['task_id']):
+                    raise ValueError
+                created_at = datetime.fromisoformat(payload['created_at'])
+                if created_at.tzinfo is None:
+                    raise ValueError
+                after = (created_at,
+                         payload['task_id'])
+            except (ValueError, TypeError, KeyError, UnicodeError, Base64Error):
+                raise ServiceError('INVALID_CURSOR', 'Task page cursor is invalid', 422) from None
+        fast_reader = getattr(self.repository, 'list_task_read_page', None)
+        summaries = (fast_reader(actor, project_id, limit=limit + 1, after=after)
+                     if callable(fast_reader) else None)
+        rows = (self.repository.list_tasks_page_with_feedback(
+                    actor, project_id, limit=limit + 1, after=after)
+                if summaries is None else ())
+        items = []
+        page_rows = (summaries if summaries is not None else rows)
+        for row in page_rows[:limit]:
+            task, pending = row if summaries is None else (None, None)
+            project = task.project_id if task is not None else row['project_id']
+            dimension = task.dimension_id if task is not None else row['dimension_id']
+            try:
+                self.projects.require_access(actor, project, dimension, 'read')
+            except ServiceError as error:
+                if error.code == 'PROJECT_ACCESS_DENIED':
+                    continue
+                raise
+            if summaries is None:
+                try:
+                    proposal = json.loads(task.confirmed_proposal_json)
+                    raw_request = proposal['query_spec']['raw_request']
+                except (TypeError, KeyError, json.JSONDecodeError):
+                    raise ServiceError('STORAGE_CORRUPT',
+                                       'confirmed proposal is invalid', 500) from None
+                item = task.to_summary()
+                item.update(raw_request=raw_request,
+                            created_at=task.created_at.isoformat(), pending_draft=pending)
+            else:
+                item = row
+            items.append(item)
+        next_cursor = None
+        if len(page_rows) > limit:
+            last = page_rows[limit - 1][0] if summaries is None else page_rows[limit - 1]
+            payload = {'tenant_id': actor.tenant_id, 'user_id': actor.user_id,
+                       'project_id': project_id,
+                       'created_at': (last.created_at.isoformat()
+                                      if summaries is None else last['created_at']),
+                       'task_id': last.task_id if summaries is None else last['task_id']}
+            canonical = json.dumps(payload, sort_keys=True,
+                                   separators=(',', ':')).encode()
+            envelope = {'payload': payload,
+                        'checksum': sha256(canonical).hexdigest()}
+            next_cursor = urlsafe_b64encode(json.dumps(envelope,
+                sort_keys=True, separators=(',', ':')).encode()).decode().rstrip('=')
+        return {'items': items, 'next_cursor': next_cursor}
 
     def get_conversation(self, actor: Actor, conversation_id: str) -> dict[str, Any]:
         snapshot = self.repository.get_conversation(actor, conversation_id)

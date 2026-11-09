@@ -60,7 +60,8 @@ class TaskProgressSnapshot:
 
 
 def build_task_progress(task: dict, proposal: dict, result_set: dict | None = None,
-                        *, raw_returned: int | None = None) -> TaskProgressSnapshot:
+                        *, raw_returned: int | None = None,
+                        _published_page: dict | None = None) -> TaskProgressSnapshot:
     """Project existing authority without inventing worker events or counts."""
     if not isinstance(task, dict) or not isinstance(proposal, dict):
         raise ValueError("task and proposal must be objects")
@@ -114,7 +115,20 @@ def build_task_progress(task: dict, proposal: dict, result_set: dict | None = No
     note = "尚未发布权威结果计数；不显示估算百分比，null 表示未知。"
     if result_set is not None:
         from .result_views import build_result_page
-        page = build_result_page(task, proposal, result_set)
+        page = (_published_page if _published_page is not None
+                else build_result_page(task, proposal, result_set))
+        if _published_page is not None:
+            if (page.get('task_id') != task['task_id']
+                    or page.get('revision') != revision
+                    or page.get('run_generation') != generation
+                    or page.get('task_version') != task_version
+                    or not page.get('available')):
+                raise ValueError('published progress page binding is invalid')
+            required_counts = ('eligible_unique', 'duplicate', 'accepted', 'reserve',
+                               'pending_review', 'near_duplicate_review', 'gap')
+            if any(type(page.get('counts', {}).get(key)) is not int
+                   or page['counts'][key] < 0 for key in required_counts):
+                raise ValueError('published progress counts are invalid')
         published = page["counts"]
         counts.update(passed=published["eligible_unique"] + published["duplicate"],
                       accepted=published["accepted"],

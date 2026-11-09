@@ -235,6 +235,7 @@ class SQLiteRefillReservationRepository:
                 row = (reservation_id, task_id, expected_revision, expected_generation,
                        expected_task_version, iteration, position.library_id,
                        position.fingerprint, policy_digest, created_at, position.binding_json)
+                self.tasks._sync_task_read_summaries(db, memory)
                 return self._record(row), False
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "refill reservation failed", 503,
@@ -282,6 +283,7 @@ class SQLiteRefillReservationRepository:
                 saved = db.execute("""SELECT baseline_accepted_count FROM
                     refill_iteration_metrics WHERE reservation_id=?""",
                     (reservation_id,)).fetchone()[0]
+                self.tasks._sync_task_read_summaries(db, memory)
                 if saved != accepted_count:
                     raise ServiceError("RESULT_CONFLICT", "refill baseline changed", 409)
         except sqlite3.Error as exc:
@@ -327,9 +329,11 @@ class SQLiteRefillReservationRepository:
                     db.execute("""INSERT OR REPLACE INTO refill_execution_stops
                         (task_id,revision,generation,stop_reason,created_at)
                         VALUES (?,?,?,'VLM_CALL_LIMIT_REACHED',?)""", (*row[:3], now))
+                    self.tasks._sync_task_read_summaries(db, memory)
                     return False
                 db.execute("""UPDATE refill_iteration_metrics SET candidate_count=?,vlm_calls=?
                     WHERE reservation_id=?""", (candidate_count, vlm_calls, reservation_id))
+                self.tasks._sync_task_read_summaries(db, memory)
                 return True
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "refill VLM budget unavailable", 503,
@@ -379,6 +383,7 @@ class SQLiteRefillReservationRepository:
                 db.execute("""UPDATE refill_iteration_metrics SET outcome=?,accepted_after=?,
                     completed_at=? WHERE reservation_id=?""",
                     (outcome, accepted_count, datetime.now(UTC).isoformat(), reservation_id))
+                self.tasks._sync_task_read_summaries(db, memory)
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "refill outcome unavailable", 503,
                                retryable=True) from exc
@@ -440,6 +445,7 @@ class SQLiteRefillReservationRepository:
                     (task_id, task.confirmed_revision, task.run_generation)).fetchone()[0]
                 if saved != reason:
                     raise ServiceError("RESULT_CONFLICT", "refill stop reason changed", 409)
+                self.tasks._sync_task_read_summaries(db, memory)
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "refill stop unavailable", 503,
                                retryable=True) from exc

@@ -29,6 +29,9 @@ class LocalTestMediaCorpus:
     def __init__(self, manifest_path, service=None):
         self.root = Path(manifest_path).resolve().parent
         self.service = service
+        from .media_cache import ByteCache
+        self.byte_cache = ByteCache()
+        self.thumbnail_cache = ByteCache(max_bytes=16 * 1024 * 1024)
         try:
             raw = Path(manifest_path).read_bytes()
             if len(raw) > 8_000_000:
@@ -141,15 +144,50 @@ class LocalTestMediaCorpus:
                 or context.purpose not in ('cleaning_input', 'candidate_preview', 'delivery_export')
                 or media_ref not in self.by_ref):
             raise ServiceError('ACCESS_DENIED', 'Local test media access denied', 403)
-        task = self.service.get_task(context.actor, context.task_id)
+        reader = getattr(self.service, 'task_read_summary', self.service.get_task)
+        task = reader(context.actor, context.task_id)
         if task['project_id'] != 'demo':
             raise ServiceError('ACCESS_DENIED', 'Local test media project mismatch', 403)
         path, expected = self.by_ref[media_ref]
-        content = path.read_bytes()
-        if (len(content) > min(max_bytes, MAX_FILE_BYTES)
-                or 'sha256:' + hashlib.sha256(content).hexdigest() != expected):
-            raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Local test media changed', 409)
+        stat = path.stat()
+        version = (str(path), expected, stat.st_dev, stat.st_ino, stat.st_size,
+                   stat.st_mtime_ns, stat.st_ctime_ns)
+        def load():
+            content = path.read_bytes()
+            if (len(content) > MAX_FILE_BYTES
+                    or 'sha256:' + hashlib.sha256(content).hexdigest() != expected
+                    or path.stat() != stat):
+                raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Local test media changed', 409)
+            return content
+        content = self.byte_cache.get_or_create(version, load)
+        if len(content) > min(max_bytes, MAX_FILE_BYTES):
+            raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Local test media exceeds limit', 409)
         yield BytesIO(content)
+
+    def thumbnail(self, context, media_ref, *, max_bytes):
+        # open_read always rechecks task/project authorization and source stat.
+        with self.open_read(context, media_ref, max_bytes=max_bytes) as stream:
+            content = stream.read()
+        key = (hashlib.sha256(content).digest(), 640, 'thumbnail-v1')
+        def create():
+            try:
+                from PIL import Image, ImageOps, UnidentifiedImageError
+            except ImportError:
+                # Minimal installs keep the existing original-byte preview.
+                return content
+            try:
+                source = Image.open(BytesIO(content))
+            except (UnidentifiedImageError, OSError, ValueError) as error:
+                raise ServiceError('MEDIA_PREVIEW_UNAVAILABLE', 'Image cannot be decoded', 422) from error
+            with source as image:
+                if max(image.size) <= 640:
+                    return content
+                image = ImageOps.exif_transpose(image)
+                image.thumbnail((640, 640))
+                output = BytesIO()
+                image.convert('RGB').save(output, format='JPEG', quality=82)
+                return output.getvalue()
+        return self.thumbnail_cache.get_or_create(key, create)
 
 
 def main(argv=None):

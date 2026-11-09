@@ -1,6 +1,6 @@
 # 主标签与辅助检索词分组
 
-编辑入口也接受 {dimension_id, parent_label, groups:[{primary_label, auxiliary_terms}]}，输出 generator=user-edited@1。辅助词可为空，表示仅保留主标签；不自动补齐固定数量。用户预览后可以返回修改，新方案生成新摘要，正式确认沿用草稿摘要与版本校验。持久化后的分组在历史正式版本中展示。分组配额语义见下文；多组实际打包尚未启用，多组任务的打包准备仍明确拒绝。
+编辑入口也接受 {dimension_id, parent_label, groups:[{primary_label, auxiliary_terms}]}，输出 generator=user-edited@1。辅助词可为空，表示仅保留主标签；不自动补齐固定数量。用户预览后可以返回修改，新方案生成新摘要，正式确认沿用草稿摘要与版本校验。持久化后的分组在历史正式版本中展示。分组配额语义见下文；已确认组配额的多组任务按组目录打包（`image-delivery@3`，见 `contracts/image-delivery.md`）；未确认各组目标的多组任务的打包准备仍明确拒绝。
 
 `grouped-expansion@1` 将“交付分类”和“召回用词”分开：每个 group 的 `primary_label` 是独立交付单元，`package_name` 必须与主标签相同且 `package_mode=separate`；`auxiliary_terms` 只用于建立后续查询分支，不创建独立结果包，也不单独占用交付数量。
 

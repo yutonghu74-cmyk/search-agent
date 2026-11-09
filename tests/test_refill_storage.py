@@ -1,3 +1,4 @@
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
@@ -81,12 +82,34 @@ class RefillStorageTest(unittest.TestCase):
         self.assertEqual(error.exception.code, code)
 
     def change_task(self, **changes):
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("BEGIN IMMEDIATE")
             memory = self.tasks._load(db.execute(
                 "SELECT format,payload FROM local_ledger WHERE id=1").fetchone())
             memory._tasks[self.task_id] = replace(memory._tasks[self.task_id], **changes)
             db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+
+    def test_round_pages_match_evidence_and_invalidate_after_completion(self):
+        from unittest.mock import patch
+        from dsh_retrieval.task_events import TaskEventFeed
+        for position in (self.first, self.second):
+            reservation, _ = self.repo.reserve(self.actor, self.task_id, position, **self.binding())
+            self.repo.record_iteration_baseline(self.actor, reservation.reservation_id, 0)
+        def read(cursor=None):
+            return self.tasks.node_read_page(self.actor, self.task_id, 'refill',
+                limit=1, cursor=cursor, projects=self.service.projects)
+        evidence = self.repo.execution_evidence(self.actor, self.task_id)
+        with patch.object(self.tasks, '_load', side_effect=AssertionError('full ledger read')):
+            first = read()
+            second = read(first['next_cursor'])
+        self.assertEqual(first['items'] + second['items'], evidence['rounds'])
+        self.assertEqual(first['execution']['issued_rounds'], 2)
+        feed = TaskEventFeed(self.path)
+        before = feed.read(self.actor, self.task_id)['as_of_sequence']
+        self.repo.complete_empty_iteration(self.actor, reservation.reservation_id, 0)
+        self.assertGreater(feed.read(self.actor, self.task_id)['as_of_sequence'], before)
+        self.assert_code('NODE_VERSION_CHANGED', lambda: read(first['next_cursor']))
+        self.assertEqual(read()['execution']['completed_rounds'], 1)
 
     def test_reservation_is_atomic_replayable_and_recovers_after_restart(self):
         first, replayed = self.repo.reserve(self.actor, self.task_id, self.first, **self.binding())
@@ -142,7 +165,7 @@ class RefillStorageTest(unittest.TestCase):
         self.repo.reserve(self.actor, self.task_id, self.first, **self.binding())
         task = self.tasks.get(self.actor, self.task_id)
         self.tasks.hard_delete_conversation(self.actor, task.conversation_id)
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM refill_reservations WHERE task_id=?",
                 (self.task_id,)).fetchone()[0], 0)
@@ -248,7 +271,7 @@ class RefillStorageTest(unittest.TestCase):
     def test_pre_outbox_reservation_is_backfilled_on_reopen(self):
         reservation, _ = self.repo.reserve(
             self.actor, self.task_id, self.first, **self.binding())
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("DELETE FROM refill_dispatch_outbox WHERE reservation_id=?",
                        (reservation.reservation_id,))
         reopened = self.reopen()
@@ -273,7 +296,7 @@ class RefillStorageTest(unittest.TestCase):
             self.actor, self.task_id, forged, **self.binding()))
         reservation, _ = self.repo.reserve(
             self.actor, self.task_id, self.first, **self.binding())
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("UPDATE refill_reservations SET position_json=NULL WHERE reservation_id=?",
                        (reservation.reservation_id,))
         handler = Handler()

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import threading
@@ -75,7 +76,8 @@ class LocalCLIPEncoder:
         return result.tolist()
 
     def encode_query(self, text, binding: IndexBinding):
-        if binding.encoder_ref != self.encoder_ref or binding.vector_dimension != self.dimension:
+        if (binding.encoder_ref != self.encoder_ref or binding.vector_dimension != self.dimension
+                or binding.metric != 'COSINE'):
             raise ServiceError('ENCODER_MISMATCH', 'CLIP index uses a different model', 409)
         if not isinstance(text, str) or not text.strip():
             raise ServiceError('QUERY_UNSUPPORTED', 'Text query is empty', 422)
@@ -96,6 +98,37 @@ class LocalCLIPEncoder:
                 if len(self._cache) >= 512:
                     self._cache.clear()
                 self._cache[text] = result
+        return QueryVector(self.encoder_ref, result)
+
+    def encode_image_bytes(self, content: bytes, binding: IndexBinding):
+        if (binding.encoder_ref != self.encoder_ref or binding.vector_dimension != self.dimension
+                or binding.metric != 'COSINE'):
+            raise ServiceError('ENCODER_MISMATCH', 'CLIP index uses incompatible image encoding', 409)
+        from PIL import Image, UnidentifiedImageError
+        cache_key = 'image:' + hashlib.sha256(content).hexdigest()
+        with self._lock:
+            result = self._cache.get(cache_key)
+            if result is None:
+                image = None
+                try:
+                    with Image.open(io.BytesIO(content)) as source:
+                        image = source.convert('RGB')
+                        inputs = self.processor(images=[image], return_tensors='pt')
+                        with self.torch.inference_mode():
+                            features = self.model.get_image_features(**inputs)
+                        result = tuple(round(v, 7) for v in self._normalized(features)[0])
+                except (UnidentifiedImageError, OSError, RuntimeError, ValueError, IndexError) as exc:
+                    raise ServiceError('QUERY_ENCODING_FAILED',
+                                       'Local CLIP could not encode the reference image', 503) from exc
+                finally:
+                    if image is not None:
+                        image.close()
+                if not any(result) or len(result) != self.dimension:
+                    raise ServiceError('QUERY_ENCODING_FAILED',
+                                       'Local CLIP returned an invalid image vector', 503)
+                if len(self._cache) >= 512:
+                    self._cache.clear()
+                self._cache[cache_key] = result
         return QueryVector(self.encoder_ref, result)
 
     def encode_images(self, paths, *, batch_size=16):

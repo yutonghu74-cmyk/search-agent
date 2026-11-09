@@ -40,7 +40,8 @@ class CleaningTruthTableAcceptance(unittest.TestCase):
         self.assertEqual([tuple(rule.verdict for rule in row.rules) for row in result.candidates],
                          list(combinations))
         step = cleaning_step_view(job, result)['steps'][0]
-        self.assertEqual(step['counts'], dict(input=9, retained=1, rejected=5, review=3))
+        self.assertEqual(step['counts'], dict(input=9, retained=1, rejected=5,
+                                              review=3, pending=0, blocked=0))
         self.assertEqual(sum(step['counts'][name] for name in ('retained', 'rejected', 'review')), 9)
         self.assertEqual(len(detector.calls), 9, 'Shared step must run once, not once per rule')
 
@@ -79,7 +80,8 @@ class CleaningPipelineFaultAcceptance(unittest.TestCase):
             reopened = self.f.f.reopen()
             steps = self.service(reopened).steps(self.f.actor, self.f.task_id)
             step = steps['runs'][0]['steps'][0]
-            self.assertEqual(step['counts'], dict(input=1, retained=0, rejected=1, review=0))
+            self.assertEqual(step['counts'], dict(input=1, retained=0, rejected=1,
+                                                  review=0, pending=0, blocked=0))
             reasons = step['items'][0]['reasons']
             self.assertEqual([r['reason_summary'] for r in reasons], ['画面包含文字', None])
             self.worker(repo=reopened)._drain()
@@ -91,7 +93,8 @@ class CleaningPipelineFaultAcceptance(unittest.TestCase):
             view, _ = self.f.run_pipeline()
         self.assertEqual((view['accepted_count'], view['gap']), (0, 10))
         step = self.service().steps(self.f.actor, self.f.task_id)['runs'][0]['steps'][0]
-        self.assertEqual(step['counts'], dict(input=1, retained=0, rejected=0, review=1))
+        self.assertEqual(step['counts'], dict(input=1, retained=0, rejected=0,
+                                              review=1, pending=0, blocked=0))
         self.assertTrue(all(r['verdict'] == 'unknown' for r in step['items'][0]['reasons']))
 
     def test_service_error_does_not_publish_partial_or_pass_result(self):

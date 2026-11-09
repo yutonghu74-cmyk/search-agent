@@ -134,6 +134,27 @@ class LocalVectorRetrieval(SimulatedRetrieval):
                 return False
             raise
 
+    def encode_reference(self, context: AccessContext, query_input: dict,
+                         binding: IndexBinding) -> QueryVector:
+        self._access(context, binding.library_id, "search")
+        self._binding(binding)
+        if self._query_encoder is None or not callable(
+                getattr(self._query_encoder, 'encode_reference', None)):
+            raise ServiceError("QUERY_UNSUPPORTED", "Reference-image encoding is unavailable", 422)
+        vector = self._query_encoder.encode_reference(context, query_input, binding)
+        self._vector(binding, vector)
+        return vector
+
+    def can_encode_reference(self, context: AccessContext, query_input: dict,
+                             binding: IndexBinding) -> bool:
+        try:
+            self.encode_reference(context, query_input, binding)
+            return True
+        except ServiceError as error:
+            if error.code in {"QUERY_UNSUPPORTED", "ENCODER_MISMATCH"}:
+                return False
+            raise
+
     @staticmethod
     def _score(metric: str, query: tuple[float, ...], item: tuple[float, ...]) -> float:
         if metric == "L2":

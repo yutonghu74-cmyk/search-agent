@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.models import Actor, RunStatus, Task
@@ -32,6 +33,40 @@ class TaskServiceTest(unittest.TestCase):
         with self.assertRaises(ServiceError) as raised:
             self.service.get_task(Actor("tenant-a", "user-b"), created["task_id"])
         self.assertEqual(raised.exception.status, 404)
+
+    def test_current_read_binding_uses_confirmed_query_without_revision_scan(self):
+        created, _ = self.service.create_task(self.actor, 'read-binding', self.body)
+        with patch.object(self.service, 'list_revisions',
+                          side_effect=AssertionError('history scan')):
+            task, proposal = self.service.current_read_binding(
+                self.actor, created['task_id'])
+        self.assertEqual(task['confirmed_revision'], created['confirmed_revision'])
+        self.assertEqual(proposal['query_spec']['target_count'],
+                         self.service.repository.get(self.actor, created['task_id']).target_count)
+        with self.assertRaises(ServiceError) as hidden:
+            self.service.current_read_binding(
+                Actor('tenant-a', 'another-user'), created['task_id'])
+        self.assertEqual(hidden.exception.code, 'NOT_FOUND')
+
+    def test_task_list_page_cursor_is_stable_and_scoped(self):
+        first, _ = self.service.create_task(self.actor, 'first-task', self.body)
+        second_body = confirmation(self.service, self.actor, key='second-page-draft')
+        second, _ = self.service.create_task(self.actor, 'second-task', second_body)
+        page = self.service.list_tasks_page(self.actor, 'demo', limit=1)
+        self.assertEqual(len(page['items']), 1)
+        self.assertIsNotNone(page['next_cursor'])
+        following = self.service.list_tasks_page(
+            self.actor, 'demo', limit=1, cursor=page['next_cursor'])
+        self.assertEqual({page['items'][0]['task_id'], following['items'][0]['task_id']},
+                         {first['task_id'], second['task_id']})
+        with self.assertRaises(ServiceError) as tampered:
+            self.service.list_tasks_page(self.actor, 'demo', limit=1,
+                cursor=page['next_cursor'][:-2] + 'xx')
+        self.assertEqual(tampered.exception.code, 'INVALID_CURSOR')
+        with self.assertRaises(ServiceError) as scoped:
+            self.service.list_tasks_page(Actor('tenant-a', 'another-user'),
+                'demo', limit=1, cursor=page['next_cursor'])
+        self.assertEqual(scoped.exception.code, 'INVALID_CURSOR')
 
     def test_unconfirmed_conversation_can_be_deleted_but_confirmed_one_cannot(self):
         draft = self.service.get_draft(self.actor, 'demo', self.body['draft_id'])

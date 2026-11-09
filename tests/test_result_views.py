@@ -34,7 +34,8 @@ class ResultViewTest(unittest.TestCase):
         first = build_result_page(TASK, PROPOSAL, published(), limit=2)
         self.assertTrue(first["available"])
         self.assertEqual(first["counts"], {"eligible_unique": 4, "accepted": 3,
-            "reserve": 1, "duplicate": 2, "failed": 1, "pending_review": 1,
+            "reserve": 1, "duplicate": 2, "failed": 1, "user_excluded": 0,
+            "pending_review": 1,
             "near_duplicate_review": 0, "gap": 0})
         self.assertEqual([item["candidate_id"] for item in first["items"]], ["asset-0", "asset-1"])
         self.assertTrue(all(item["preview_status"] == "unavailable" for item in first["items"]))
@@ -46,6 +47,31 @@ class ResultViewTest(unittest.TestCase):
     def test_reserve_is_a_separate_view(self):
         page = build_result_page(TASK, PROPOSAL, published(), view_type="reserve")
         self.assertEqual([item["candidate_id"] for item in page["items"]], ["asset-4"])
+
+    def test_result_audit_views_show_reasons_and_authorized_preview_capability(self):
+        result = published()
+        reason = {"rule_id": "no-watermark", "verdict": "fail",
+                  "reason_code": "MISMATCH", "reason_summary": "检测到水印",
+                  "reason_truncated": False, "group_id": None}
+        result.update(candidate_preview_available=True,
+                      candidate_assessments={
+                          "asset-0": {"cleaning_status": "pass", "reasons": ()}},
+                      failed_items=({"candidate_id": "bad", "asset_version": "v1",
+                                     "cleaning_status": "fail", "reasons": (reason,),
+                                     "preview_status": "available"},),
+                      review_items=({"candidate_id": "maybe", "asset_version": "v1",
+                                     "cleaning_status": "unknown", "reasons": (),
+                                     "preview_status": "available"},))
+        accepted = build_result_page(TASK, PROPOSAL, result)
+        self.assertEqual((accepted["items"][0]["preview_status"],
+                          accepted["items"][0]["cleaning_status"]),
+                         ("available", "pass"))
+        failed = build_result_page(TASK, PROPOSAL, result, view_type="failed")
+        self.assertEqual((failed["items"][0]["candidate_id"],
+                          failed["items"][0]["reasons"][0]["reason_summary"]),
+                         ("bad", "检测到水印"))
+        review = build_result_page(TASK, PROPOSAL, result, view_type="review")
+        self.assertEqual(review["items"][0]["cleaning_status"], "unknown")
 
     def test_fused_source_evidence_is_visible_without_inflating_counts(self):
         result = published()

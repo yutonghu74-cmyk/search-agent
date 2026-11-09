@@ -84,3 +84,33 @@ class LocalTestMediaTest(unittest.TestCase):
             with corpus.open_read(context, corpus.items[0][1], max_bytes=100):
                 pass
         self.assertEqual(denied.exception.code, 'ACCESS_DENIED')
+
+    def test_thumbnail_cache_rechecks_authority_and_source(self):
+        from io import BytesIO
+        from unittest.mock import patch
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest('Pillow required for thumbnail rendering')
+        out = BytesIO()
+        Image.new('RGB', (1280, 960), 'blue').save(out, format='JPEG')
+        self.content = out.getvalue()
+        self.path.write_bytes(self.content)
+        self.row['content_digest'] = 'sha256:' + hashlib.sha256(self.content).hexdigest()
+        self.save()
+        corpus = LocalTestMediaCorpus(self.manifest_path, Service())
+        ref = corpus.items[0][1]
+        context = AccessContext(Actor('tenant-a','user-a'),'task-1','candidate_preview','current')
+        thumb = corpus.thumbnail(context, ref, max_bytes=10*1024*1024)
+        with Image.open(BytesIO(thumb)) as image:
+            self.assertEqual(image.size, (640,480))
+        with patch.object(Image, 'open', side_effect=AssertionError('cached thumbnail must not decode')):
+            self.assertEqual(corpus.thumbnail(context, ref, max_bytes=10*1024*1024), thumb)
+            wrong = AccessContext(Actor('tenant-a','other'),'task-1','candidate_preview','current')
+            with self.assertRaises(ServiceError) as denied:
+                corpus.thumbnail(wrong, ref, max_bytes=10*1024*1024)
+            self.assertEqual(denied.exception.code,'NOT_FOUND')
+            self.path.write_bytes(self.content+b'changed')
+            with self.assertRaises(ServiceError) as changed:
+                corpus.thumbnail(context, ref, max_bytes=10*1024*1024)
+            self.assertEqual(changed.exception.code,'INPUT_SNAPSHOT_CHANGED')

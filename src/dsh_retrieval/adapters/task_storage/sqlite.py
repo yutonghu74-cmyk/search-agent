@@ -27,9 +27,10 @@ from ...multi_rule_contracts import (CleaningApproval, CleaningApprovalProposal,
                                      CleaningRule, CleaningRuleVerdict, DetectionStep)
 from ...retrieval_contracts import RetrievalPlan, RetrievalScope
 from ...result_contracts import (ExactRepresentative, ExactResultSetPreview,
-                                 FusedSourceEvidence, GroupQuotaProgress)
+                                 FusedSourceEvidence, GroupQuotaProgress,
+                                 ManualReviewDecision, ResultExclusionDecision)
 from ...near_duplicates import (NearDuplicateDecision, NearDuplicatePair,
-                                PerceptualFingerprint)
+                                PerceptualFingerprint, NearDuplicateCluster)
 from ...conversation_models import ConversationConfirmation, ConversationMessage
 from ...physical_query_preparation import PreparedQuery
 from ...multi_branch_contracts import RetrievalPlanSet
@@ -43,8 +44,10 @@ TYPES = {t.__name__: t for t in (Candidate, CleaningOperation, CleaningProposal,
                               CleaningRule, DetectionStep, CleaningRuleVerdict,
                               CleaningCandidateVerdict, CleaningJobResult,
                               ExactRepresentative, ExactResultSetPreview, FusedSourceEvidence,
-                              GroupQuotaProgress,
+                              GroupQuotaProgress, ResultExclusionDecision,
+                              ManualReviewDecision,
                               NearDuplicateDecision, NearDuplicatePair, PerceptualFingerprint,
+                              NearDuplicateCluster,
                               ConversationConfirmation, ConversationMessage, PreparedQuery, RetrievalPlanSet)}
 ENUMS = {t.__name__: t for t in (TaskLifecycle, RunStatus)}
 FORMAT = 1
@@ -103,14 +106,19 @@ def decode(value):
         if kind == "ExactResultSetPreview":
             legacy = {"parent_result_set_id", "parent_result_set_digest",
                       "source_operation_ids", "near_duplicate_pairs",
-                      "near_duplicate_decisions", "group_quotas"}
+                      "near_duplicate_decisions", "group_quotas",
+                      "exclusion_decisions", "publication_mutation_count"}
+            legacy.add("manual_review_decisions")
             if missing <= legacy:
                 defaults = {"parent_result_set_id": None,
                             "parent_result_set_digest": None,
                             "source_operation_ids": encode(()),
                             "near_duplicate_pairs": encode(()),
                             "near_duplicate_decisions": encode(()),
-                            "group_quotas": encode(())}
+                            "group_quotas": encode(()),
+                            "exclusion_decisions": encode(()),
+                            "manual_review_decisions": encode(()),
+                            "publication_mutation_count": None}
                 data = {**data, **{key: value for key, value in defaults.items()
                                    if key in missing}}
         if kind == "ExactRepresentative":
@@ -191,8 +199,18 @@ class SQLiteTaskRepository:
                            "image_deliveries", "image_delivery_events", "cleaning_dispatch_attempts", "cleaning_checkpoints",
                            "refill_reservations", "refill_dispatch_outbox",
                            "auto_refill_outbox", "auto_refill_intake_outbox",
-                           "near_duplicate_review_keys",
-                           "refill_iteration_metrics", "refill_execution_stops"}
+                           "near_duplicate_review_keys", "result_exclusion_keys",
+                           "manual_review_keys",
+                           "refill_iteration_metrics", "refill_execution_stops",
+                           "task_event_state", "task_event_stream",
+                           "task_event_mutation_clock", "task_event_task_mutations",
+                           "task_event_observed_mutations", "query_images",
+                           "task_asset_read_heads", "task_asset_read_bindings",
+                           "task_result_read_snapshots", "task_result_read_views",
+                           "task_result_read_items", "task_step_read_runs",
+                           "task_step_read_items", "task_read_summaries",
+                           "task_read_summaries_meta", "task_node_read_heads", "task_node_read_items",
+                           "task_event_write_heads", "chat_read_summaries", "chat_read_meta"}
                 if tables and ("local_ledger" not in tables or tables - allowed):
                     raise ServiceError("STORAGE_FORMAT_UNSUPPORTED", "not a local demo ledger", 500)
                 db.execute("CREATE TABLE IF NOT EXISTS local_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)")
@@ -219,6 +237,44 @@ class SQLiteTaskRepository:
                 )""")
                 db.execute("CREATE INDEX IF NOT EXISTS search_dispatch_pending_idx "
                            "ON search_dispatch_outbox(status, created_at)")
+                db.execute("""CREATE TABLE IF NOT EXISTS task_read_summaries (
+                    task_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                    dimension_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                    task_version INTEGER NOT NULL, revision INTEGER,
+                    generation INTEGER NOT NULL, summary_json TEXT NOT NULL,
+                    task_json TEXT)""")
+                from ...node_read_views import initialize as initialize_node_views
+                initialize_node_views(db)
+                from ...chat_history import initialize as initialize_chat_history
+                initialize_chat_history(db)
+                from ...task_events import initialize_event_tables
+                initialize_event_tables(db)
+                summary_columns = {info[1] for info in db.execute(
+                    'PRAGMA table_info(task_read_summaries)')}
+                if 'task_json' not in summary_columns:
+                    db.execute('ALTER TABLE task_read_summaries ADD COLUMN task_json TEXT')
+                db.execute("""CREATE INDEX IF NOT EXISTS task_read_summaries_page
+                    ON task_read_summaries(tenant_id,owner_user_id,project_id,
+                                            created_at DESC,task_id DESC)""")
+                db.execute("""CREATE TABLE IF NOT EXISTS task_read_summaries_meta (
+                    id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL,
+                    task_count INTEGER NOT NULL, dirty INTEGER NOT NULL DEFAULT 1)""")
+                columns = {info[1] for info in db.execute(
+                    'PRAGMA table_info(task_read_summaries_meta)')}
+                if 'task_count' not in columns:
+                    db.execute('ALTER TABLE task_read_summaries_meta '
+                               'ADD COLUMN task_count INTEGER NOT NULL DEFAULT -1')
+                if 'dirty' not in columns:
+                    db.execute('ALTER TABLE task_read_summaries_meta '
+                               'ADD COLUMN dirty INTEGER NOT NULL DEFAULT 1')
+                if row is None:
+                    db.execute('INSERT OR IGNORE INTO task_read_summaries_meta '
+                               '(id,format,task_count,dirty) VALUES (1,1,0,0)')
+                db.execute('''CREATE TRIGGER IF NOT EXISTS task_read_summaries_invalidate
+                    AFTER UPDATE ON local_ledger BEGIN
+                      UPDATE task_read_summaries_meta SET dirty=1 WHERE id=1;
+                    END''')
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "local ledger could not be opened", 503, retryable=True) from exc
 
@@ -238,6 +294,297 @@ class SQLiteTaskRepository:
         except (ValueError, TypeError, KeyError, RecursionError) as exc:
             raise ServiceError("STORAGE_CORRUPT", "local ledger is invalid; refusing to reset it", 500) from exc
 
+    @staticmethod
+    def _task_progress_summary(db, task, proposal, tables, search=None):
+        from ...progress_models import build_task_progress
+        summary = task.to_summary()
+        page = None
+        if {'task_asset_read_heads', 'task_result_read_views'} <= tables:
+            head = db.execute('''SELECT tenant_id,owner_user_id,project_id,
+                revision,generation,result_set_id,source_version,source_digest
+                FROM task_asset_read_heads WHERE task_id=?''', (task.task_id,)).fetchone()
+            if head is not None and head[3:5] == (
+                    task.confirmed_revision, task.run_generation):
+                if head[:3] != (task.tenant_id, task.owner_user_id, task.project_id):
+                    raise ServiceError('STORAGE_CORRUPT', 'task progress scope is invalid', 500)
+                result_id, version, source_digest = head[5:]
+                current = version == task.task_version
+                delivery = None
+                if not current and 'image_deliveries' in tables:
+                    from ...delivery import current_delivery
+                    records = {}
+                    for (payload,) in db.execute('''SELECT metadata FROM image_deliveries
+                        WHERE json_extract(metadata,'$.source_id')=?''', (result_id,)):
+                        records[result_id] = json.loads(payload)
+                    delivery = current_delivery(task, {'_deliveries': records}, result_id)
+                    current = (delivery is not None
+                        and delivery['source_version'] == version
+                        and delivery['source_digest'] == source_digest)
+                if current:
+                    row = db.execute('''SELECT result_set_id,item_count,metadata_json
+                        FROM task_result_read_views WHERE task_id=? AND view_type='accepted' ''',
+                        (task.task_id,)).fetchone()
+                    if row is None or row[0] != result_id or row[1] < 0:
+                        raise ServiceError('STORAGE_CORRUPT',
+                            'task progress result metadata is missing', 500)
+                    page = json.loads(row[2])
+                    if (page.get('task_version') != version
+                            or page.get('result_set_digest') != source_digest):
+                        raise ServiceError('STORAGE_CORRUPT',
+                            'task progress result metadata is stale', 500)
+                    page['task_version'] = task.task_version
+                    if delivery is not None and delivery['status'] == 'published':
+                        page['publication_kind'] = 'delivery'
+                    if 'refill_execution_stops' in tables and page['counts']['gap'] > 0:
+                        stop = db.execute('''SELECT stop_reason FROM refill_execution_stops
+                            WHERE task_id=? AND revision=? AND generation=?''',
+                            (task.task_id, task.confirmed_revision,
+                             task.run_generation)).fetchone()
+                        if stop:
+                            page['stop_reason'] = stop[0]
+        result = None if page is None else {
+            'kind': page.get('publication_kind'), 'stop_reason': page.get('stop_reason')}
+        returned = None
+        if (search is not None and 'candidate_browse_hits' in tables
+                and (search.scope.tenant_id, search.scope.owner_user_id,
+                     search.scope.project_id, search.scope.task_id,
+                     search.scope.revision, search.scope.generation)
+                == (task.tenant_id, task.owner_user_id, task.project_id,
+                    task.task_id, task.confirmed_revision, task.run_generation)):
+            returned = db.execute('SELECT COUNT(*) FROM candidate_browse_hits '
+                'WHERE source=?', (search.proposal_digest,)).fetchone()[0]
+        return build_task_progress(summary, proposal, result, raw_returned=returned,
+                                   _published_page=page).to_view()
+
+    @staticmethod
+    def _sync_task_read_summaries(db, memory):
+        """Keep the bounded list projection in the business write transaction."""
+        from ...chat_history import sync as sync_chat_history
+        sync_chat_history(db, memory)
+        live = set(memory._tasks)
+        tables = {row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        searches = {}
+        if 'plan_set_ledger' in tables:
+            from .plan_sets import restore as restore_plan_sets
+            searches = restore_plan_sets(db.execute(
+                'SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone())['current']
+        pending = {}
+        for draft in memory._feedback_drafts.values():
+            if draft['status'] == 'ready':
+                task_id = draft['task_id']
+                if task_id in pending:
+                    raise ServiceError('STORAGE_CORRUPT',
+                        'multiple pending feedback drafts', 500)
+                pending[task_id] = memory._feedback_view(draft)
+        for (task_id,) in db.execute('SELECT task_id FROM task_read_summaries'):
+            if task_id not in live:
+                for table in ('task_node_read_heads', 'task_node_read_items'):
+                    db.execute(f'DELETE FROM {table} WHERE task_id=?', (task_id,))
+                db.execute('DELETE FROM task_read_summaries WHERE task_id=?',
+                           (task_id,))
+        for task in memory._tasks.values():
+            if task.confirmed_proposal_json is not None:
+                try:
+                    proposal = json.loads(task.confirmed_proposal_json)
+                    raw_request = proposal['query_spec']['raw_request']
+                except (ValueError, KeyError, TypeError) as exc:
+                    raise ServiceError('STORAGE_CORRUPT',
+                        'confirmed proposal is invalid', 500) from exc
+            else:
+                raw_request = task.raw_request
+            summary = task.to_summary()
+            summary.update(raw_request=raw_request,
+                created_at=task.created_at.isoformat(),
+                pending_draft=pending.get(task.task_id))
+            if task.confirmed_proposal_json is not None:
+                try:
+                    summary['progress'] = SQLiteTaskRepository._task_progress_summary(
+                        db, task, proposal, tables, searches.get(task.task_id))
+                except (ValueError, TypeError, KeyError) as exc:
+                    raise ServiceError('STORAGE_CORRUPT',
+                        'task progress summary is invalid', 500) from exc
+            payload = json.dumps(summary, ensure_ascii=False,
+                                 separators=(',', ':'), allow_nan=False)
+            task_payload = json.dumps(encode(task), ensure_ascii=False, separators=(',', ':'))
+            db.execute('''INSERT INTO task_read_summaries
+                (task_id,tenant_id,owner_user_id,project_id,dimension_id,created_at,
+                 task_version,revision,generation,summary_json,task_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                tenant_id=excluded.tenant_id,
+                owner_user_id=excluded.owner_user_id,
+                project_id=excluded.project_id,
+                dimension_id=excluded.dimension_id,
+                created_at=excluded.created_at,
+                task_version=excluded.task_version,
+                revision=excluded.revision,
+                generation=excluded.generation,
+                summary_json=excluded.summary_json,task_json=excluded.task_json
+                WHERE task_read_summaries.summary_json != excluded.summary_json
+                   OR task_read_summaries.task_json IS NOT excluded.task_json''',
+                (task.task_id, task.tenant_id, task.owner_user_id,
+                 task.project_id, task.dimension_id,
+                 task.created_at.isoformat(), task.task_version,
+                 task.confirmed_revision, task.run_generation, payload, task_payload))
+            from ...node_read_views import sync as sync_node_views
+            sync_node_views(db, task, tables)
+            from ...task_events import publish_task_change
+            publish_task_change(db, task, summary, tables)
+        db.execute('INSERT OR REPLACE INTO task_read_summaries_meta '
+                   '(id,format,task_count,dirty) VALUES (1,1,?,0)',
+                   (len(live),))
+
+    def list_task_read_page(self, actor, project_id, *, limit, after=None):
+        try:
+            with closing(self._connect()) as db:
+                db.execute('BEGIN')
+                where = ('tenant_id=? AND owner_user_id=? AND project_id=?')
+                args = [actor.tenant_id, actor.user_id, project_id]
+                if after is not None:
+                    where += ' AND (created_at,task_id)<(?,?)'
+                    args.extend((after[0].isoformat(), after[1]))
+                rows = db.execute('SELECT task_id,dimension_id,created_at,'
+                    'task_version,revision,generation,summary_json '
+                    'FROM task_read_summaries WHERE ' + where +
+                    ' ORDER BY created_at DESC,task_id DESC LIMIT ?',
+                    (*args, limit)).fetchall()
+                # An old ledger needs an explicit migration. The service
+                # may use its legacy path until the projection is built.
+                marker = db.execute('SELECT format,task_count,dirty '
+                    'FROM task_read_summaries_meta WHERE id=1').fetchone()
+                if marker is None or marker[2]:
+                    return None
+                if marker[0] != 1:
+                    raise ServiceError('STORAGE_FORMAT_UNSUPPORTED',
+                        'task read summary format is unsupported', 500)
+                count = db.execute('SELECT COUNT(*) FROM task_read_summaries').fetchone()[0]
+                if marker[1] != count:
+                    raise ServiceError('STORAGE_CORRUPT',
+                        'task read summary row count is inconsistent', 500)
+                result = []
+                for task_id, dimension, created_at, version, revision, generation, payload in rows:
+                    try:
+                        item = json.loads(payload)
+                    except (ValueError, TypeError) as exc:
+                        raise ServiceError('STORAGE_CORRUPT',
+                            'task read summary is invalid', 500) from exc
+                    if (not isinstance(item, dict) or item.get('task_id') != task_id
+                            or item.get('project_id') != project_id
+                            or item.get('dimension_id') != dimension
+                            or item.get('created_at') != created_at
+                            or item.get('task_version') != version
+                            or item.get('confirmed_revision') != revision
+                            or item.get('run_generation') != generation):
+                        raise ServiceError('STORAGE_CORRUPT',
+                            'task read summary binding is invalid', 500)
+                    progress = item.get('progress')
+                    if progress is not None and (
+                            not isinstance(progress, dict)
+                            or (progress.get('task_id'), progress.get('revision'),
+                                progress.get('task_version'), progress.get('run_generation'))
+                            != (task_id, revision, version, generation)):
+                        raise ServiceError('STORAGE_CORRUPT',
+                            'task progress summary binding is invalid', 500)
+                    result.append(item)
+                return tuple(result)
+        except sqlite3.Error as exc:
+            raise ServiceError('STORAGE_UNAVAILABLE',
+                'task read summary unavailable', 503, retryable=True) from exc
+
+    def get_task_read_summary(self, actor, task_id):
+        try:
+            with closing(self._connect()) as db:
+                db.execute('BEGIN')
+                ready = db.execute('SELECT dirty FROM task_read_summaries_meta WHERE id=1').fetchone()
+                if ready is None or ready[0]:
+                    return None
+                row = db.execute('''SELECT project_id,dimension_id,task_version,
+                    revision,generation,summary_json FROM task_read_summaries
+                    WHERE task_id=? AND tenant_id=? AND owner_user_id=?''',
+                    (task_id, actor.tenant_id, actor.user_id)).fetchone()
+                if row is None:
+                    return None
+                item = json.loads(row[5])
+                if (not isinstance(item, dict) or item.get('task_id') != task_id
+                        or (item.get('project_id'), item.get('dimension_id'),
+                            item.get('task_version'), item.get('confirmed_revision'),
+                            item.get('run_generation')) != row[:5]):
+                    raise ServiceError('STORAGE_CORRUPT',
+                        'task read summary binding is invalid', 500)
+                return item
+        except (ValueError, TypeError) as exc:
+            raise ServiceError('STORAGE_CORRUPT', 'task read summary is invalid', 500) from exc
+        except sqlite3.Error as exc:
+            raise ServiceError('STORAGE_UNAVAILABLE',
+                'task read summary unavailable', 503, retryable=True) from exc
+
+    @staticmethod
+    def _read_task_binding(db, actor, task_id):
+        ready = db.execute('SELECT dirty FROM task_read_summaries_meta WHERE id=1').fetchone()
+        if ready is None or ready[0]:
+            return None
+        row = db.execute('''SELECT project_id,dimension_id,task_version,revision,
+            generation,task_json FROM task_read_summaries
+            WHERE task_id=? AND tenant_id=? AND owner_user_id=?''',
+            (task_id, actor.tenant_id, actor.user_id)).fetchone()
+        if row is None or row[5] is None:
+            return None
+        try:
+            task = decode(json.loads(row[5]))
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ServiceError('STORAGE_CORRUPT', 'task read binding is invalid', 500) from exc
+        if (type(task) is not Task
+                or (task.task_id, task.tenant_id, task.owner_user_id)
+                != (task_id, actor.tenant_id, actor.user_id)
+                or (task.project_id, task.dimension_id, task.task_version,
+                    task.confirmed_revision, task.run_generation) != row[:5]):
+            raise ServiceError('STORAGE_CORRUPT', 'task read binding is stale', 500)
+        return task
+
+    def node_read_page(self, actor, task_id, node, *, limit=24, cursor=None, projects):
+        from ...node_read_views import read
+        try:
+            with closing(self._connect()) as db:
+                db.execute('BEGIN')
+                task = self._read_task_binding(db, actor, task_id)
+                if task is None:
+                    # Authorize even when migration is required; never expose another owner's task.
+                    task = self._load(db.execute('SELECT format,payload FROM local_ledger WHERE id=1').fetchone()).get(actor, task_id)
+                    projects.require_access(actor, task.project_id, task.dimension_id, 'read')
+                    raise ServiceError('READ_PROJECTION_REQUIRED', 'node projection requires migration', 503)
+                projects.require_access(actor, task.project_id, task.dimension_id, 'read')
+                return read(db, task, node, limit, cursor)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ServiceError('STORAGE_CORRUPT', 'node projection is invalid', 500) from exc
+        except sqlite3.Error as exc:
+            raise ServiceError('STORAGE_UNAVAILABLE', 'node page unavailable', 503, retryable=True) from exc
+
+    def get_task_read_binding(self, actor, task_id):
+        try:
+            with closing(self._connect()) as db:
+                db.execute('BEGIN')
+                task = self._read_task_binding(db, actor, task_id)
+                if task is not None:
+                    return task
+                return self._load(db.execute('SELECT format,payload FROM local_ledger '
+                    'WHERE id=1').fetchone()).get(actor, task_id)
+        except sqlite3.Error as exc:
+            raise ServiceError('STORAGE_UNAVAILABLE',
+                'task read binding unavailable', 503, retryable=True) from exc
+
+    def rebuild_task_read_summaries(self):
+        try:
+            with closing(self._connect()) as db, db:
+                db.execute('BEGIN IMMEDIATE')
+                memory = self._load(db.execute(
+                    'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+                self._sync_task_read_summaries(db, memory)
+                return len(memory._tasks)
+        except sqlite3.Error as exc:
+            raise ServiceError('STORAGE_UNAVAILABLE',
+                'task read summary rebuild failed', 503, retryable=True) from exc
+
     def _call(self, name, write, *args, **kwargs):
         try:
             with closing(self._connect()) as db, db:
@@ -246,6 +593,7 @@ class SQLiteTaskRepository:
                 result = getattr(memory, name)(*args, **kwargs)
                 if write:
                     db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                    self._sync_task_read_summaries(db, memory)
                 return result
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "local ledger transaction failed", 503, retryable=True) from exc
@@ -270,6 +618,7 @@ class SQLiteTaskRepository:
                     "SELECT format, payload FROM local_ledger WHERE id=1").fetchone())
                 task, replayed = memory.confirm_draft(*args, **kwargs)
                 db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                self._sync_task_read_summaries(db, memory)
                 self._queue_search_dispatch(
                     db, task, f"terms:{task.task_id}:{task.confirmed_revision}")
                 return task, replayed
@@ -288,6 +637,7 @@ class SQLiteTaskRepository:
                 before_spec = json.loads(before.confirmed_proposal_json)["query_spec"]
                 result, replayed = memory.confirm_feedback_draft(*args, **kwargs)
                 db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                self._sync_task_read_summaries(db, memory)
                 if kwargs.get("action") == "confirm" and not replayed:
                     after = memory.get(actor, task_id)
                     after_spec = json.loads(after.confirmed_proposal_json)["query_spec"]
@@ -359,6 +709,10 @@ class SQLiteTaskRepository:
     def get_pending_feedback(self, *args, **kwargs): return self._call("get_pending_feedback", False, *args, **kwargs)
     def list_revisions(self, *args, **kwargs): return self._call("list_revisions", False, *args, **kwargs)
     def list_tasks(self, *args, **kwargs): return self._call("list_tasks", False, *args, **kwargs)
+    def list_tasks_with_feedback(self, *args, **kwargs):
+        return self._call("list_tasks_with_feedback", False, *args, **kwargs)
+    def list_tasks_page_with_feedback(self, *args, **kwargs):
+        return self._call("list_tasks_page_with_feedback", False, *args, **kwargs)
     def get_conversation(self, *args, **kwargs): return self._call("get_conversation", False, *args, **kwargs)
     def list_conversations(self, *args, **kwargs): return self._call("list_conversations", False, *args, **kwargs)
     def delete_conversation(self, *args, **kwargs): return self._call("delete_conversation", True, *args, **kwargs)
@@ -386,6 +740,7 @@ class SQLiteTaskRepository:
                 cascade = memory.hard_delete_conversation(actor, conversation_id)
                 task_ids = cascade['tasks']
                 db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                self._sync_task_read_summaries(db, memory)
                 existing = {row[0] for row in db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
                 if task_ids:
@@ -396,6 +751,17 @@ class SQLiteTaskRepository:
                         db.execute('DELETE FROM cleaning_dispatch_attempts WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
                     if 'near_duplicate_review_keys' in existing:
                         db.execute('DELETE FROM near_duplicate_review_keys WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
+                    if 'result_exclusion_keys' in existing:
+                        db.execute('DELETE FROM result_exclusion_keys WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
+                    for table in ('manual_review_keys', 'task_asset_read_heads',
+                                  'task_asset_read_bindings',
+                                  'task_result_read_snapshots',
+                                  'task_result_read_views',
+                                  'task_result_read_items',
+                                  'task_step_read_runs', 'task_step_read_items'):
+                        if table in existing:
+                            db.execute('DELETE FROM ' + table + ' WHERE task_id IN ('
+                                       + placeholders + ')', tuple(task_ids))
                     if 'image_deliveries' in existing:
                         from ...delivery import load_delivery_records
                         records = load_delivery_records(db)
@@ -419,7 +785,10 @@ class SQLiteTaskRepository:
                     if 'auto_refill_intake_outbox' in existing:
                         db.execute("DELETE FROM auto_refill_intake_outbox WHERE task_id IN ("
                                    + placeholders + ")", tuple(task_ids))
-                    for table in ('refill_iteration_metrics', 'refill_execution_stops'):
+                    for table in ('refill_iteration_metrics', 'refill_execution_stops',
+                                  'task_event_stream', 'task_event_state',
+                                  'task_event_observed_mutations', 'task_event_write_heads',
+                                  'task_node_read_heads', 'task_node_read_items'):
                         if table in existing:
                             db.execute("DELETE FROM " + table + " WHERE task_id IN ("
                                        + placeholders + ")", tuple(task_ids))
@@ -466,6 +835,7 @@ class SQLiteTaskRepository:
                 cascade = memory.hard_delete_task(actor, task_id)
                 task_ids = cascade['tasks']
                 db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                self._sync_task_read_summaries(db, memory)
                 existing = {row[0] for row in db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
                 if task_ids:
@@ -476,6 +846,8 @@ class SQLiteTaskRepository:
                         db.execute('DELETE FROM cleaning_dispatch_attempts WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
                     if 'near_duplicate_review_keys' in existing:
                         db.execute('DELETE FROM near_duplicate_review_keys WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
+                    if 'result_exclusion_keys' in existing:
+                        db.execute('DELETE FROM result_exclusion_keys WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
                     if 'image_deliveries' in existing:
                         from ...delivery import load_delivery_records
                         records = load_delivery_records(db)
@@ -499,7 +871,10 @@ class SQLiteTaskRepository:
                     if 'auto_refill_intake_outbox' in existing:
                         db.execute("DELETE FROM auto_refill_intake_outbox WHERE task_id IN ("
                                    + placeholders + ")", tuple(task_ids))
-                    for table in ('refill_iteration_metrics', 'refill_execution_stops'):
+                    for table in ('refill_iteration_metrics', 'refill_execution_stops',
+                                  'task_event_stream', 'task_event_state',
+                                  'task_event_observed_mutations', 'task_event_write_heads',
+                                  'task_node_read_heads', 'task_node_read_items'):
                         if table in existing:
                             db.execute("DELETE FROM " + table + " WHERE task_id IN ("
                                        + placeholders + ")", tuple(task_ids))

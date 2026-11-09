@@ -34,7 +34,7 @@ class LocalFirstSearch:
     def __init__(self, service, configs, *, ledger_path, source_path,
                  capabilities_path, fixture_path, cursor_secret,
                  legacy_fixture_path=None, legacy_capabilities_path=None,
-                 clip_model_path=None):
+                 clip_model_path=None, start=True):
         if not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32:
             raise ValueError('Local cursor secret must contain at least 32 bytes')
         self.service, self.configs = service, configs
@@ -62,15 +62,30 @@ class LocalFirstSearch:
         self._pending = set()
         self._closed = False
         self._worker = threading.Thread(target=self._work, name='local-first-search', daemon=True)
-        self._worker.start()
-        for actor, task_id in self.repository.recoverable():
-            self.enqueue(actor, task_id)
+        if start:
+            self._worker.start()
+            for actor, task_id in self.repository.recoverable():
+                self.enqueue(actor, task_id)
+
+    def encode_query(self, text, binding):
+        if self.clip_encoder is None:
+            raise ServiceError('QUERY_UNSUPPORTED', 'Text encoder is unavailable', 422)
+        return self.clip_encoder.encode_query(text, binding)
+
+    def encode_reference(self, context, query_input, binding):
+        if self.clip_encoder is None or self.service.query_images is None:
+            raise ServiceError('QUERY_UNSUPPORTED', 'Reference-image encoder is unavailable', 422)
+        task = self.service.repository.get(context.actor, context.task_id)
+        content = self.service.query_images.content(
+            context.actor, task.project_id, query_input['query_image_id'], query_input['digest'])
+        return self.clip_encoder.encode_image_bytes(content, binding)
 
     def close(self):
         with self._condition:
             self._closed = True
             self._condition.notify_all()
-        self._worker.join(timeout=5)
+        if self._worker.is_alive():
+            self._worker.join(timeout=5)
 
     def enqueue(self, actor, task_id):
         with self._condition:
@@ -225,7 +240,7 @@ class LocalFirstSearch:
             adapter = LocalVectorRetrieval(self._authority(), libraries=libraries,
                 query_vectors=vectors, approved=(), records=tuple(records),
                 filter_templates=templates, cursor_secret=self.cursor_secret,
-                query_rules=tuple(rules), query_encoder=self.clip_encoder
+                query_rules=tuple(rules), query_encoder=self
                 if fixture_path is None else None)
             if self.clip_encoder is not None and fixture_path is None:
                 if any(binding.encoder_ref != self.clip_encoder.encoder_ref
@@ -240,6 +255,8 @@ class LocalFirstSearch:
     def _authority(self):
         source = self.source
         fixture_path = self.fixture_path
+        from .local_media_index import LocalMediaIndex
+        media_index = LocalMediaIndex(fixture_path)
 
         class Authority:
             def require_access(self, context, resource_ref, action):
@@ -258,13 +275,11 @@ class LocalFirstSearch:
                     return
                 if action == 'read' and resource_ref.startswith('media:'):
                     try:
-                        data = json.loads(fixture_path.read_bytes())
-                        matching = [(entry['binding_id'], media) for entry in data['records']
-                                    for media in entry['media'] if media['authorized_media_ref'] == resource_ref]
+                        matching = media_index.bindings_for(resource_ref)
                         libraries, _ = source.load()
                         binding_to_library = {b.binding_id: b.library_id for lib in libraries for b in lib.bindings}
                         if matching and all(source.authorize(scope, 'search', binding_to_library[b])
-                                            for b, _ in matching):
+                                            for b in matching):
                             return
                     except (OSError, ValueError, KeyError, TypeError):
                         raise ServiceError('AUTH_UNAVAILABLE', 'Local media authority unavailable', 503) from None
@@ -329,10 +344,14 @@ class LocalFirstSearch:
         _, fixture, preview = self._preview(actor, task_id)
         adapter = fixture[5]
         context = AccessContext(actor, task_id, 'search', preview.authorization_version)
+        task = self.service.repository.get(actor, task_id)
+        query_input = json.loads(task.confirmed_proposal_json)['query_spec'].get('query_input')
         view = preview.to_view()
         for route, row in zip(preview.routes, view['routes']):
             row['options'] = [option for option, capability in zip(row['options'], route.options)
-                              if adapter.can_encode_query(context, route.query_text, capability.binding)]
+                              if (adapter.can_encode_reference(context, query_input, capability.binding)
+                                  if query_input else
+                                  adapter.can_encode_query(context, route.query_text, capability.binding))]
             row['availability'] = ('available' if row['options'] else
                                    'query_encoding_unavailable' if route.options else
                                    'no_available_index')
@@ -452,7 +471,7 @@ class LocalFirstSearch:
                 depth, base_depth + (index < remainder)))
                 for index, member in enumerate(approved.members)), records=records,
             filter_templates=templates, cursor_secret=self.cursor_secret,
-            query_rules=rules, query_encoder=None if using_legacy else self.clip_encoder)
+            query_rules=rules, query_encoder=None if using_legacy else self)
 
     def tick(self, actor, task_id, *, max_requests):
         approved = self.repository.get_current(actor, task_id)
@@ -585,9 +604,14 @@ class LocalFirstSearch:
                     or gateway.by_ref[media.authorized_media_ref][1] != media.content_digest):
                 break
             preview_context = AccessContext(actor, task_id, 'candidate_preview', 'current')
-            with gateway.open_read(preview_context, media.authorized_media_ref,
-                                   max_bytes=10 * 1024 * 1024) as stream:
-                content = stream.read()
+            thumbnail = getattr(gateway, 'thumbnail', None)
+            if callable(thumbnail):
+                content = thumbnail(preview_context, media.authorized_media_ref,
+                                    max_bytes=10 * 1024 * 1024)
+            else:
+                with gateway.open_read(preview_context, media.authorized_media_ref,
+                                       max_bytes=10 * 1024 * 1024) as stream:
+                    content = stream.read()
             if self.repository.get_browse_current(actor, task_id) != approved:
                 raise ServiceError('PLAN_NOT_CURRENT', 'Approved set changed during preview read', 409)
             content_type = ('image/jpeg' if content.startswith(b'\xff\xd8\xff')
@@ -630,10 +654,14 @@ class LocalFirstSearch:
             for hit in page.hits:
                 hit_groups.setdefault(digest(asdict(hit)), set()).update(origin_groups[plan_id])
         quota_task = any(origin_groups.values())
+        query_input = json.loads(task.confirmed_proposal_json)['query_spec'].get('query_input')
+        excluded_digest = (query_input['digest'] if query_input
+                           and query_input['exclude_exact_content'] else None)
         for resolution in resolutions:
             media = resolution.media
             if (resolution.status != 'resolved' or media is None
-                    or media.content_digest is None):
+                    or media.content_digest is None
+                    or media.content_digest == excluded_digest):
                 continue
             candidate_id = candidate_identity(media)
             if candidate_id in seen:

@@ -98,7 +98,8 @@ class QueryBranchesTest(unittest.TestCase):
                 nonlocal calls
                 calls += 1
                 value = original_get(*args)
-                if calls == 2:
+                # current_read_binding supplies the first snapshot; this read is its fence.
+                if calls == 1:
                     value['task_version'] += 1
                 return value
 

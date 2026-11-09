@@ -1,8 +1,11 @@
 from copy import deepcopy
 from dataclasses import replace
+from io import BytesIO
 import json
 import unittest
 from unittest.mock import patch
+
+from PIL import Image
 
 from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.expansion_models import preview_edited_groups
@@ -11,6 +14,7 @@ from dsh_retrieval.models import Actor
 from dsh_retrieval.multi_branch_contracts import validate_plan_set
 from dsh_retrieval.physical_query_preparation import PhysicalQueryPreparer, TextQueryCapability
 from dsh_retrieval.query_routing import QueryRouteChoice, QueryRoutingService
+from dsh_retrieval.query_images import QueryImageService
 from dsh_retrieval.retrieval_contracts import RetrievalScope
 from dsh_retrieval.service import InMemoryTaskRepository
 from draft_helpers import BODY, confirmation, make_service
@@ -60,6 +64,11 @@ class QueryRoutingTest(unittest.TestCase):
         self.after_encode()
         return QueryVector(binding.encoder_ref, (0.25,) * binding.vector_dimension)
 
+    def encode_reference(self, context, query_input, binding):
+        self.encodes.append(('reference:' + query_input['digest'], binding))
+        self.after_encode()
+        return QueryVector(binding.encoder_ref, (0.5,) * binding.vector_dimension)
+
     def discover(self, **kwargs):
         return self.router.discover(self.actor, self.task_id,
             expected_scope=self.scope, authorization_version='auth-v1', **kwargs)
@@ -89,6 +98,36 @@ class QueryRoutingTest(unittest.TestCase):
         self.assertEqual([len(member.plan.request.vector.values) for member in plan_set.members], [2, 2, 3])
         self.assertEqual(self.repo.get(self.actor, self.task_id), self.task)
         self.assertEqual(preview.routing_digest, self.discover().routing_digest)
+
+    def test_reference_image_is_one_bound_branch_and_never_text_encoded(self):
+        images = QueryImageService(self.service.projects)
+        self.service.query_images = images
+        stream = BytesIO()
+        Image.new('RGB', (4, 3), 'red').save(stream, 'PNG')
+        image, _ = images.create(self.actor, 'demo', 'reference', stream.getvalue(), 'image/png')
+        body = deepcopy(BODY)
+        body['query_spec']['raw_request'] = '狗和猫的图片'
+        body['query_spec']['grouped_expansion'] = preview_edited_groups(None, [
+            {'primary_label': '狗', 'auxiliary_terms': ['柯基']},
+            {'primary_label': '猫', 'auxiliary_terms': ['布偶猫']}])['plan']
+        body['query_spec']['query_input'] = {
+            'type': 'reference_image', 'query_image_id': image['query_image_id'],
+            'digest': image['digest'], 'exclude_exact_content': True}
+        summary, _ = self.service.create_task(
+            self.actor, 'reference-task', confirmation(
+                self.service, self.actor, key='reference-draft', body=body))
+        self.task_id = summary['task_id']
+        self.task = self.repo.get(self.actor, self.task_id)
+        self.scope = RetrievalScope.from_task(self.task)
+
+        preview = self.discover()
+        self.assertEqual(len(preview.routes), 1)
+        plan = self.prepare(preview)
+        self.assertEqual(len(plan.members), 1)
+        self.assertEqual(len(self.encodes), 1)
+        self.assertTrue(self.encodes[0][0].startswith('reference:sha256:'))
+        self.assertEqual(json.loads(self.task.confirmed_proposal_json)['query_spec']['query_input'],
+                         body['query_spec']['query_input'])
 
     def test_same_branch_can_select_two_libraries_but_not_duplicate_pair(self):
         preview = self.discover()

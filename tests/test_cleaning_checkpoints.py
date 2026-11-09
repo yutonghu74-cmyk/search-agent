@@ -83,6 +83,22 @@ class CleaningCheckpointTest(unittest.TestCase):
             save(changed)
         self.assertEqual(caught.exception.code, 'RESULT_CONFLICT')
 
+    def test_running_step_summary_is_persisted_at_checkpoint_watermark(self):
+        self.start()
+        before = self.f.repo.step_results_summary(self.f.actor, self.f.task_id)
+        self.assertEqual(before['runs'][0]['steps'][0]['counts']['pending'], 1)
+        self.assertNotIn('items', before['runs'][0]['steps'][0])
+        self.save()
+        reopened = self.f.f.reopen()
+        after = reopened.step_results_summary(self.f.actor, self.f.task_id)
+        self.assertNotEqual(before['runs'][0]['output_version'],
+                            after['runs'][0]['output_version'])
+        self.assertEqual(after['runs'][0]['steps'][0]['counts']['retained'], 1)
+        with patch.object(reopened, '_transaction',
+                          side_effect=AssertionError('full ledger read')):
+            self.assertEqual(reopened.step_results_summary(
+                self.f.actor, self.f.task_id), after)
+
     def test_snapshot_survives_restart_and_does_not_consult_current_provider(self):
         self.run_pipeline()
         provider = Mock()

@@ -2,6 +2,7 @@ from http.server import ThreadingHTTPServer
 import json
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -34,6 +35,16 @@ class ResultReader:
         return {"result_set_id": "resultset-reviewed",
                 "pending_cluster_count": 0}, False
 
+    def exclude_result_candidates(self, actor, task_id, **values):
+        self.review_calls.append((actor, task_id, values))
+        return {"result_set_id": "resultset-excluded",
+                "accepted_count": 1, "gap": 9}, False
+
+    def review_unknown_candidate(self, actor, task_id, **values):
+        self.review_calls.append((actor, task_id, values))
+        return {"result_set_id": "resultset-manually-reviewed",
+                "accepted_count": 2, "pending_review_count": 0}, False
+
 
 class ApiTest(unittest.TestCase):
     @classmethod
@@ -53,6 +64,40 @@ class ApiTest(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join()
+
+    def test_task_summary_route_does_not_build_heavy_snapshot(self):
+        handler = self.server.RequestHandlerClass
+        summary = {'task_id': 'task-summary', 'task_version': 7,
+                   'progress': {'task_version': 7, 'nodes': []}}
+        with patch.object(handler.service, 'task_read_summary', return_value=summary) as read, \
+                patch.object(handler, '_task_snapshot', side_effect=AssertionError('heavy read')):
+            status, body, _ = self.request('/v1/retrieval/tasks/task-summary/summary')
+            self.assertEqual((status, body), (200, summary))
+            self.assertEqual(read.call_args.args[1], 'task-summary')
+            status, _, _ = self.request('/v1/retrieval/tasks/task-summary/summary?items=all')
+            self.assertEqual(status, 422)
+        with patch.object(handler.service, 'task_read_summary',
+                          side_effect=ServiceError('FORBIDDEN', 'denied', 403)):
+            status, _, _ = self.request('/v1/retrieval/tasks/task-summary/summary')
+            self.assertEqual(status, 403)
+
+    def test_browse_only_rejects_writes_and_keeps_page_readable(self):
+        handler = create_handler(self.server.RequestHandlerClass.service, browse_only=True)
+        with ThreadingHTTPServer(('127.0.0.1', 0), handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f'http://127.0.0.1:{server.server_port}'
+            try:
+                with urlopen(base + '/production') as response:
+                    self.assertEqual(response.status, 200)
+                for method in ('POST', 'DELETE'):
+                    with self.assertRaises(HTTPError) as caught:
+                        urlopen(Request(base + '/v1/retrieval/tasks/missing', method=method))
+                    self.assertEqual(caught.exception.code, 503)
+                    self.assertEqual(json.load(caught.exception)['code'], 'BROWSE_ONLY')
+            finally:
+                server.shutdown()
+                thread.join()
 
     def request(self, path, *, body=None, key=None, identity=True, method=None):
         headers = {}
@@ -132,8 +177,17 @@ class ApiTest(unittest.TestCase):
         status, history, _ = self.request("/v1/retrieval/projects/demo/tasks")
         self.assertEqual(history["items"][0]["task_id"], task["task_id"])
         self.assertIn("再去掉文字", history["items"][0]["raw_request"])
+        status, history_page, _ = self.request(
+            "/v1/retrieval/projects/demo/tasks?limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(history_page['items'][0]['task_id'], task['task_id'])
         status, revisions, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/revisions")
         self.assertEqual([item["revision"] for item in revisions["items"]], [1, 2])
+        status, binding, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/read-binding")
+        self.assertEqual(status, 200)
+        self.assertEqual(binding['revision'], 2)
+        self.assertEqual(binding['proposal_digest'], revisions['items'][-1]['proposal_digest'])
         status, conversations, _ = self.request("/v1/retrieval/projects/demo/conversations")
         self.assertEqual(status, 200)
         summary = next(item for item in conversations["items"]
@@ -143,6 +197,7 @@ class ApiTest(unittest.TestCase):
             f"/v1/retrieval/conversations/{draft['conversation_id']}")
         self.assertEqual([item["kind"] for item in conversation["messages"]], ["request", "feedback"])
         self.assertEqual([item["revision"] for item in conversation["confirmations"]], [1, 2])
+        self.assertEqual(conversation["executions"], [{"task_id": task["task_id"], "runs": []}])
         status, runs, _ = self.request(f"/v1/retrieval/tasks/{task['task_id']}/agent-runs")
         self.assertEqual((status, runs["engine"], runs["items"]), (200, "unconfigured", []))
         status, _, _ = self.request("/v1/retrieval/tasks/missing/agent-runs")
@@ -157,6 +212,45 @@ class ApiTest(unittest.TestCase):
                          ["running", "pending", "pending", "pending", "pending"])
         self.assertEqual(progress["counts"]["target"], 10)
         self.assertIsNone(progress["counts"]["accepted"])
+        self.assertGreaterEqual(progress["as_of_sequence"], 1)
+        status, events, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/events?after_sequence=0&limit=20")
+        self.assertEqual((status, events["task_id"], events["schema_version"]),
+                         (200, task["task_id"], "task-events@1"))
+        self.assertEqual(events["snapshot"]["progress"]["as_of_sequence"],
+                         events["as_of_sequence"])
+        self.assertEqual(events["events"][0]["kind"], "task.snapshot")
+        handler = self.server.RequestHandlerClass
+        stream_settings = (handler.event_stream_duration,
+                           handler.event_stream_poll_interval)
+        handler.event_stream_duration = 0.01
+        handler.event_stream_poll_interval = 0.001
+        try:
+            status, stream, stream_headers = self.request(
+                f"/v1/retrieval/tasks/{task['task_id']}/events/stream?after_sequence=0")
+        finally:
+            (handler.event_stream_duration,
+             handler.event_stream_poll_interval) = stream_settings
+        self.assertEqual(status, 200)
+        self.assertEqual(stream_headers.get_content_type(), "text/event-stream")
+        self.assertIn(b"event: task-event\n", stream)
+        self.assertIn(f"id: {task['task_id']}:1\n".encode(), stream)
+        self.assertIn(b"retry: 1000\n\n", stream)
+        status, _, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/events/stream?after_sequence=-1")
+        self.assertEqual(status, 422)
+        status, _, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/events/stream", identity=False)
+        self.assertEqual(status, 401)
+        status, empty_events, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/events?after_sequence={events['as_of_sequence']}")
+        self.assertEqual((status, empty_events["events"]), (200, []))
+        status, _, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/events?after_sequence=-1")
+        self.assertEqual(status, 422)
+        status, _, _ = self.request(
+            f"/v1/retrieval/tasks/{task['task_id']}/events", identity=False)
+        self.assertEqual(status, 401)
         status, unavailable, _ = self.request(
             f"/v1/retrieval/tasks/{task['task_id']}/results?view=accepted&limit=1")
         self.assertEqual(status, 200)
@@ -185,6 +279,13 @@ class ApiTest(unittest.TestCase):
             f"/v1/retrieval/tasks/{task['task_id']}/results?view=accepted&limit=1&cursor={first['next_cursor']}")
         self.assertEqual(second["items"][0]["candidate_id"], "asset-b")
         self.assertIsNone(second["next_cursor"])
+        with patch.object(self.results, 'get_result_read_page', create=True,
+                          return_value={'indexed': True}) as indexed:
+            status, page, _ = self.request(
+                f"/v1/retrieval/tasks/{task['task_id']}/results?view=accepted&limit=1")
+            self.assertEqual(status, 200)
+            self.assertTrue(page['indexed'])
+            indexed.assert_called_once()
 
     def test_deferred_near_duplicate_review_routes_are_not_exposed(self):
         status, review, _ = self.request(
@@ -200,6 +301,34 @@ class ApiTest(unittest.TestCase):
             body=body, key="review-key")
         self.assertEqual((status, reviewed["code"]), (404, "NOT_FOUND"))
         self.assertEqual(self.results.review_calls, [])
+
+    def test_result_exclusion_route_binds_version_scope_reason_and_key(self):
+        body = {"expected_task_version": 4,
+                "result_set_digest": "sha256:" + "b" * 64,
+                "candidate_id": "asset-a", "scope": "candidate",
+                "reason": "这张图构图不适合"}
+        status, changed, _ = self.request(
+            "/v1/retrieval/tasks/task-review/result-exclusions",
+            body=body, key="exclude-key")
+        self.assertEqual((status, changed["result_set_id"]),
+                         (200, "resultset-excluded"))
+        _, task_id, values = self.results.review_calls.pop()
+        self.assertEqual(task_id, "task-review")
+        self.assertEqual(values, {**body, "key": "exclude-key"})
+
+    def test_manual_review_route_binds_result_candidate_action_reason_and_key(self):
+        body = {"expected_task_version": 4,
+                "result_set_digest": "sha256:" + "b" * 64,
+                "candidate_id": "asset-maybe", "asset_version": "v1",
+                "action": "accept", "reason": "人工确认主体符合需求"}
+        status, changed, _ = self.request(
+            "/v1/retrieval/tasks/task-review/manual-reviews",
+            body=body, key="manual-review-key")
+        self.assertEqual((status, changed["result_set_id"]),
+                         (200, "resultset-manually-reviewed"))
+        _, task_id, values = self.results.review_calls.pop()
+        self.assertEqual(task_id, "task-review")
+        self.assertEqual(values, {**body, "key": "manual-review-key"})
 
     def test_existing_feedback_draft_can_be_revised_with_expansion(self):
         status, draft, _ = self.request('/v1/retrieval/projects/demo/drafts', body=BODY, key='revise-draft')

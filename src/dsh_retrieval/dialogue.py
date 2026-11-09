@@ -213,6 +213,8 @@ class DialogueStore:
         for column in ('created_at', 'updated_at'):
             if column not in columns:
                 self.connection.execute(f'ALTER TABLE dialogue_sessions ADD COLUMN {column} TEXT')
+        self.connection.execute('CREATE INDEX IF NOT EXISTS dialogue_history_scope ON dialogue_sessions '
+                                '(tenant_id,user_id,project_id,created_at DESC,session_id DESC)')
         now = datetime.now(UTC).isoformat()
         self.connection.execute('UPDATE dialogue_sessions SET created_at=COALESCE(created_at,?), updated_at=COALESCE(updated_at,?)',
                                 (now, now))
@@ -250,6 +252,27 @@ class DialogueStore:
                 (actor.tenant_id, actor.user_id, project_id, task_id, limit)).fetchall()
         return [message for user, assistant in reversed(rows) for message in
                 ({'role': 'user', 'text': user}, {'role': 'assistant', 'text': assistant})]
+
+    def history_page(self, actor, project_id, *, after=None, limit=21):
+        where = 'tenant_id=? AND user_id=? AND project_id=? AND json_array_length(state, "$.messages")>0'
+        args = [actor.tenant_id, actor.user_id, project_id]
+        if after:
+            where += ' AND (created_at,session_id)<(?,?)'
+            args.extend(after)
+        with self.lock:
+            rows = self.connection.execute("SELECT session_id,version,state,created_at,updated_at "
+                "FROM dialogue_sessions WHERE " + where +
+                " ORDER BY created_at DESC,session_id DESC LIMIT ?", (*args, limit)).fetchall()
+        result = []
+        for sid, version, payload, created, updated in rows:
+            state = json.loads(payload)
+            messages = state.get('messages') or []
+            title = next((m.get('text', '').strip() for m in messages
+                          if m.get('role') == 'user' and m.get('text', '').strip()), '新 Chat')
+            result.append({'id': sid, 'kind': 'dialogue', 'title': title[:80],
+                           'message_count': len(messages), 'created_at': created,
+                           'updated_at': updated, 'version': version})
+        return result
 
     def list(self, actor, project_id):
         with self.lock:

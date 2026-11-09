@@ -61,6 +61,7 @@ const elements = {'group-lines': {value: '狗 | 金毛，柯基\n猫 |'},
                   'group-parent': {value: '动物'}, status: {textContent: ''}};
 const $ = id => elements[id];
 const document = {querySelectorAll: () => []};
+const state = {refillLibrariesAvailable: true};
 """ + parse + busy + r"""
 assert.deepEqual(groupPreviewBody('动物').groups, [
   {primary_label: '狗', auxiliary_terms: ['金毛', '柯基']},

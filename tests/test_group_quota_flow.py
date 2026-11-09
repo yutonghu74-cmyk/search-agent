@@ -225,6 +225,18 @@ class QuotaLedgerFlowTests(unittest.TestCase):
                           for row in page['group_progress']],
                          [('狗', 2, 3, 1), ('猫', 1, 1, 0)])
         self.assertEqual(page['counts']['gap'], 1)
+        repo = self.repo()
+        first = repo.get_result_read_page(self.fixture.actor, self.task_id,
+                                          limit=1)
+        expected = build_result_page(task.to_summary(),
+            json.loads(task.confirmed_proposal_json), view, limit=1)
+        self.assertEqual(first, expected)
+        self.assertIsNotNone(first['next_cursor'])
+        second = repo.get_result_read_page(self.fixture.actor, self.task_id,
+            limit=1, cursor=first['next_cursor'])
+        self.assertEqual(second, build_result_page(task.to_summary(),
+            json.loads(task.confirmed_proposal_json), view,
+            limit=1, cursor=first['next_cursor']))
 
     def test_progress_names_the_short_group(self):
         _, _, view = self.publish_all_passing()
@@ -239,9 +251,22 @@ class QuotaLedgerFlowTests(unittest.TestCase):
     def test_step_view_excludes_candidates_a_group_check_did_not_apply_to(self):
         f = self.fixture
         repo, _, _ = self.publish_all_passing()
-        steps = repo.step_results(f.actor, self.task_id)['runs'][0]['steps']
+        full_view = repo.step_results(f.actor, self.task_id)
+        run = full_view['runs'][0]
+        steps = run['steps']
         self.assertEqual([step['counts']['input'] for step in steps], [2, 2])
         self.assertEqual([len(step['items']) for step in steps], [2, 2])
+        from dsh_retrieval.cleaning_step_outputs import build_step_output_page
+        step = steps[0]
+        kwargs = {'operation_id': run['operation_id'],
+                  'step_execution_id': step['step_execution_id'],
+                  'output_version': run['output_version'], 'limit': 1}
+        first = repo.step_output_read_page(f.actor, self.task_id, **kwargs)
+        self.assertEqual(first, build_step_output_page(full_view, **kwargs))
+        self.assertIsNotNone(first['next_cursor'])
+        kwargs['cursor'] = first['next_cursor']
+        self.assertEqual(repo.step_output_read_page(f.actor, self.task_id, **kwargs),
+                         build_step_output_page(full_view, **kwargs))
 
 
 if __name__ == '__main__':

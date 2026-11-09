@@ -9,6 +9,10 @@ from dsh_retrieval.multi_rule_contracts import (
 from dsh_retrieval.query_spec import digest
 from dsh_retrieval.near_duplicates import ALGORITHM, PerceptualFingerprint
 from dsh_retrieval.result_contracts import (FusedSourceEvidence,
+                                            ManualReviewDecision,
+                                            ResultExclusionDecision,
+                                            apply_manual_review_decision,
+                                            apply_result_exclusion,
                                             build_exact_result_set,
                                             merge_exact_result_sets)
 from dsh_retrieval.adapters.task_storage.sqlite import decode, encode
@@ -103,6 +107,36 @@ class ExactResultContractTests(unittest.TestCase):
         self.assertEqual(chosen, {"c0", "c1", "c5"})
         self.assertNotIn("c3", chosen)
         self.assertNotIn("c4", chosen)
+
+    def test_manual_review_resolves_unknown_and_recounts_immutably(self):
+        preview = build_exact_result_set(self.job, self.result, 5)
+        candidate = self.job.candidates[4]
+        accepted = apply_manual_review_decision(
+            preview, ManualReviewDecision("operation", "c4", "v1", "accept",
+                                          "人工确认主体符合需求"), candidate)
+        self.assertEqual((accepted.accepted_count, accepted.unknown_count,
+                          accepted.fail_count, accepted.gap), (4, 0, 1, 1))
+        self.assertIn("c4", {item.candidate_id for item in accepted.accepted})
+        rejected = apply_manual_review_decision(
+            preview, ManualReviewDecision("operation", "c4", "v1", "reject",
+                                          "画面证据不足"), candidate)
+        self.assertEqual((rejected.accepted_count, rejected.unknown_count,
+                          rejected.fail_count, rejected.gap), (3, 0, 2, 2))
+        self.assertNotEqual(accepted.result_set_digest, rejected.result_set_digest)
+        with self.assertRaises(ValueError):
+            apply_manual_review_decision(
+                accepted, ManualReviewDecision("operation", "c4", "v1", "reject",
+                                                "重复裁决"), candidate)
+
+    def test_owner_candidate_exclusion_recounts_without_relabeling_rule_failure(self):
+        preview = build_exact_result_set(self.job, self.result, 2)
+        changed = apply_result_exclusion(preview, ResultExclusionDecision(
+            "candidate", "c0", ("c0",), "主体不符合本次需求"))
+        self.assertEqual(tuple(item.candidate_id for item in changed.accepted),
+                         ("c1", "c5"))
+        self.assertEqual((changed.fail_count, changed.user_excluded_count,
+                          changed.gap), (1, 1, 0))
+        self.assertNotEqual(changed.result_set_digest, preview.result_set_digest)
 
     def test_result_change_changes_digest(self):
         original = build_exact_result_set(self.job, self.result, 2)
@@ -209,6 +243,17 @@ class ExactResultContractTests(unittest.TestCase):
         self.assertEqual(tuple(source.library_id for source in fused.sources),
                          ("library-a", "library-b"))
         self.assertNotEqual(merged.result_set_digest, current.result_set_digest)
+        excluded_parent = apply_result_exclusion(parent, ResultExclusionDecision(
+            "candidate", "c0", ("c0",), "用户明确排除此图"),
+            refill_policy=policy, node_mode="manual")
+        merged_after_exclusion = merge_exact_result_sets(
+            "resultset-excluded-parent", excluded_parent, current,
+            refill_policy=policy, node_mode="manual")
+        self.assertNotIn("c0", {item.candidate_id
+                                for item in merged_after_exclusion.accepted
+                                + merged_after_exclusion.reserve})
+        self.assertEqual((merged_after_exclusion.user_excluded_count,
+                          merged_after_exclusion.publication_mutation_count), (1, 0))
 
     def test_legacy_preview_decoder_preserves_v1_digest(self):
         preview = build_exact_result_set(self.job, self.result, 2, legacy_lineage=True)
@@ -216,7 +261,8 @@ class ExactResultContractTests(unittest.TestCase):
         encoded = encode(preview)
         for field in ('parent_result_set_id', 'parent_result_set_digest',
                       'source_operation_ids', 'near_duplicate_pairs',
-                      'near_duplicate_decisions'):
+                      'near_duplicate_decisions', 'exclusion_decisions',
+                      'publication_mutation_count'):
             encoded['value'].pop(field)
         restored = decode(encoded)
         self.assertEqual(restored, preview)

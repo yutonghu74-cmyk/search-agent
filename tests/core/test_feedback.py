@@ -76,6 +76,10 @@ class FeedbackTest(unittest.TestCase):
         self.assertIsNone(self.service.get_task(self.actor, self.task_id)["pending_draft"])
         self.assertEqual(result["draft"]["confirmed_revision"], 2)
         self.assertEqual([item["revision"] for item in self.service.list_revisions(self.actor, self.task_id)], [1, 2])
+        revision = self.service.list_revisions(self.actor, self.task_id)[-1]
+        self.assertTrue(revision['recompute_required'])
+        self.assertIn('用户反馈', [change['label'] for change in revision['changes']])
+        self.assertIn('旧结果与交付包保持历史只读', revision['revision_note'])
         replay, replayed = self.service.confirm_feedback(
             self.actor, self.task_id, "apply", self.confirmation_body(draft))
         self.assertTrue(replayed)
@@ -151,6 +155,8 @@ class SQLiteFeedbackTest(unittest.TestCase):
                 "expected_task_version": task["task_version"]})
             reopened = make_service(SQLiteTaskRepository(path))
             self.assertEqual(reopened.get_task(actor, task["task_id"])["pending_draft"]["draft_id"], draft["draft_id"])
+            self.assertEqual(reopened.list_tasks_page(actor, 'demo')['items'][0][
+                'pending_draft']['draft_id'], draft['draft_id'])
             result, _ = reopened.confirm_feedback(actor, task["task_id"], "apply", {
                 "draft_id": draft["draft_id"], "expected_draft_version": draft["draft_version"],
                 "proposal_digest": draft["proposal_digest"],
@@ -159,6 +165,8 @@ class SQLiteFeedbackTest(unittest.TestCase):
             self.assertEqual(final.get_task(actor, task["task_id"])["confirmed_revision"], 2)
             self.assertEqual(len(final.list_revisions(actor, task["task_id"])), 2)
             self.assertEqual(result["task"]["run_generation"], 2)
+            self.assertIsNone(final.list_tasks_page(actor, 'demo')['items'][0][
+                'pending_draft'])
 
 
 if __name__ == "__main__":

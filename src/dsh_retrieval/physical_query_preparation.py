@@ -99,7 +99,14 @@ class PhysicalQueryPreparer:
         if batch_size > capability.max_batch_size:
             raise ServiceError('INPUT_LIMIT', 'Batch exceeds binding limit', 422)
         self.authorization.require_access(context, 'library:' + binding.library_id, 'search')
-        vector = self.embeddings.encode_query(context, branch['query_text'], binding)
+        query_input = query.get('query_input')
+        if query_input is not None:
+            encoder = getattr(self.embeddings, 'encode_reference', None)
+            if not callable(encoder):
+                raise ServiceError('QUERY_UNSUPPORTED', 'No verified reference-image encoder', 422)
+            vector = encoder(context, query_input, binding)
+        else:
+            vector = self.embeddings.encode_query(context, branch['query_text'], binding)
         if not isinstance(vector, QueryVector):
             raise ServiceError('ENCODER_MISMATCH', 'Invalid encoder response', 422)
         plan_id = 'plan_' + digest({

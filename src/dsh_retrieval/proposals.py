@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import json
 import os
+import re
 
 from .errors import ServiceError, invalid
 from .query_spec import normalize_query_spec, digest
@@ -11,6 +12,21 @@ from .refill_planning import normalize_refill_limits
 
 NODES = ("expansion", "retrieval", "cleaning", "refill", "packaging")
 GROUP_QUOTAS_ENV = "DSH_GROUP_QUOTAS"
+
+
+def _normalize_query_input(value):
+    if value is None:
+        return None
+    if (not isinstance(value, dict)
+            or set(value) != {"type", "query_image_id", "digest", "exclude_exact_content"}
+            or value.get("type") != "reference_image"
+            or not isinstance(value.get("query_image_id"), str)
+            or re.fullmatch(r"qimg_[0-9a-f]{32}", value["query_image_id"]) is None
+            or not isinstance(value.get("digest"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", value["digest"]) is None
+            or type(value.get("exclude_exact_content")) is not bool):
+        raise invalid("invalid immutable reference image input", "$.query_spec.query_input")
+    return deepcopy(value)
 
 
 def normalize_proposal(body: dict) -> dict:
@@ -78,8 +94,9 @@ def normalize_proposal(body: dict) -> dict:
     except ValueError as error:
         raise invalid(str(error), "$.query_spec.refill_limits") from None
     grouped_expansion = spec.get("grouped_expansion")
+    query_input = _normalize_query_input(spec.get("query_input"))
     legacy = {k: v for k, v in spec.items()
-              if k not in required | {"grouped_expansion", "refill_limits"}}
+              if k not in required | {"grouped_expansion", "refill_limits", "query_input"}}
     legacy["schema_version"] = "query-spec@1"
     # Reuse field/rule validation, not the old wire contract or its defaults.
     legacy["allow_auto_refill"] = False
@@ -89,6 +106,8 @@ def normalize_proposal(body: dict) -> dict:
     normalized["schema_version"] = "query-spec@2"
     normalized.update({key: deepcopy(spec[key]) for key in required})
     normalized["refill_limits"] = refill_limits
+    if query_input is not None:
+        normalized["query_input"] = query_input
     if grouped_expansion is not None:
         try:
             normalized["grouped_expansion"] = normalize_grouped_expansion(grouped_expansion)

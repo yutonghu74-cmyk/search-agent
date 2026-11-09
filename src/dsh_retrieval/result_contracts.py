@@ -45,6 +45,57 @@ class GroupQuotaProgress:
 
 
 @dataclass(frozen=True, slots=True)
+class ResultExclusionDecision:
+    """Owner rejection applied to one result version, never to shared media."""
+
+    scope: str
+    source_candidate_id: str
+    candidate_ids: tuple[str, ...]
+    reason: str
+
+    def __post_init__(self):
+        if (self.scope not in {"candidate", "near_duplicate_cluster"}
+                or not isinstance(self.source_candidate_id, str)
+                or not self.source_candidate_id
+                or not isinstance(self.candidate_ids, tuple)
+                or not self.candidate_ids
+                or tuple(sorted(set(self.candidate_ids))) != self.candidate_ids
+                or self.source_candidate_id not in self.candidate_ids
+                or (self.scope == "candidate"
+                    and self.candidate_ids != (self.source_candidate_id,))
+                or not isinstance(self.reason, str)
+                or not 1 <= len(self.reason.strip()) <= 500
+                or self.reason != self.reason.strip()):
+            raise ValueError("invalid result exclusion decision")
+
+
+@dataclass(frozen=True, slots=True)
+class ManualReviewDecision:
+    """Owner verdict for one model-unknown candidate in one result lineage."""
+
+    source_operation_id: str
+    candidate_id: str
+    asset_version: str
+    action: str
+    reason: str
+    group_ids: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if (not all(isinstance(value, str) and value for value in (
+                self.source_operation_id, self.candidate_id, self.asset_version))
+                or self.action not in {"accept", "reject"}
+                or not isinstance(self.reason, str)
+                or not 1 <= len(self.reason.strip()) <= 500
+                or self.reason != self.reason.strip()
+                or not isinstance(self.group_ids, tuple)
+                or tuple(sorted(set(self.group_ids))) != self.group_ids
+                or any(not isinstance(value, str) or not value
+                       for value in self.group_ids)
+                or self.action == "reject" and self.group_ids):
+            raise ValueError("invalid manual review decision")
+
+
+@dataclass(frozen=True, slots=True)
 class ExactResultSetPreview:
     operation_id: str
     generation: int
@@ -64,13 +115,39 @@ class ExactResultSetPreview:
     near_duplicate_pairs: tuple[NearDuplicatePair, ...] = ()
     near_duplicate_decisions: tuple[NearDuplicateDecision, ...] = ()
     group_quotas: tuple[GroupQuotaProgress, ...] = ()
+    exclusion_decisions: tuple[ResultExclusionDecision, ...] = ()
+    manual_review_decisions: tuple[ManualReviewDecision, ...] = ()
+    # None preserves the legacy rule where near-duplicate decision count was
+    # the publication mutation count. New exclusion-aware lineages record it
+    # explicitly so inherited decisions do not inflate a later batch version.
+    publication_mutation_count: int | None = None
 
     @property
     def accepted_count(self):
         return len(self.accepted)
 
     @property
+    def user_excluded_count(self):
+        return sum(len(item.candidate_ids) for item in self.exclusion_decisions)
+
+    @property
     def result_set_digest(self):
+        if self.manual_review_decisions:
+            return digest({
+                "schema_version": "exact-result-preview@8",
+                "base": _preview_payload(self),
+                "exclusion_decisions": [_exclusion_payload(item)
+                                        for item in self.exclusion_decisions],
+                "manual_review_decisions": [_manual_review_payload(item)
+                                            for item in self.manual_review_decisions],
+            })
+        if self.exclusion_decisions:
+            return digest({
+                "schema_version": "exact-result-preview@7",
+                "base": _preview_payload(self),
+                "exclusion_decisions": [_exclusion_payload(item)
+                                        for item in self.exclusion_decisions],
+            })
         if self.group_quotas:
             return digest({
                 "schema_version": "exact-result-preview@6",
@@ -145,6 +222,64 @@ class ExactResultSetPreview:
                  "representative_candidate_id": decision.representative_candidate_id}
                 for decision in self.near_duplicate_decisions]
         return digest(payload)
+
+
+def _exclusion_payload(item):
+    return {"scope": item.scope,
+            "source_candidate_id": item.source_candidate_id,
+            "candidate_ids": list(item.candidate_ids),
+            "reason": item.reason}
+
+
+def _manual_review_payload(item):
+    return {"source_operation_id": item.source_operation_id,
+            "candidate_id": item.candidate_id,
+            "asset_version": item.asset_version,
+            "action": item.action,
+            "reason": item.reason,
+            "group_ids": list(item.group_ids)}
+
+
+def _preview_payload(preview):
+    """Stable full payload used only by the exclusion-aware schema."""
+    return {
+        "operation_id": preview.operation_id,
+        "generation": preview.generation,
+        "task_version": preview.task_version,
+        "cleaning_result_digest": preview.cleaning_result_digest,
+        "target_count": preview.target_count,
+        "accepted": [_quota_ref_payload(item) for item in preview.accepted],
+        "reserve": [_quota_ref_payload(item) for item in preview.reserve],
+        "duplicate_count": preview.duplicate_count,
+        "fail_count": preview.fail_count,
+        "unknown_count": preview.unknown_count,
+        "gap": preview.gap,
+        "stop_reason": preview.stop_reason,
+        "parent_result_set_id": preview.parent_result_set_id,
+        "parent_result_set_digest": preview.parent_result_set_digest,
+        "source_operation_ids": list(preview.source_operation_ids),
+        "near_duplicate_pairs": [{
+            "candidate_id": pair.candidate_id,
+            "other_candidate_id": pair.other_candidate_id,
+            "hamming_distance": pair.hamming_distance,
+            "review_threshold": pair.review_threshold,
+            "policy_ref": pair.policy_ref,
+        } for pair in preview.near_duplicate_pairs],
+        "near_duplicate_decisions": [{
+            "cluster_id": item.cluster_id,
+            "candidate_ids": list(item.candidate_ids),
+            "action": item.action,
+            "representative_candidate_id": item.representative_candidate_id,
+        } for item in preview.near_duplicate_decisions],
+        "group_quotas": [{
+            "group_id": row.group_id,
+            "target_count": row.target_count,
+            "accepted_count": row.accepted_count,
+            "eligible_reserve_count": row.eligible_reserve_count,
+            "gap": row.gap,
+        } for row in preview.group_quotas],
+        "publication_mutation_count": preview.publication_mutation_count,
+    }
 
 
 def _ref_payload(item, *, enriched=False, fingerprinted=False, quality_enriched=False):
@@ -385,7 +520,10 @@ def merge_exact_result_sets(parent_result_set_id: str,
             continue
         cross_batch_duplicates += 1
         representatives[ref.content_digest] = _merge_representatives(old, ref)
-    ordered = tuple(sorted(representatives.values(),
+    excluded_ids = {candidate_id for decision in parent.exclusion_decisions
+                    for candidate_id in decision.candidate_ids}
+    ordered = tuple(sorted((item for item in representatives.values()
+                            if item.candidate_id not in excluded_ids),
                            key=lambda ref: (ref.candidate_id, ref.asset_version,
                                             ref.content_digest)))
     group_targets = _group_targets(current)
@@ -409,7 +547,10 @@ def merge_exact_result_sets(parent_result_set_id: str,
         parent_result_set_id=parent_result_set_id,
         parent_result_set_digest=parent.result_set_digest,
         source_operation_ids=parent_sources + current_sources,
-        group_quotas=group_quotas)
+        group_quotas=group_quotas,
+        exclusion_decisions=parent.exclusion_decisions,
+        manual_review_decisions=parent.manual_review_decisions,
+        publication_mutation_count=0)
 
 
 def _group_targets(preview):
@@ -467,7 +608,132 @@ def apply_near_duplicate_decision(preview: ExactResultSetPreview,
         parent_result_set_digest=preview.parent_result_set_digest,
         source_operation_ids=preview.source_operation_ids,
         near_duplicate_pairs=remaining_pairs,
-        near_duplicate_decisions=preview.near_duplicate_decisions + (decision,))
+        near_duplicate_decisions=preview.near_duplicate_decisions + (decision,),
+        exclusion_decisions=preview.exclusion_decisions,
+        manual_review_decisions=preview.manual_review_decisions,
+        publication_mutation_count=(
+            (preview.publication_mutation_count
+             if preview.publication_mutation_count is not None
+             else len(preview.near_duplicate_decisions)) + 1
+            if preview.exclusion_decisions else None))
+
+
+def apply_result_exclusion(preview: ExactResultSetPreview,
+                           decision: ResultExclusionDecision, *,
+                           refill_policy=None, node_mode="manual"):
+    """Exclude an owner-selected item or a whole pending near-duplicate cluster."""
+    if (type(preview) is not ExactResultSetPreview
+            or type(decision) is not ResultExclusionDecision):
+        raise TypeError("preview and result exclusion decision required")
+    available = preview.accepted + preview.reserve
+    available_ids = {item.candidate_id for item in available}
+    if any(candidate_id not in available_ids for candidate_id in decision.candidate_ids):
+        raise ValueError("result exclusion member is unavailable")
+    if decision.scope == "near_duplicate_cluster":
+        cluster = next((item for item in near_duplicate_clusters(preview)
+                        if item.candidate_ids == decision.candidate_ids), None)
+        if cluster is None:
+            raise ValueError("near-duplicate cluster is no longer pending")
+    removed = set(decision.candidate_ids)
+    ordered = tuple(sorted((item for item in available
+                            if item.candidate_id not in removed),
+                           key=_representative_key))
+    if preview.group_quotas:
+        group_targets = tuple((row.group_id, row.target_count)
+                              for row in preview.group_quotas)
+        accepted, reserve, group_quotas = allocate_group_quotas(
+            ordered, group_targets)
+    else:
+        accepted = ordered[:preview.target_count]
+        reserve = ordered[preview.target_count:]
+        group_quotas = ()
+    gap = max(0, preview.target_count - len(accepted))
+    remaining_pairs = tuple(
+        pair for pair in preview.near_duplicate_pairs
+        if pair.candidate_id not in removed and pair.other_candidate_id not in removed)
+    return ExactResultSetPreview(
+        preview.operation_id, preview.generation, preview.task_version,
+        preview.cleaning_result_digest, preview.target_count, accepted, reserve,
+        preview.duplicate_count, preview.fail_count, preview.unknown_count, gap,
+        _stop_reason(preview.target_count, len(accepted), refill_policy, node_mode),
+        parent_result_set_id=preview.parent_result_set_id,
+        parent_result_set_digest=preview.parent_result_set_digest,
+        source_operation_ids=preview.source_operation_ids,
+        near_duplicate_pairs=remaining_pairs,
+        near_duplicate_decisions=preview.near_duplicate_decisions,
+        group_quotas=group_quotas,
+        exclusion_decisions=preview.exclusion_decisions + (decision,),
+        manual_review_decisions=preview.manual_review_decisions,
+        publication_mutation_count=(
+            (preview.publication_mutation_count
+             if preview.publication_mutation_count is not None
+             else len(preview.near_duplicate_decisions)) + 1))
+
+
+def apply_manual_review_decision(preview: ExactResultSetPreview,
+                                 decision: ManualReviewDecision,
+                                 candidate, *, sources=(),
+                                 refill_policy=None, node_mode="manual"):
+    """Resolve one model-unknown candidate and deterministically recount."""
+    if (type(preview) is not ExactResultSetPreview
+            or type(decision) is not ManualReviewDecision):
+        raise TypeError("preview and manual review decision required")
+    if (candidate.candidate_id != decision.candidate_id
+            or candidate.asset_version != decision.asset_version
+            or preview.unknown_count < 1
+            or decision.candidate_id in {
+                item.candidate_id for item in preview.accepted + preview.reserve}
+            or decision.candidate_id in {
+                item.candidate_id for item in preview.manual_review_decisions}):
+        raise ValueError("manual review candidate is no longer pending")
+    if preview.group_quotas and decision.action == "accept" and not decision.group_ids:
+        raise ValueError("manual acceptance requires a passed quota group")
+    representatives = {item.content_digest: item
+                       for item in preview.accepted + preview.reserve}
+    duplicate_count = preview.duplicate_count
+    fail_count = preview.fail_count
+    if decision.action == "accept":
+        reviewed = ExactRepresentative(
+            candidate.candidate_id, candidate.asset_version,
+            candidate.content_digest,
+            (candidate.candidate_id,) if sources else (), tuple(sources),
+            group_ids=decision.group_ids)
+        existing = representatives.get(reviewed.content_digest)
+        if existing is None:
+            representatives[reviewed.content_digest] = reviewed
+        else:
+            duplicate_count += 1
+            representatives[reviewed.content_digest] = _merge_representatives(
+                existing, reviewed)
+    else:
+        fail_count += 1
+    ordered = tuple(sorted(representatives.values(), key=_representative_key))
+    if preview.group_quotas:
+        targets = tuple((row.group_id, row.target_count)
+                        for row in preview.group_quotas)
+        accepted, reserve, group_quotas = allocate_group_quotas(ordered, targets)
+    else:
+        accepted = ordered[:preview.target_count]
+        reserve = ordered[preview.target_count:]
+        group_quotas = ()
+    gap = max(0, preview.target_count - len(accepted))
+    return ExactResultSetPreview(
+        preview.operation_id, preview.generation, preview.task_version,
+        preview.cleaning_result_digest, preview.target_count, accepted, reserve,
+        duplicate_count, fail_count, preview.unknown_count - 1, gap,
+        _stop_reason(preview.target_count, len(accepted), refill_policy, node_mode),
+        parent_result_set_id=preview.parent_result_set_id,
+        parent_result_set_digest=preview.parent_result_set_digest,
+        source_operation_ids=preview.source_operation_ids,
+        near_duplicate_pairs=preview.near_duplicate_pairs,
+        near_duplicate_decisions=preview.near_duplicate_decisions,
+        group_quotas=group_quotas,
+        exclusion_decisions=preview.exclusion_decisions,
+        manual_review_decisions=preview.manual_review_decisions + (decision,),
+        publication_mutation_count=(
+            (preview.publication_mutation_count
+             if preview.publication_mutation_count is not None
+             else len(preview.near_duplicate_decisions)) + 1))
 
 
 def _stop_reason(target_count, accepted_count, refill_policy, node_mode):

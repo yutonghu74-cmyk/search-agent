@@ -2,12 +2,15 @@ from http.server import ThreadingHTTPServer
 import json
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from dsh_retrieval.adapters.memory import InMemoryTaskRepository
 from dsh_retrieval.api import create_handler
-from draft_helpers import make_service
+from dsh_retrieval.errors import ServiceError
+from dsh_retrieval.models import Actor
+from draft_helpers import make_service, confirmation
 
 
 class CleaningFacade:
@@ -17,6 +20,11 @@ class CleaningFacade:
     def prepare(self, actor, task_id, manifest_ref):
         self.calls.append(("prepare", actor, task_id, manifest_ref))
         return {"kind": "cleaning_approval_proposal", "proposal_digest": "sha256:" + "1" * 64}
+
+    def prepare_incremental_recompute(self, actor, task_id):
+        self.calls.append(("prepare_recompute", actor, task_id))
+        return {"kind": "cleaning_approval_proposal", "candidate_count": 4,
+                "proposal_digest": "sha256:" + "2" * 64}
 
     def confirm(self, actor, task_id, proposal_digest, *, key,
                 expected_task_version, action):
@@ -30,7 +38,28 @@ class CleaningFacade:
 
     def steps(self, actor, task_id):
         self.calls.append(("steps", actor, task_id))
-        return {"available": True, "runs": []}
+        return {"task_id": task_id, "revision": 1, "generation": 1,
+                "available": True, "candidate_preview_available": True,
+                "runs": [{"operation_id": "clean_op", "output_version": "sha256:" + "c" * 64,
+                    "execution_mode": "shared_input_detection", "steps": [{
+                        "step_id": "semantic", "step_execution_id": "step_" + "a" * 64,
+                        "input_version": "sha256:" + "b" * 64, "backend_ref": "vlm@1",
+                        "status": "completed", "counts": {"input": 1, "retained": 0,
+                            "rejected": 1, "review": 0, "pending": 0, "blocked": 0},
+                        "rules": [], "items": [{"candidate_id": "candidate_" + "d" * 64,
+                            "asset_version": "v1", "status": "rejected",
+                            "preview_status": "unavailable", "reasons": [{
+                                "rule_id": "semantic", "verdict": "fail",
+                                "reason_code": "MISMATCH", "reason_summary": "不匹配",
+                                "reason_truncated": False}]}]}]}]}
+
+    def get_current_result_set(self, actor, task_id):
+        raise ServiceError("NOT_FOUND", "Current result set not found", 404)
+
+    def incremental_recompute(self, actor, task_id):
+        self.calls.append(("recompute", actor, task_id))
+        return {"available": True, "candidate_count": 3,
+                "revalidated_candidate_count": 2}
 
     def candidate_preview(self, actor, task_id, candidate_id):
         self.calls.append(("candidate_preview", actor, task_id, candidate_id))
@@ -60,14 +89,18 @@ class ConfirmedCleaningApiTest(unittest.TestCase):
 
     def setUp(self):
         self.cleaning = CleaningFacade()
-        handler = create_handler(make_service(InMemoryTaskRepository()),
+        service = make_service(InMemoryTaskRepository())
+        actor = Actor("tenant", "owner")
+        task, _ = service.create_task(actor, "task", confirmation(service, actor))
+        self.task_id = task["task_id"]
+        handler = create_handler(service,
                                  cleaning_service=self.cleaning)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self.close)
         self.base = (f"http://127.0.0.1:{self.server.server_port}"
-                     "/v1/retrieval/tasks/task_1/cleaning")
+                     f"/v1/retrieval/tasks/{self.task_id}/cleaning")
 
     def close(self):
         self.server.shutdown()
@@ -100,8 +133,43 @@ class ConfirmedCleaningApiTest(unittest.TestCase):
         self.assertEqual(self.request("/execute", body={"operation_id": "clean_op"})[1][
             "accepted_count"], 2)
         self.assertTrue(self.request("/steps", method="GET")[1]["available"])
+        summary = self.request("/steps?summary=true", method="GET")[1]
+        self.assertNotIn("items", summary["runs"][0]["steps"][0])
         self.assertEqual([call[0] for call in self.cleaning.calls],
-                         ["prepare", "confirm", "execute", "steps"])
+                         ["prepare", "confirm", "execute", "steps", "steps"])
+
+    def test_step_outputs_are_fixed_version_and_paginated(self):
+        query = (f"?operation_id=clean_op&step_execution_id=step_{'a' * 64}"
+                 f"&output_version=sha256:{'c' * 64}&view_type=rejected&limit=1")
+        path = (f"http://127.0.0.1:{self.server.server_port}/v1/retrieval/tasks/"
+                f"{self.task_id}/nodes/cleaning/outputs{query}")
+        request = Request(path, headers={"X-Tenant-Id": "tenant", "X-User-Id": "owner"})
+        with urlopen(request) as response:
+            body = json.loads(response.read())
+        self.assertEqual((body["schema_version"], body["total_items"],
+                          body["items"][0]["status"]),
+                         ("cleaning-step-outputs@1", 1, "rejected"))
+        self.assertEqual(body["items"][0]["preview_status"], "available")
+
+    def test_projected_step_page_skips_full_snapshot_and_forwards_filters(self):
+        handler = self.server.RequestHandlerClass
+        path = (f"http://127.0.0.1:{self.server.server_port}/v1/retrieval/tasks/"
+                f"{self.task_id}/nodes/cleaning/outputs?operation_id=op"
+                "&step_execution_id=s&output_version=v&view_type=input&limit=12"
+                "&rule_id=semantic&query=dog")
+        request = Request(path, headers={"X-Tenant-Id": "tenant", "X-User-Id": "owner"})
+        with patch.object(self.cleaning, 'step_output_read_page', create=True,
+                          return_value={'items': [], 'next_cursor': None}) as reader, \
+                patch.object(handler, '_task_snapshot', side_effect=AssertionError('full read')):
+            with urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+            self.assertEqual(reader.call_args.kwargs['rule_id'], 'semantic')
+            self.assertEqual(reader.call_args.kwargs['query'], 'dog')
+            self.assertEqual(reader.call_args.kwargs['limit'], 12)
+            reader.side_effect = ServiceError('FORBIDDEN', 'scope revoked', 403)
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request)
+            self.assertEqual(raised.exception.code, 403)
 
     def test_completed_candidate_preview_is_private_binary(self):
         candidate_id = 'candidate_' + 'a' * 64
@@ -112,6 +180,17 @@ class ConfirmedCleaningApiTest(unittest.TestCase):
                              (200, 'image/jpeg', b'\xff\xd8\xffpreview'))
             self.assertEqual(response.headers['Cache-Control'], 'private, no-store')
         self.assertEqual(self.cleaning.calls[-1][0], 'candidate_preview')
+
+    def test_incremental_recompute_view_is_read_only(self):
+        status, body, _ = self.request('/recompute', method='GET')
+        self.assertEqual((status, body['candidate_count'], body['revalidated_candidate_count']),
+                         (200, 3, 2))
+        self.assertEqual(self.cleaning.calls[-1][0], 'recompute')
+
+    def test_incremental_recompute_can_prepare_current_revision_job(self):
+        status, body, _ = self.request('/prepare', body={'incremental_recompute': True})
+        self.assertEqual((status, body['candidate_count']), (200, 4))
+        self.assertEqual(self.cleaning.calls[-1][0], 'prepare_recompute')
 
     def test_rejects_client_recipe_and_disabled_service(self):
         status, body, _ = self.request("/prepare", body={

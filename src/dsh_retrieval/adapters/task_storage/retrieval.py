@@ -127,6 +127,7 @@ class SQLiteRetrievalPlanRepository:
                 result = operation(memory, state)
                 if write:
                     db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                    self.tasks._sync_task_read_summaries(db, memory)
                     db.execute("UPDATE retrieval_ledger SET payload=? WHERE id=1", (dump_state(state),))
                 return result
         except sqlite3.Error as exc:

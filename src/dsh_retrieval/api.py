@@ -7,6 +7,7 @@ import sys
 import uuid
 import argparse
 import subprocess
+import time
 from datetime import datetime, timezone
 from contextlib import nullcontext
 from pathlib import Path
@@ -23,6 +24,8 @@ from .adapters.task_storage.sqlite import SQLiteTaskRepository
 from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
 from .production_board_ui import BOARD_CSS, BOARD_HTML, BOARD_JS
 from .progress_models import build_task_progress
+from .task_events import TaskEventFeed
+from .cleaning_step_outputs import StepOutputCursorError, build_step_output_page
 from .result_views import ResultCursorError, build_result_page
 from .expansion_models import preview_grouped_expansion, preview_edited_groups
 from .query_branches import build_query_branch_view
@@ -47,8 +50,12 @@ FEEDBACK_SUGGESTION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback-su
 FOLLOWUP_INTENT_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/followup-intent$")
 CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
 REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
+TASK_SUMMARY_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/summary$")
+READ_BINDING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/read-binding$")
 PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/progress$")
 RESULTS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/results$")
+RESULT_EXCLUSIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/result-exclusions$")
+MANUAL_REVIEWS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/manual-reviews$")
 PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
@@ -67,6 +74,8 @@ CATALOG_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/catalog-config(?:/(p
 ROUTING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/query-routing$")
 RETRIEVAL_PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/retrieval-progress$")
 AGENT_RUNS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/agent-runs$")
+TASK_EVENTS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/events$")
+TASK_EVENT_STREAM_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/events/stream$")
 FIRST_SEARCH_GET_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/(?:first-search(?:/(candidates(?:/changes)?|progress))?|(?P<candidate_view>candidates(?:/changes)?))$")
 FIRST_SEARCH_PREVIEW_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/(?:first-search/)?candidates/(candidate_[a-f0-9]{64})/preview$")
 FIRST_SEARCH_POST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-search/(prepare|confirm|tick)$")
@@ -74,10 +83,14 @@ FIRST_SEARCH_MANIFEST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/first-sea
 CLEANING_POST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/cleaning/(prepare|confirm|execute)$")
 CLEANING_PREVIEW_PATH = re.compile(
     r"^/v1/retrieval/tasks/([^/]+)/cleaning/candidates/(candidate_[a-f0-9]{64})/preview$")
+NODE_OUTPUTS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/nodes/([^/]+)/outputs$")
 REFILL_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/refill$")
+QUERY_IMAGES_PATH = re.compile(
+    r"^/v1/retrieval/projects/([^/]+)/query-images(?:/(qimg_[a-f0-9]{32})(?:/(preview))?)?$")
 
 
 class Handler(BaseHTTPRequestHandler):
+    browse_only = False
     server_version = "dsh-retrieval-p0"
     service: TaskService
     result_reader: Any = None
@@ -94,6 +107,11 @@ class Handler(BaseHTTPRequestHandler):
     refill_service: Any = None
     dialogue: Any = None
     expansion_jobs: Any = None
+    task_events: Any = None
+    query_images: Any = None
+    event_stream_duration = 25.0
+    event_stream_poll_interval = 1.0
+    event_stream_heartbeat_interval = 5.0
     build_info: dict[str, Any] = {}
 
     def _catalog_action(self, match, post=False):
@@ -122,6 +140,91 @@ class Handler(BaseHTTPRequestHandler):
         if not tenant_id or not user_id:
             raise ServiceError("UNAUTHENTICATED", "trusted gateway identity is required", 401)
         return Actor(tenant_id, user_id)
+
+    def _task_snapshot(self, actor, task_id, *, include_cleaning_items=False):
+        """Read one authoritative task snapshot and advance its event watermark."""
+        mutation_reader = getattr(self.task_events, 'task_mutation_sequence', None)
+        mutation = mutation_reader(task_id) if callable(mutation_reader) else None
+        task, proposal = self.service.current_read_binding(actor, task_id)
+        result_set = None
+        cleaning_view = None
+        paired_reader = getattr(self.cleaning_service, 'progress_inputs', None)
+        cleaning_reader = self.cleaning_service or self.cleaning_reader
+        fast_result = getattr(self.result_reader,
+                              'get_current_result_read_snapshot', None)
+        fast_steps = (getattr(cleaning_reader, 'steps_summary', None)
+                      if self.cleaning_service is not None else
+                      getattr(cleaning_reader, 'step_results_summary', None))
+        used_projection = False
+        if (not include_cleaning_items and callable(fast_result)
+                and callable(fast_steps)):
+            try:
+                try:
+                    result_set = fast_result(actor, task_id)
+                except ServiceError as error:
+                    if error.code != 'NOT_FOUND':
+                        raise
+                cleaning_view = fast_steps(actor, task_id)
+                used_projection = True
+            except ServiceError as error:
+                if (error.code != 'READ_PROJECTION_MISSING'
+                        or getattr(self.result_reader,
+                                   'require_read_projection', False)):
+                    raise
+                result_set = None
+                cleaning_view = None
+        if (not used_projection and paired_reader is not None
+                and self.result_reader is
+                getattr(self.cleaning_service, 'repository', None)):
+            result_set, cleaning_view = paired_reader(actor, task_id)
+        elif not used_projection and self.result_reader is not None:
+            try:
+                result_set = self.result_reader.get_current_result_set(actor, task_id)
+            except ServiceError as error:
+                if error.code != "NOT_FOUND":
+                    raise
+        raw_returned = None
+        if self.first_search is not None:
+            try:
+                raw_returned = self.first_search.candidate_count(actor, task_id)
+            except ServiceError as error:
+                if error.code not in ("PLAN_NOT_APPROVED", "PLAN_NOT_CURRENT"):
+                    raise
+        try:
+            progress = build_task_progress(
+                task, proposal, result_set, raw_returned=raw_returned).to_view()
+        except ValueError:
+            raise ServiceError("STORAGE_CORRUPT", "task progress binding is invalid", 500) from None
+        runs_reader = getattr(self.model_runtime, "agent_runs", None)
+        runs = runs_reader(actor.tenant_id, task_id) if runs_reader else []
+        cleaning_outputs = []
+        if cleaning_reader is not None:
+            if cleaning_view is None:
+                cleaning_view = (cleaning_reader.steps(actor, task_id)
+                    if self.cleaning_service is not None
+                    else cleaning_reader.step_results(actor, task_id))
+            for run in cleaning_view.get('runs', ()):
+                for step in run.get('steps', ()):
+                    cleaning_outputs.append({
+                        'operation_id': run.get('operation_id'),
+                        'step_execution_id': step.get('step_execution_id'),
+                        'step_id': step.get('step_id'),
+                        'output_version': run.get('output_version'),
+                        'counts': step.get('counts')})
+        if cleaning_view is None:
+            cleaning_view = {"available": False, "runs": []}
+        sequence = self.task_events.observe(actor, task, progress, result_set, runs,
+                                            cleaning_outputs, mutation_sequence=mutation)
+        progress["as_of_sequence"] = sequence
+        result_binding = None if result_set is None else {
+            key: result_set.get(key) for key in (
+                "result_set_id", "result_set_digest", "kind", "accepted_count",
+                "failed_count", "pending_review_count", "user_excluded_count", "gap")}
+        return {"task": task, "progress": progress,
+                "result_binding": result_binding, "executions": runs,
+                "step_outputs": cleaning_outputs,
+                "cleaning_view": cleaning_view,
+                "as_of_sequence": sequence}
 
     def _json(self, status: int, body: dict[str, Any], *, replayed: bool = False) -> None:
         encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -157,6 +260,21 @@ class Handler(BaseHTTPRequestHandler):
             raise ServiceError("INVALID_SPEC", "body must be an object", 422, field_path="$")
         return value
 
+    def _image_body(self) -> bytes:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0:
+            raise ServiceError("QUERY_IMAGE_EMPTY", "请选择一张参考图", 400)
+        from .query_images import MAX_QUERY_IMAGE_BYTES
+        if length > MAX_QUERY_IMAGE_BYTES:
+            raise ServiceError("QUERY_IMAGE_TOO_LARGE", "参考图不得超过 20 MB", 413)
+        value = self.rfile.read(length)
+        if len(value) != length:
+            raise ServiceError("QUERY_IMAGE_INVALID", "参考图上传不完整", 400)
+        return value
+
     def _run(self, action: Any) -> None:
         trace_id = self._trace_id()
         try:
@@ -170,6 +288,110 @@ class Handler(BaseHTTPRequestHandler):
             self._json(status, body, replayed=replayed)
         except ServiceError as error:
             self._json(error.status, error.as_dict(trace_id=trace_id))
+
+    def _event_cursor(self, parsed, task_id):
+        try:
+            params = parse_qs(parsed.query, keep_blank_values=True,
+                              strict_parsing=True)
+            if set(params) - {'after_sequence'} or any(
+                    len(values) != 1 for values in params.values()):
+                raise ValueError
+            query_value = params.get('after_sequence', [None])[0]
+            query_after = int(query_value) if query_value is not None else None
+            last_id = self.headers.get('Last-Event-ID')
+            header_after = None
+            if last_id:
+                prefix, separator, sequence = last_id.rpartition(':')
+                if not separator or prefix != task_id:
+                    raise ValueError
+                header_after = int(sequence)
+            if (query_after is not None and header_after is not None
+                    and query_after != header_after):
+                raise ValueError
+            after = (query_after if query_after is not None else
+                     header_after if header_after is not None else 0)
+            if after < 0:
+                raise ValueError
+            return after
+        except ValueError:
+            raise ServiceError('INVALID_EVENT_CURSOR',
+                               'invalid task event stream cursor', 422) from None
+
+    @staticmethod
+    def _sse_event(event):
+        data = json.dumps(event, ensure_ascii=False, separators=(',', ':'))
+        return (f"id: {event['event_id']}\n"
+                f"event: task-event\n"
+                f"data: {data}\n\n").encode('utf-8')
+
+    def _stream_task_events(self, parsed, task_id):
+        """Bounded SSE connection; clients reconnect from the durable sequence."""
+        actor = self._actor()
+        after = self._event_cursor(parsed, task_id)
+        scoped_reader = getattr(self.task_events, 'task_mutation_sequence', None)
+        mutation_reader = ((lambda: scoped_reader(task_id)) if callable(scoped_reader)
+                           else getattr(self.task_events, 'mutation_sequence', None))
+        observed_mutation = mutation_reader() if callable(mutation_reader) else None
+        task = self.service.task_read_summary(actor, task_id)
+        replay = getattr(self.task_events, 'can_replay', None)
+        snapshot = ({'task': task} if callable(replay) and replay(
+            actor, task, observed_mutation) else self._task_snapshot(actor, task_id))
+        page = self.task_events.read(actor, task_id, after_sequence=after, limit=100)
+        self.send_response(HTTPStatus.OK)
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('Cache-Control', 'no-cache, no-store')
+        self.send_header('X-Accel-Buffering', 'no')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.close_connection = True
+        deadline = time.monotonic() + max(0, self.event_stream_duration)
+        heartbeat_at = time.monotonic()
+        try:
+            self.wfile.write(b'retry: 1000\n\n')
+            while True:
+                for event in page['events']:
+                    self.wfile.write(self._sse_event(event))
+                    after = event['sequence']
+                if page['events']:
+                    self.wfile.flush()
+                if time.monotonic() >= deadline:
+                    break
+                if not page['has_more']:
+                    time.sleep(min(self.event_stream_poll_interval,
+                                   max(0, deadline - time.monotonic())))
+                    mutation = (mutation_reader() if callable(mutation_reader)
+                                else None)
+                    self.service.projects.require_access(actor,
+                        snapshot['task']['project_id'],
+                        snapshot['task']['dimension_id'], 'read')
+                    if mutation is None or mutation != observed_mutation:
+                        # Capture the watermark before the snapshot. A write
+                        # racing after this read remains visible next cycle.
+                        observed_mutation = mutation
+                        task = self.service.task_read_summary(actor, task_id)
+                        snapshot = ({'task': task} if callable(replay) and replay(
+                            actor, task, mutation) else self._task_snapshot(actor, task_id))
+                page = self.task_events.read(
+                    actor, task_id, after_sequence=after, limit=100)
+                if time.monotonic() >= heartbeat_at:
+                    self.wfile.write(
+                        f": heartbeat {page['as_of_sequence']}\n\n".encode('ascii'))
+                    self.wfile.flush()
+                    heartbeat_at = time.monotonic() + self.event_stream_heartbeat_interval
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except ServiceError as error:
+            # Headers are already committed. Send a bounded control event; the
+            # client then recovers through the ordinary JSON snapshot endpoint.
+            payload = json.dumps({'code': error.code, 'message': error.message},
+                                 ensure_ascii=False, separators=(',', ':'))
+            try:
+                self.wfile.write(
+                    f"event: stream-error\ndata: {payload}\n\n".encode('utf-8'))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def _model_settings_action(self, match, post=False):
         port = self.server.server_port
@@ -206,6 +428,24 @@ class Handler(BaseHTTPRequestHandler):
         return HTTPStatus.OK, result, False
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.browse_only:
+            self._json(503, {'code':'BROWSE_ONLY', 'message':'This validation instance is browse-only',
+                             'retryable':False, 'trace_id':self._trace_id()})
+            return
+        query_image_match = QUERY_IMAGES_PATH.fullmatch(urlsplit(self.path).path)
+        if query_image_match and query_image_match.group(2) is None:
+            def query_image_action():
+                if urlsplit(self.path).query:
+                    raise ServiceError("INVALID_SPEC", "参考图上传地址不接受查询参数", 422)
+                if self.query_images is None:
+                    raise ServiceError("QUERY_IMAGES_UNAVAILABLE", "参考图输入尚未启用", 503)
+                result, replayed = self.query_images.create(
+                    self._actor(), query_image_match.group(1),
+                    self.headers.get("Idempotency-Key", ""), self._image_body(),
+                    self.headers.get("Content-Type", ""))
+                return HTTPStatus.CREATED if not replayed else HTTPStatus.OK, result, replayed
+            self._run(query_image_action)
+            return
         refill_match = REFILL_PATH.fullmatch(self.path)
         if refill_match:
             def refill_action():
@@ -290,6 +530,45 @@ class Handler(BaseHTTPRequestHandler):
                 return HTTPStatus.OK, result, replayed
             self._run(delivery_action)
             return
+        result_exclusion_match = RESULT_EXCLUSIONS_PATH.fullmatch(self.path)
+        if result_exclusion_match:
+            def result_exclusion_action():
+                if self.result_reader is None or not callable(
+                        getattr(self.result_reader, 'exclude_result_candidates', None)):
+                    raise ServiceError('RESULT_FEEDBACK_UNAVAILABLE',
+                                       'Result exclusion is unavailable', 503)
+                body = self._body()
+                required = {'expected_task_version', 'result_set_digest',
+                            'candidate_id', 'scope', 'reason'}
+                if (not required <= set(body)
+                        or set(body) - required - {'cluster_id'}):
+                    raise ServiceError('INVALID_SPEC',
+                                       'Invalid result exclusion fields', 422)
+                result, replayed = self.result_reader.exclude_result_candidates(
+                    self._actor(), result_exclusion_match.group(1),
+                    key=self.headers.get('Idempotency-Key', ''), **body)
+                return HTTPStatus.OK, result, replayed
+            self._run(result_exclusion_action)
+            return
+        manual_review_match = MANUAL_REVIEWS_PATH.fullmatch(self.path)
+        if manual_review_match:
+            def manual_review_action():
+                if self.result_reader is None or not callable(
+                        getattr(self.result_reader, 'review_unknown_candidate', None)):
+                    raise ServiceError('MANUAL_REVIEW_UNAVAILABLE',
+                                       'Manual review is unavailable', 503)
+                body = self._body()
+                expected = {'expected_task_version', 'result_set_digest',
+                            'candidate_id', 'asset_version', 'action', 'reason'}
+                if set(body) != expected:
+                    raise ServiceError('INVALID_SPEC',
+                                       'Invalid manual review fields', 422)
+                result, replayed = self.result_reader.review_unknown_candidate(
+                    self._actor(), manual_review_match.group(1),
+                    key=self.headers.get('Idempotency-Key', ''), **body)
+                return HTTPStatus.OK, result, replayed
+            self._run(manual_review_action)
+            return
         settings_match = MODEL_SETTINGS_PATH.fullmatch(self.path)
         if settings_match:
             self._run(lambda: self._model_settings_action(settings_match, True))
@@ -322,9 +601,14 @@ class Handler(BaseHTTPRequestHandler):
                 actor = self._actor()
                 task_id, operation = cleaning_match.groups()
                 body = self._body()
-                if operation == 'prepare' and set(body) == {'manifest_ref'}:
-                    return HTTPStatus.OK, self.cleaning_service.prepare(
-                        actor, task_id, body['manifest_ref']), False
+                if operation == 'prepare':
+                    if set(body) == {'manifest_ref'}:
+                        return HTTPStatus.OK, self.cleaning_service.prepare(
+                            actor, task_id, body['manifest_ref']), False
+                    if body == {'incremental_recompute': True} and callable(
+                            getattr(self.cleaning_service, 'prepare_incremental_recompute', None)):
+                        return HTTPStatus.OK, self.cleaning_service.prepare_incremental_recompute(
+                            actor, task_id), False
                 if operation == 'confirm' and set(body) == {
                         'proposal_digest', 'expected_task_version', 'action'}:
                     result, replayed = self.cleaning_service.confirm(
@@ -622,6 +906,10 @@ class Handler(BaseHTTPRequestHandler):
         self._run(action)
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if self.browse_only:
+            self._json(503, {'code':'BROWSE_ONLY', 'message':'This validation instance is browse-only',
+                             'retryable':False, 'trace_id':self._trace_id()})
+            return
         path = urlsplit(self.path).path
         dialogue_match = DIALOGUE_SESSION_PATH.fullmatch(path)
         conversation_match = CONVERSATION_PATH.fullmatch(path)
@@ -665,6 +953,45 @@ class Handler(BaseHTTPRequestHandler):
                          'retryable': False, 'trace_id': self._trace_id()})
 
     def do_GET(self) -> None:  # noqa: N802
+        parsed = urlsplit(self.path)
+        query_image_match = QUERY_IMAGES_PATH.fullmatch(parsed.path)
+        if query_image_match and query_image_match.group(2):
+            project_id, query_image_id, operation = query_image_match.groups()
+            if operation == "preview":
+                trace_id = self._trace_id()
+                try:
+                    if parsed.query or self.query_images is None:
+                        raise ServiceError("NOT_FOUND", "参考图预览不存在", 404)
+                    content_type, content = self.query_images.preview(
+                        self._actor(), project_id, query_image_id)
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(content)))
+                    self.send_header("Cache-Control", "private, no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Referrer-Policy", "no-referrer")
+                    self.end_headers()
+                    self.wfile.write(content)
+                except ServiceError as error:
+                    self._json(error.status, error.as_dict(trace_id=trace_id))
+                return
+            def query_image_status_action():
+                if parsed.query:
+                    raise ServiceError("INVALID_SPEC", "参考图状态地址不接受查询参数", 422)
+                if self.query_images is None:
+                    raise ServiceError("QUERY_IMAGES_UNAVAILABLE", "参考图输入尚未启用", 503)
+                return HTTPStatus.OK, self.query_images.get(
+                    self._actor(), project_id, query_image_id), False
+            self._run(query_image_status_action)
+            return
+        event_stream_match = TASK_EVENT_STREAM_PATH.fullmatch(parsed.path)
+        if event_stream_match:
+            trace_id = self._trace_id()
+            try:
+                self._stream_task_events(parsed, event_stream_match.group(1))
+            except ServiceError as error:
+                self._json(error.status, error.as_dict(trace_id=trace_id))
+            return
         task_expansion_match = TASK_EXPANSION_JOBS_PATH.fullmatch(urlsplit(self.path).path)
         if task_expansion_match:
             def task_expansion_action():
@@ -696,6 +1023,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlsplit(self.path)
         path = parsed.path
+        history_match = re.fullmatch(r'/v1/retrieval/projects/([^/]+)/chat-history', path)
+        if history_match:
+            def history_action():
+                from .chat_history import page
+                params = parse_qs(parsed.query, keep_blank_values=True)
+                if set(params) - {'limit', 'cursor'} or any(len(v) != 1 for v in params.values()):
+                    raise ServiceError('INVALID_SPEC', 'Invalid history parameters', 422)
+                try:
+                    limit = int(params.get('limit', ['20'])[0])
+                except ValueError:
+                    raise ServiceError('INVALID_SPEC', 'Invalid history limit', 422) from None
+                return HTTPStatus.OK, page(self.service, self.dialogue, self._actor(),
+                    history_match.group(1), limit=limit, cursor=params.get('cursor', [None])[0]), False
+            self._run(history_action)
+            return
+        node_page_match = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/nodes/(packaging|refill)/items', path)
+        if node_page_match:
+            def node_page_action():
+                params = parse_qs(parsed.query, keep_blank_values=True)
+                if set(params) - {'limit', 'cursor'} or any(len(v) != 1 for v in params.values()):
+                    raise ServiceError('INVALID_SPEC', 'invalid node page parameters', 422)
+                try:
+                    limit = int(params.get('limit', ['24'])[0])
+                except ValueError:
+                    raise ServiceError('INVALID_SPEC', 'invalid page size', 422) from None
+                reader = getattr(self.service.repository, 'node_read_page', None)
+                if reader is None:
+                    raise ServiceError('READ_PROJECTION_REQUIRED', 'persistent node pages unavailable', 503)
+                return HTTPStatus.OK, reader(self._actor(), *node_page_match.groups(),
+                    limit=limit, cursor=params.get('cursor', [None])[0], projects=self.service.projects), False
+            self._run(node_page_action)
+            return
         delivery_match = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/delivery(?:/(package_[a-f0-9]{32})/download)?', path)
         if delivery_match:
             try:
@@ -786,11 +1145,112 @@ class Handler(BaseHTTPRequestHandler):
                     self._actor(), refill_match.group(1)), False
             self._run(refill_action)
             return
+        node_outputs_match = NODE_OUTPUTS_PATH.fullmatch(path)
+        if node_outputs_match:
+            def node_outputs_action():
+                actor = self._actor()
+                task_id, node_id = node_outputs_match.groups()
+                if node_id != 'cleaning':
+                    raise ServiceError('NODE_OUTPUT_NOT_SUPPORTED',
+                                       'Only cleaning step outputs are available', 422)
+                reader = self.cleaning_service or self.cleaning_reader
+                if reader is None:
+                    self.service.get_task(actor, task_id)
+                    raise ServiceError('CLEANING_NOT_CONFIGURED',
+                                       'Cleaning step outputs are unavailable', 503)
+                try:
+                    params = parse_qs(parsed.query, keep_blank_values=True,
+                                      strict_parsing=True)
+                    allowed = {'operation_id', 'step_execution_id', 'output_version',
+                               'view_type', 'reason_code', 'rule_id', 'query', 'limit', 'cursor',
+                               'as_of_sequence'}
+                    if (set(params) - allowed or any(len(values) != 1
+                            for values in params.values())
+                            or not {'operation_id', 'step_execution_id',
+                                    'output_version', 'view_type'} <= set(params)):
+                        raise ValueError
+                    limit = int(params.get('limit', ['20'])[0])
+                    requested_sequence = (int(params['as_of_sequence'][0])
+                                          if 'as_of_sequence' in params else None)
+                except ValueError:
+                    raise ServiceError('INVALID_STEP_OUTPUT_VIEW',
+                                       'Invalid cleaning step output query', 422) from None
+                page_reader = getattr(reader, 'step_output_read_page', None)
+                # The projected reader authorizes and binds the page in one read
+                # transaction. Only explicit event-watermark requests need the
+                # wider snapshot/compatibility path below.
+                if callable(page_reader) and requested_sequence is None:
+                    try:
+                        page = page_reader(actor, task_id,
+                            operation_id=params['operation_id'][0],
+                            step_execution_id=params['step_execution_id'][0],
+                            output_version=params['output_version'][0],
+                            view_type=params['view_type'][0],
+                            reason_code=params.get('reason_code', [None])[0],
+                            rule_id=params.get('rule_id', [None])[0],
+                            query=params.get('query', [None])[0], limit=limit,
+                            cursor=params.get('cursor', [None])[0])
+                        return HTTPStatus.OK, page, False
+                    except StepOutputCursorError as error:
+                        raise ServiceError('STEP_OUTPUT_CURSOR_STALE', str(error), 409) from None
+                    except ValueError as error:
+                        raise ServiceError('INVALID_STEP_OUTPUT_VIEW', str(error), 422) from None
+                    except ServiceError as error:
+                        if (error.code != 'READ_PROJECTION_MISSING'
+                                or getattr(reader, 'require_read_projection', False)):
+                            raise
+                snapshot = self._task_snapshot(actor, task_id,
+                    include_cleaning_items=not callable(page_reader))
+                if (requested_sequence is not None
+                        and requested_sequence > snapshot['as_of_sequence']):
+                    raise ServiceError('INVALID_EVENT_CURSOR',
+                                       'as_of_sequence is ahead of task state', 422)
+                data = snapshot['cleaning_view']
+                progress = snapshot['progress']
+                if (data.get('task_id') != task_id
+                        or data.get('revision') != progress['revision']
+                        or data.get('generation') != progress['run_generation']):
+                    raise ServiceError('REVISION_CONFLICT',
+                                       'Cleaning step output is no longer current', 409)
+                try:
+                    has_full_items = any('items' in step
+                        for run in data.get('runs', ())
+                        for step in run.get('steps', ()))
+                    page_builder = (page_reader if callable(page_reader)
+                                    and not has_full_items
+                                    else lambda actor, task_id, **kwargs:
+                                        build_step_output_page(data, **kwargs))
+                    page = page_builder(actor, task_id,
+                        operation_id=params['operation_id'][0],
+                        step_execution_id=params['step_execution_id'][0],
+                        output_version=params['output_version'][0],
+                        view_type=params['view_type'][0],
+                        reason_code=params.get('reason_code', [None])[0], limit=limit,
+                        rule_id=params.get('rule_id', [None])[0],
+                        query=params.get('query', [None])[0],
+                        cursor=params.get('cursor', [None])[0],
+                        as_of_sequence=snapshot['as_of_sequence'])
+                except StepOutputCursorError as error:
+                    raise ServiceError('STEP_OUTPUT_CURSOR_STALE', str(error), 409) from None
+                except ValueError as error:
+                    raise ServiceError('INVALID_STEP_OUTPUT_VIEW', str(error), 422) from None
+                return HTTPStatus.OK, page, False
+            self._run(node_outputs_action)
+            return
         cleaning_match = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/cleaning/steps', path)
         if cleaning_match:
             def cleaning_steps_action():
-                if parsed.query:
-                    raise ServiceError('INVALID_RESULT_VIEW', 'Unexpected query parameters', 422)
+                try:
+                    params = parse_qs(parsed.query, keep_blank_values=True,
+                                      strict_parsing=True)
+                    if set(params) - {'summary'} or any(len(values) != 1
+                            for values in params.values()) or params.get('summary', ['false'])[0] not in {
+                                'true', 'false'}:
+                        raise ValueError
+                    summary_only = params.get('summary', ['false'])[0] == 'true'
+                except ValueError:
+                    raise ServiceError('INVALID_RESULT_VIEW',
+                                       'Unexpected cleaning step query parameters', 422) from None
                 actor = self._actor()
                 task_id = cleaning_match.group(1)
                 reader = self.cleaning_service or self.cleaning_reader
@@ -798,10 +1258,43 @@ class Handler(BaseHTTPRequestHandler):
                     self.service.get_task(actor, task_id)
                     return HTTPStatus.OK, {'available': False, 'runs': [],
                         'note': '尚未产生可查看的清洗步骤结果。'}, False
-                result = (reader.steps(actor, task_id) if self.cleaning_service is not None
-                          else reader.step_results(actor, task_id))
+                summary_reader = (getattr(reader, 'steps_summary', None)
+                    if self.cleaning_service is not None else
+                    getattr(reader, 'step_results_summary', None)) if summary_only else None
+                if callable(summary_reader):
+                    try:
+                        result = summary_reader(actor, task_id)
+                    except ServiceError as error:
+                        if (error.code != 'READ_PROJECTION_MISSING'
+                                or getattr(reader, 'require_read_projection', False)):
+                            raise
+                        result = (reader.steps(actor, task_id)
+                                  if self.cleaning_service is not None else
+                                  reader.step_results(actor, task_id))
+                else:
+                    result = (reader.steps(actor, task_id) if self.cleaning_service is not None
+                              else reader.step_results(actor, task_id))
+                if summary_only:
+                    result = {**result, 'runs': [{**run, 'steps': [
+                        {key: value for key, value in step.items() if key != 'items'}
+                        for step in run.get('steps', ())]}
+                        for run in result.get('runs', ())]}
                 return HTTPStatus.OK, result, False
             self._run(cleaning_steps_action)
+            return
+        recompute_match = re.fullmatch(
+            r'/v1/retrieval/tasks/([^/]+)/cleaning/recompute', path)
+        if recompute_match:
+            def recompute_action():
+                if parsed.query:
+                    raise ServiceError('INVALID_RESULT_VIEW', 'Unexpected query parameters', 422)
+                if self.cleaning_service is None or not callable(
+                        getattr(self.cleaning_service, 'incremental_recompute', None)):
+                    raise ServiceError('CLEANING_NOT_CONFIGURED',
+                                       'Incremental recomputation is unavailable', 503)
+                return HTTPStatus.OK, self.cleaning_service.incremental_recompute(
+                    self._actor(), recompute_match.group(1)), False
+            self._run(recompute_action)
             return
         cleaning_status_match = re.fullmatch(
             r'/v1/retrieval/tasks/([^/]+)/cleaning/status', path)
@@ -928,6 +1421,42 @@ class Handler(BaseHTTPRequestHandler):
                                        'items': runs(actor.tenant_id, task_id) if runs else []}, False
             self._run(agent_runs_action)
             return
+        task_events_match = TASK_EVENTS_PATH.fullmatch(path)
+        if task_events_match:
+            def task_events_action():
+                actor = self._actor()
+                task_id = task_events_match.group(1)
+                try:
+                    params = parse_qs(parsed.query, keep_blank_values=True,
+                                      strict_parsing=True)
+                    if set(params) - {"after_sequence", "limit", "compact"} or any(
+                            len(values) != 1 for values in params.values()):
+                        raise ValueError
+                    if params.get("compact", ["false"])[0] not in ("true", "false"):
+                        raise ValueError
+                    after = int(params.get("after_sequence", ["0"])[0])
+                    limit = int(params.get("limit", ["100"])[0])
+                except ValueError:
+                    raise ServiceError("INVALID_EVENT_CURSOR",
+                                       "invalid task event query", 422) from None
+                if params.get('compact') == ['true']:
+                    task = self.service.task_read_summary(actor, task_id)
+                    mutation = self.task_events.task_mutation_sequence(task_id)
+                    if not self.task_events.can_replay(actor, task, mutation):
+                        self._task_snapshot(actor, task_id)
+                    return HTTPStatus.OK, {"schema_version": "task-events@1", "task_id": task_id,
+                        **self.task_events.read(actor, task_id, after_sequence=after, limit=limit)}, False
+                snapshot = self._task_snapshot(actor, task_id)
+                page = self.task_events.read(
+                    actor, task_id, after_sequence=after, limit=limit)
+                return HTTPStatus.OK, {"schema_version": "task-events@1",
+                    "task_id": task_id, **page,
+                    "snapshot": {"progress": snapshot["progress"],
+                                 "result_binding": snapshot["result_binding"],
+                                 "executions": snapshot["executions"],
+                                 "step_outputs": snapshot["step_outputs"]}}, False
+            self._run(task_events_action)
+            return
         if path == '/catalog':
             self._asset('text/html', CATALOG_HTML)
             return
@@ -960,6 +1489,8 @@ class Handler(BaseHTTPRequestHandler):
         draft_match = DRAFT_PATH.fullmatch(path)
         feedback_match = FEEDBACK_PATH.fullmatch(path)
         revisions_match = REVISIONS_PATH.fullmatch(path)
+        task_summary_match = TASK_SUMMARY_PATH.fullmatch(path)
+        read_binding_match = READ_BINDING_PATH.fullmatch(path)
         progress_match = PROGRESS_PATH.fullmatch(path)
         results_match = RESULTS_PATH.fullmatch(path)
         project_tasks_match = PROJECT_TASKS_PATH.fullmatch(path)
@@ -969,7 +1500,8 @@ class Handler(BaseHTTPRequestHandler):
         models_match = MODELS_PATH.fullmatch(path)
         if (match is None and not (draft_match and draft_match.group(2))
                 and not (feedback_match and feedback_match.group(2))
-                and revisions_match is None and progress_match is None and results_match is None
+                and revisions_match is None and read_binding_match is None
+                and task_summary_match is None and progress_match is None and results_match is None
                 and project_tasks_match is None
                 and project_conversations_match is None and conversation_match is None and branches_match is None and models_match is None):
             self._json(404, {"code": "NOT_FOUND", "message": "route was not found", "retryable": False, "trace_id": self._trace_id()})
@@ -984,10 +1516,7 @@ class Handler(BaseHTTPRequestHandler):
             if branches_match:
                 actor = self._actor()
                 task_id = branches_match.group(1)
-                task = self.service.get_task(actor, task_id)
-                revisions = self.service.list_revisions(actor, task_id)
-                proposal = next((item["proposal"] for item in revisions
-                                 if item["revision"] == task["confirmed_revision"]), None)
+                task, proposal = self.service.current_read_binding(actor, task_id)
                 try:
                     result = build_query_branch_view(task, proposal)
                 except ValueError:
@@ -1005,37 +1534,24 @@ class Handler(BaseHTTPRequestHandler):
             if revisions_match:
                 return HTTPStatus.OK, {"items": list(self.service.list_revisions(
                     self._actor(), revisions_match.group(1)))}, False
+            if task_summary_match:
+                if parsed.query:
+                    raise ServiceError("INVALID_REQUEST", "Unexpected query parameters", 422)
+                return HTTPStatus.OK, self.service.task_read_summary(
+                    self._actor(), task_summary_match.group(1)), False
+            if read_binding_match:
+                task, proposal = self.service.current_read_binding(
+                    self._actor(), read_binding_match.group(1))
+                return HTTPStatus.OK, {'task': task, 'proposal': proposal,
+                    'revision': task['confirmed_revision'],
+                    'proposal_digest': digest({'project_id': task['project_id'],
+                                               'proposal': proposal})}, False
             if progress_match:
                 actor = self._actor()
-                task = self.service.get_task(actor, progress_match.group(1))
-                revisions = self.service.list_revisions(actor, progress_match.group(1))
-                proposal = next((item["proposal"] for item in revisions
-                                 if item["revision"] == task["confirmed_revision"]), None)
-                result_set = None
-                if self.result_reader is not None:
-                    try:
-                        result_set = self.result_reader.get_current_result_set(actor, task["task_id"])
-                    except ServiceError as error:
-                        if error.code != "NOT_FOUND":
-                            raise
-                raw_returned = None
-                if self.first_search is not None:
-                    try:
-                        raw_returned = self.first_search.candidate_count(actor, task["task_id"])
-                    except ServiceError as error:
-                        if error.code not in ("PLAN_NOT_APPROVED", "PLAN_NOT_CURRENT"):
-                            raise
-                try:
-                    return HTTPStatus.OK, build_task_progress(
-                        task, proposal, result_set, raw_returned=raw_returned).to_view(), False
-                except ValueError:
-                    raise ServiceError("STORAGE_CORRUPT", "task progress binding is invalid", 500) from None
+                return HTTPStatus.OK, self._task_snapshot(
+                    actor, progress_match.group(1))["progress"], False
             if results_match:
                 actor = self._actor()
-                task = self.service.get_task(actor, results_match.group(1))
-                revisions = self.service.list_revisions(actor, results_match.group(1))
-                proposal = next((item["proposal"] for item in revisions
-                                 if item["revision"] == task["confirmed_revision"]), None)
                 try:
                     params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
                     if set(params) - {"view", "limit", "cursor"} or any(len(values) != 1 for values in params.values()):
@@ -1045,10 +1561,42 @@ class Handler(BaseHTTPRequestHandler):
                     cursor = params.get("cursor", [None])[0]
                 except (ValueError, TypeError):
                     raise ServiceError("INVALID_RESULT_VIEW", "result view query is invalid", 422) from None
+                if self.result_reader is not None:
+                    page_reader = getattr(self.result_reader, 'get_result_read_page', None)
+                    if callable(page_reader):
+                        try:
+                            return HTTPStatus.OK, page_reader(actor, results_match.group(1),
+                                view_type=view_type, limit=limit, cursor=cursor), False
+                        except ServiceError as error:
+                            if (error.code not in {'READ_PROJECTION_MISSING', 'NOT_FOUND'}
+                                    or getattr(self.result_reader,
+                                               'require_read_projection', False)
+                                    and error.code == 'READ_PROJECTION_MISSING'):
+                                raise
+                        except ResultCursorError as error:
+                            raise ServiceError("INVALID_CURSOR", str(error), 422) from None
+                        except ValueError:
+                            raise ServiceError("INVALID_RESULT_VIEW", "invalid result page parameters", 422) from None
+                task, proposal = self.service.current_read_binding(
+                    actor, results_match.group(1))
                 result_set = None
                 if self.result_reader is not None:
                     try:
-                        result_set = self.result_reader.get_current_result_set(actor, task["task_id"])
+                        reader = getattr(self.result_reader,
+                                         'get_current_result_read_snapshot', None)
+                        if callable(reader):
+                            try:
+                                result_set = reader(actor, task["task_id"])
+                            except ServiceError as error:
+                                if (error.code != 'READ_PROJECTION_MISSING'
+                                        or getattr(self.result_reader,
+                                                   'require_read_projection', False)):
+                                    raise
+                                result_set = self.result_reader.get_current_result_set(
+                                    actor, task["task_id"])
+                        else:
+                            result_set = self.result_reader.get_current_result_set(
+                                actor, task["task_id"])
                     except ServiceError as error:
                         if error.code != "NOT_FOUND":
                             raise
@@ -1060,6 +1608,21 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise ServiceError("STORAGE_CORRUPT", "current result view is invalid", 500) from None
             if project_tasks_match:
+                if parsed.query:
+                    try:
+                        params = parse_qs(parsed.query, keep_blank_values=True,
+                                          strict_parsing=True)
+                        if (set(params) - {'limit', 'cursor'}
+                                or any(len(values) != 1 for values in params.values())):
+                            raise ValueError
+                        limit = int(params.get('limit', ['20'])[0])
+                        cursor = params.get('cursor', [None])[0]
+                    except (ValueError, TypeError):
+                        raise ServiceError('INVALID_CURSOR',
+                                           'Task page query is invalid', 422) from None
+                    return HTTPStatus.OK, self.service.list_tasks_page(
+                        self._actor(), project_tasks_match.group(1),
+                        limit=limit, cursor=cursor), False
                 return HTTPStatus.OK, {"items": list(self.service.list_tasks(
                     self._actor(), project_tasks_match.group(1)))}, False
             if project_conversations_match:
@@ -1076,8 +1639,16 @@ class Handler(BaseHTTPRequestHandler):
                         actor, conversation['project_id'], latest['task_id'], limit=100)
                     clarification_messages = self.dialogue.store.task_origin(
                         actor, conversation['project_id'], conversation['confirmations'][0]['task_id'])
+                executions = []
+                runs_reader = getattr(self.model_runtime, 'agent_runs', None)
+                for task_id in dict.fromkeys(item['task_id']
+                                             for item in conversation['confirmations']):
+                    self.service.get_task(actor, task_id)
+                    executions.append({'task_id': task_id,
+                        'runs': runs_reader(actor.tenant_id, task_id) if runs_reader else []})
                 return HTTPStatus.OK, {**conversation, 'task_messages': task_messages,
-                                       'clarification_messages': clarification_messages}, False
+                                       'clarification_messages': clarification_messages,
+                                       'executions': executions}, False
             return HTTPStatus.OK, self.service.get_task(self._actor(), match.group(1)), False
 
         self._run(action)
@@ -1091,11 +1662,13 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
                    routing_preview=None, plan_set_repository=None, first_search=None, dialogue=None,
                    search_dispatch=None, build_info=None, cleaning_reader=None,
                    cleaning_service=None, cleaning_dispatch=None, delivery_service=None,
-                   expansion_jobs=None, refill_service=None) -> type[Handler]:
+                   expansion_jobs=None, refill_service=None, task_events=None,
+                   query_images=None, browse_only=False) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
 
+    BoundHandler.browse_only = browse_only
     BoundHandler.service = service
     BoundHandler.result_reader = result_reader if result_reader is not None else cleaning_reader
     BoundHandler.cleaning_reader = cleaning_reader
@@ -1111,6 +1684,9 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.refill_service = refill_service
     BoundHandler.dialogue = dialogue
     BoundHandler.expansion_jobs = expansion_jobs
+    BoundHandler.task_events = task_events or TaskEventFeed(
+        getattr(getattr(service, 'repository', None), 'path', None))
+    BoundHandler.query_images = query_images
     BoundHandler.build_info = build_info or {}
     return BoundHandler
 
@@ -1129,6 +1705,7 @@ def source_version(root: Path) -> tuple[str | None, bool | None]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Local development only; simulated identity headers, no W3")
+    parser.add_argument("--browse-only", action="store_true", help="disable business writes and worker recovery for isolated browsing validation")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--demo-project", action="store_true", help="grant tenant-a/user-a access to demo/default")
     parser.add_argument("--ledger", help="local SQLite ledger path; omitted means in-memory storage")
@@ -1157,6 +1734,8 @@ def main() -> None:
                         help='capabilities matching the prior LOCAL_EXACT fixture')
     parser.add_argument('--local-test-media-manifest',
                         help='validated local image manifest used by the real VLM cleaning worker')
+    parser.add_argument('--require-task-read-projection', action='store_true',
+                        help='fail closed when a published preview lacks its migrated read binding')
     parser.add_argument('--local-clip-model',
                         help='offline CLIP model directory for real embeddings of local test images')
     parser.add_argument('--clip-search-physical-indexes',
@@ -1198,6 +1777,8 @@ def main() -> None:
     if any(clip_values) and not all(clip_values):
         parser.error('combined CLIP search requires --clip-search-physical-indexes, '
                      '--clip-search-endpoints and --clip-search-jobs together')
+    if args.browse_only and all(clip_values):
+        parser.error('--browse-only currently supports the local fixture adapter only')
     if args.clip_search_media_mappings and not all(clip_values):
         parser.error('--clip-search-media-mappings requires combined CLIP search configuration')
     if all(clip_values) and (args.local_first_search_fixture or not (args.ledger and args.catalog_source
@@ -1218,7 +1799,7 @@ def main() -> None:
             parser.error('DSH requires --dsh-python and --dsh-home (or explicit DSH_HOME)')
         runtime = DshModelRuntime(runtime.profiles.values(), python=args.dsh_python, home=home)
         runtime.check_installation()
-        recovered = runtime.recover()
+        recovered = runtime.recover() if not args.browse_only else {'runs':0,'audits':0}
         if any(recovered.values()):
             print(f"DSH recovery: closed {recovered['runs']} indexed and {recovered['audits']} "
                   "audited run(s) as interrupted", file=sys.stderr)
@@ -1227,7 +1808,10 @@ def main() -> None:
         runtime.settings = ModelSettings(args.model_settings_store, args.model_key_file,
             [p.config.base_url for p in runtime.profiles.values()] + args.model_allowed_url)
     catalog = build_local_catalog(args.catalog_source, args.catalog_ledger, runtime) if args.catalog_source else None
-    service = TaskService(repository, LocalProjectAccess(grants))
+    from .query_images import QueryImageService
+    projects = LocalProjectAccess(grants)
+    query_images = QueryImageService(projects, Path(args.ledger) if args.ledger else None)
+    service = TaskService(repository, projects, query_images)
     dialogue = DialogueCoordinator(DialogueStore(Path(args.dialogue_ledger) if args.dialogue_ledger else None),
                                    runtime, service.projects)
     expansion_jobs = ExpansionJobs(Path(args.dialogue_ledger) if args.dialogue_ledger else None,
@@ -1245,7 +1829,7 @@ def main() -> None:
             fixture_path=args.local_first_search_fixture, cursor_secret=secret,
             legacy_fixture_path=args.local_first_search_legacy_fixture,
             legacy_capabilities_path=args.local_first_search_legacy_capabilities,
-            clip_model_path=args.local_clip_model)
+            clip_model_path=args.local_clip_model, start=not args.browse_only)
         plan_sets = first_search.repository
     elif all(clip_values):
         secret = os.environ.get('DSH_LOCAL_CURSOR_SECRET', '').encode()
@@ -1268,12 +1852,13 @@ def main() -> None:
                   'model_engine': runtime.status().get('engine'),
                   'retrieval_mode': (getattr(first_search, 'mode', 'local_fixture')
                                      if first_search else 'unconfigured'),
-                  'identity_mode': 'demo' if args.demo_project else 'external'}
+                  'identity_mode': 'demo' if args.demo_project else 'external',
+                  'browse_only':args.browse_only}
     search_dispatch = (SearchDispatchCoordinator(repository, first_search)
-                       if first_search is not None and isinstance(repository, SQLiteTaskRepository)
+                       if not args.browse_only and first_search is not None and isinstance(repository, SQLiteTaskRepository)
                        else None)
     refill_runtime = (build_refill_runtime(args.ledger, service, first_search)
-                      if args.ledger and first_search is not None else None)
+                      if not args.browse_only and args.ledger and first_search is not None else None)
     cleaning_reader = None
     cleaning_service = None
     cleaning_dispatch = None
@@ -1283,6 +1868,7 @@ def main() -> None:
         from .adapters.task_storage.multi_rule import SQLiteMultiRuleApprovalRepository
         cleaning_reader = SQLiteMultiRuleApprovalRepository(args.ledger,
             projects=service.projects, authorization=first_search._authority())
+        cleaning_reader.require_read_projection = args.require_task_read_projection
         if args.local_test_media_manifest:
             from .cleaning_dispatch import CleaningDispatchCoordinator
             from .confirmed_cleaning import ConfirmedCleaningService
@@ -1292,9 +1878,10 @@ def main() -> None:
             first_search.media_gateway = gateway
             cleaning_service = ConfirmedCleaningService(
                 cleaning_reader, registry_provider=ConfirmedTaskVLMRegistry(runtime),
-                gateway=gateway)
+                gateway=gateway,
+                require_read_projection=args.require_task_read_projection)
             cleaning_dispatch = CleaningDispatchCoordinator(
-                cleaning_reader, cleaning_service)
+                cleaning_reader, cleaning_service, start=not args.browse_only)
             from .delivery import ImageDeliveryService
             delivery_service = ImageDeliveryService(cleaning_reader, gateway)
     if refill_runtime is not None and cleaning_reader is not None:
@@ -1313,9 +1900,11 @@ def main() -> None:
                              cleaning_service=cleaning_service,
                              delivery_service=delivery_service,
                              cleaning_dispatch=cleaning_dispatch,
-                             refill_service=refill_service)
+                             refill_service=refill_service,
+                             query_images=query_images, browse_only=args.browse_only)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    expansion_jobs.recover()
+    if not args.browse_only:
+        expansion_jobs.recover()
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
     try:

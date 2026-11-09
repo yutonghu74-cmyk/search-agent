@@ -77,6 +77,18 @@ class PlanSetStorageTest(unittest.TestCase):
         events = self.repo._transaction(False, lambda memory, state: state['events'])
         self.assertEqual(len(events), 1)
 
+    def test_current_headers_do_not_decode_pages_and_still_recheck_grants(self):
+        self.repo.put_proposal(self.actor, self.proposal)
+        approved, _ = self.confirm()
+        with patch('dsh_retrieval.adapters.task_storage.plan_sets.restore',
+                   side_effect=AssertionError('decoded complete page history')):
+            self.assertEqual(self.repo.get_browse_current(self.actor, self.task_id), approved)
+            self.assertEqual(self.repo.get_current(self.actor, self.task_id), approved)
+            self.denied.add('library:lib0')
+            with self.assertRaises(ServiceError) as error:
+                self.repo.get_browse_current(self.actor, self.task_id)
+            self.assertEqual(error.exception.code, 'ACCESS_DENIED')
+
     def test_replacement_does_not_reactivate_old_set(self):
         self.repo.put_proposal(self.actor, self.proposal)
         first, _ = self.confirm()

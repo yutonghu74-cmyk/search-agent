@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from dataclasses import replace
 from io import BytesIO
 import json
 import time
@@ -168,3 +169,22 @@ class PlanSetCleaningBridgeTest(unittest.TestCase):
             f.ledger, projects=f.projects,
             authorization=f.local._authority()).get_current_result_set(f.actor, task_id),
             second_view)
+
+        def legacy_count(memory, retrieval, candidates, state):
+            result_id = state['current_result_sets'][task_id]
+            preview, version = state['result_sets'][result_id]
+            state['result_sets'][result_id] = (
+                replace(preview, publication_mutation_count=None), version)
+        repo._transaction(True, legacy_count)
+        reopened = SQLiteMultiRuleApprovalRepository(
+            f.ledger, projects=f.projects, authorization=f.local._authority())
+        self.assertEqual(reopened.get_current_result_set(f.actor, task_id), second_view)
+
+        def corrupt_count(memory, retrieval, candidates, state):
+            result_id = state['current_result_sets'][task_id]
+            preview, version = state['result_sets'][result_id]
+            state['result_sets'][result_id] = (replace(preview, fail_count=99), version)
+        repo._transaction(True, corrupt_count)
+        with self.assertRaises(ServiceError) as error:
+            reopened.get_current_result_set(f.actor, task_id)
+        self.assertEqual(error.exception.code, 'STORAGE_CORRUPT')

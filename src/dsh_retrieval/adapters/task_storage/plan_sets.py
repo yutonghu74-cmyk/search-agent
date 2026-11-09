@@ -14,7 +14,7 @@ from ...candidate_contracts import (CandidateManifest, CandidateManifestProposal
 from ...integration_models import AccessContext, MediaRecord, SearchHit
 from ...models import RunStatus
 from ...models import Actor
-from ...multi_branch_contracts import (PlanSetMemberProgress, plan_origin_groups, validate_plan_set,
+from ...multi_branch_contracts import (RetrievalPlanSet, PlanSetMemberProgress, plan_origin_groups, validate_plan_set,
                                         validate_set_confirmation, validate_member_execution)
 from ...query_spec import digest
 from ...retrieval_contracts import RetrievalScope, validate_page
@@ -212,6 +212,7 @@ class SQLitePlanSetApprovalRepository:
                     db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (task_payload,))
                     db.execute('UPDATE plan_set_ledger SET format=3,payload=? WHERE id=1', (set_payload,))
                     self._project_hits(db, {'operations': {key: value for key, value in state['operations'].items() if key not in committed_before}})
+                    self.tasks._sync_task_read_summaries(db, memory)
                 return result
         except sqlite3.Error as error:
             raise ServiceError('STORAGE_UNAVAILABLE', 'Plan set transaction failed', 503) from error
@@ -297,7 +298,40 @@ class SQLitePlanSetApprovalRepository:
                 validate_plan_set(actor, task, current)
                 self._authorize(memory, actor, task_id, current)
             return current
-        return self._transaction(False, read)
+        return self._current_transaction(read)
+
+    def _current_transaction(self, operation):
+        """Read approved headers without decoding every historical search page.
+
+        SQLite extracts the existing current section in the same read snapshot
+        as the task. Callers still validate scope and current library grants.
+        This is not a cached authorization or an independently stored projection.
+        """
+        try:
+            with closing(self.tasks._connect()) as db, db:
+                db.execute('BEGIN')
+                memory = self.tasks._load(db.execute(
+                    'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+                rows = db.execute('''SELECT ledger.format,
+                    json_extract(ledger.payload, '$.type'),
+                    json_extract(section.value, '$[1]')
+                    FROM plan_set_ledger AS ledger,
+                         json_each(ledger.payload, '$.value') AS section
+                    WHERE ledger.id=1 AND json_extract(section.value, '$[0]')='current'
+                ''').fetchall()
+                if (len(rows) != 1 or rows[0][0] not in (1, 2, 3)
+                        or rows[0][1] != 'dict'):
+                    raise ValueError('invalid current plan section')
+                current = decode(json.loads(rows[0][2]))
+                if (type(current) is not dict or any(
+                        type(key) is not str or type(value) is not RetrievalPlanSet
+                        for key, value in current.items())):
+                    raise ValueError('invalid current plans')
+                return operation(memory, {'current': current})
+        except (ValueError, TypeError, KeyError, RecursionError) as error:
+            raise ServiceError('STORAGE_CORRUPT', 'Invalid current plan ledger', 500) from error
+        except sqlite3.Error as error:
+            raise ServiceError('STORAGE_UNAVAILABLE', 'Plan set transaction failed', 503) from error
 
     def get_browse_current(self, actor, task_id):
         """Current approved search remains readable after same-revision cleaning advances task_version."""
@@ -313,7 +347,7 @@ class SQLitePlanSetApprovalRepository:
             validate_plan_set(actor, replace(task, task_version=current.scope.task_version,
                                             run_status=RunStatus.RUNNING, stage='retrieving'), current)
             return current
-        return self._transaction(False, read)
+        return self._current_transaction(read)
 
     def next_epoch(self, actor, task_id):
         """Return the next monotonic epoch without validating a superseded current set."""

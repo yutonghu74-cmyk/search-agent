@@ -52,6 +52,98 @@ class SQLiteTest(unittest.TestCase):
         self.assertTrue(replay)
         self.assertEqual(task["task_id"], tid)
 
+    def test_task_list_reads_pending_feedback_in_one_ledger_snapshot(self):
+        tid = self.create()
+        with patch.object(self.repo, '_call', wraps=self.repo._call) as calls:
+            rows = self.tasks.list_tasks(self.actor, 'demo')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['task_id'], tid)
+        self.assertEqual(calls.call_count, 1)
+        with patch.object(self.repo, '_call', wraps=self.repo._call) as calls:
+            page = self.tasks.list_tasks_page(self.actor, 'demo', limit=20)
+        self.assertEqual(page['items'][0]['task_id'], tid)
+        self.assertEqual(calls.call_count, 0)
+        with patch.object(self.repo, '_load', side_effect=AssertionError(
+                'task page must not deserialize the local ledger')):
+            self.assertEqual(self.tasks.list_tasks_page(
+                self.actor, 'demo', limit=20), page)
+            self.assertEqual(self.tasks.current_read_binding(
+                self.actor, tid)[0]['task_id'], tid)
+
+    def test_task_read_summary_migration_and_cascade(self):
+        tid = self.create()
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute('DELETE FROM task_read_summaries')
+            db.execute('DELETE FROM task_read_summaries_meta')
+        # An unmigrated ledger retains its compatible read path.
+        self.assertEqual(self.tasks.list_tasks_page(
+            self.actor, 'demo')['items'][0]['task_id'], tid)
+        self.assertEqual(self.repo.rebuild_task_read_summaries(), 1)
+        reopened = make_service(SQLiteTaskRepository(self.db))
+        with patch.object(reopened.repository, '_load', side_effect=AssertionError(
+                'migrated task page must use persisted rows')):
+            self.assertEqual(reopened.list_tasks_page(
+                self.actor, 'demo')['items'][0]['task_id'], tid)
+        conversation_id = reopened.get_task(self.actor, tid)['conversation_id']
+        reopened.hard_delete_conversation(self.actor, conversation_id)
+        self.assertEqual(reopened.list_tasks_page(self.actor, 'demo')['items'], [])
+        with closing(sqlite3.connect(self.db)) as db:
+            self.assertEqual(db.execute(
+                'SELECT COUNT(*) FROM task_read_summaries').fetchone(), (0,))
+
+    def test_task_read_summary_missing_row_fails_closed(self):
+        tid = self.create()
+        with closing(sqlite3.connect(self.db)) as db, db:
+            db.execute('DELETE FROM task_read_summaries WHERE task_id=?', (tid,))
+        with self.assertRaises(ServiceError) as failure:
+            self.tasks.list_tasks_page(self.actor, 'demo')
+        self.assertEqual(failure.exception.code, 'STORAGE_CORRUPT')
+
+    def test_progress_summary_failure_rolls_back_confirmation(self):
+        with patch.object(SQLiteTaskRepository, '_task_progress_summary',
+                          side_effect=ValueError('invalid progress')):
+            with self.assertRaises(ServiceError) as failure:
+                self.create()
+        self.assertEqual(failure.exception.code, 'STORAGE_CORRUPT')
+        self.assertEqual(self.tasks.list_tasks_page(self.actor, 'demo')['items'], [])
+        self.assertEqual(self.repo.pending_search_dispatches(), ())
+
+    def test_unprojected_ledger_write_invalidates_task_binding(self):
+        from dsh_retrieval.adapters.task_storage.sqlite import dump
+        tid = self.create()
+        with closing(self.repo._connect()) as db, db:
+            memory = self.repo._load(db.execute(
+                'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+            memory._tasks[tid].task_version += 1
+            expected = memory._tasks[tid].task_version
+            db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (dump(memory),))
+            self.assertEqual(db.execute('SELECT dirty FROM task_read_summaries_meta '
+                'WHERE id=1').fetchone(), (1,))
+        self.assertEqual(self.repo.get_task_read_binding(self.actor, tid).task_version, expected)
+        self.repo.rebuild_task_read_summaries()
+        with patch.object(self.repo, '_load', side_effect=AssertionError('full ledger read')):
+            self.assertEqual(self.repo.get_task_read_binding(self.actor, tid).task_version, expected)
+
+    def test_task_read_summary_pages_are_scoped_and_stable(self):
+        first_id = self.create()
+        for index in range(2):
+            body = confirmation(self.tasks, self.actor, key=f'page-draft-{index}')
+            self.tasks.create_task(self.actor, f'page-confirm-{index}', body)
+        found = []
+        cursor = None
+        while True:
+            page = self.tasks.list_tasks_page(
+                self.actor, 'demo', limit=1, cursor=cursor)
+            found.extend(item['task_id'] for item in page['items'])
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+        self.assertEqual(len(found), 3)
+        self.assertIn(first_id, found)
+        self.assertEqual(len(set(found)), 3)
+        self.assertEqual(self.tasks.list_tasks_page(
+            Actor('tenant-a', 'another-user'), 'demo')['items'], [])
+
     def test_multiple_connections_confirm_once(self):
         def confirm(i):
             return make_service(SQLiteTaskRepository(self.db)).create_task(self.actor, str(i), self.body)

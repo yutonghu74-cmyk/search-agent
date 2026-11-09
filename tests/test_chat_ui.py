@@ -36,14 +36,36 @@ class ChatUiTest(unittest.TestCase):
         self.assertIn('.app-shell{flex:1;min-height:0;grid-template-rows:minmax(0,1fr)}', CHAT_CSS)
         self.assertIn('.timeline{flex:1;min-height:0;overflow:auto', CHAT_CSS)
         self.assertIn('.chat-composer{position:sticky;bottom:8px', CHAT_CSS)
-        self.assertIn("if($('task-sidebar').classList.contains('hidden'))setModelPanelCollapsed(true)", CHAT_JS)
-        self.assertIn("card('结果素材'", CHAT_JS)
+        self.assertIn('id="model-panel-dialog" class="sidebar-dialog"', CHAT_HTML)
+        self.assertLess(CHAT_HTML.index('id="history-list"'), CHAT_HTML.index('id="open-model-panel"'))
+        self.assertLess(CHAT_HTML.index('id="open-model-panel"'), CHAT_HTML.index('id="model-panel-dialog"'))
+        self.assertIn("$('open-model-panel').addEventListener('click'", CHAT_JS)
+        self.assertIn("$('open-environment-info').addEventListener('click'", CHAT_JS)
+        self.assertIn("resultViewLabels", CHAT_JS)
         self.assertIn("[],list)", CHAT_JS)
+
+    def test_result_workspace_only_appears_for_published_results(self):
+        self.assertNotIn('id="result-next-action"', CHAT_HTML)
+        self.assertIn('class="rail-card hidden result-workspace"', CHAT_HTML)
+        self.assertNotIn('result-purpose', CHAT_HTML)
+        self.assertNotIn('开始后你会看到', CHAT_HTML)
+        self.assertIn('function resetResultWorkspace()', CHAT_JS)
+        self.assertIn("resetResultWorkspace();syncRefillFields()", CHAT_JS)
+        self.assertIn("if(!results.available){resetResultWorkspace();return}", CHAT_JS)
+        self.assertIn('data-result-view="review"', CHAT_HTML)
+        self.assertNotIn('id="result-view-guide"', CHAT_HTML)
+        self.assertNotIn('const resultViewGuides=', CHAT_JS)
+        self.assertNotIn("card('结果说明'", CHAT_JS)
+        self.assertIn('id="result-feedback-dialog"', CHAT_HTML)
+        self.assertIn("/manual-reviews", CHAT_JS)
+        self.assertIn("人工通过", CHAT_JS)
+        self.assertIn("人工淘汰", CHAT_JS)
+        self.assertNotIn("window.prompt", CHAT_JS)
 
     def test_compact_app_width_uses_single_column_and_history_drawer(self):
         self.assertEqual(CHAT_CSS.count('@media(max-width:900px)'), 2)
         self.assertIn('@media(max-width:900px){main{padding:14px', CHAT_CSS)
-        self.assertIn('@media(max-width:900px){main:not(.catalog-page)', CHAT_CSS)
+        self.assertIn('@media(max-width:900px){dialog.sidebar-dialog{left:16px;bottom:16px}main:not(.catalog-page)', CHAT_CSS)
         self.assertIn("matchMedia('(max-width:900px)')", CHAT_JS)
 
     def test_sidebar_preserves_open_node_across_progress_refresh(self):
@@ -76,13 +98,13 @@ assert(!JSON.stringify(cards).includes('sha256:internal'));
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for candidate gallery grouping test')
     def test_accepted_gallery_uses_independent_thumbnail_sequence(self):
-        source = CHAT_JS[CHAT_JS.index('function candidateAllGroups(view)'):
+        source = CHAT_JS[CHAT_JS.index('function candidateResultTab(view)'):
                          CHAT_JS.index('function candidateHint(text)')]
         script = r"""
 const assert=require('node:assert/strict');
 const [groups,key]=new Function('aggregateLocalCandidates',process.env.SOURCE+';return [candidateGroups,candidateGroupKey]')(
   ()=>{throw new Error('Raw search candidates must not populate accepted results')});
-const items=[{candidate_id:'candidate_one',asset_version:'a1',sources:[{library_id:'library-a'}]},{candidate_id:'candidate_two',asset_version:'a2',sources:[]}];
+const items=[{candidate_id:'candidate_one',asset_version:'a1',preview_status:'available',sources:[{library_id:'library-a'}]},{candidate_id:'candidate_two',asset_version:'a2',preview_status:'available',sources:[]}];
 const accepted=groups({tab:'accepted',items});
 assert.deepEqual(accepted.map(group=>key(group)),['candidate_one','candidate_two']);
 assert(accepted.every(group=>group.previewItem===group.item));
@@ -91,17 +113,17 @@ assert.equal(accepted[0].sources[0].library_id,'library-a');
         result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("view.tab==='accepted'?'尚无合格结果预览", CHAT_JS)
+        self.assertIn('当前结果版本没有${candidateTabLabel(view.tab)}素材', CHAT_JS)
         self.assertIn('/cleaning/candidates/${encodeURIComponent(item.candidate_id)}/preview', CHAT_JS)
         self.assertNotIn("if(data.publication_kind==='preview'){view.items=[]", CHAT_JS)
-        self.assertIn('合格结果预览', CHAT_HTML)
+        self.assertIn('合格结果', CHAT_HTML)
         self.assertIn("search.search?.pagination_stopped)return;candidateLoad", CHAT_JS)
         self.assertIn("searchProgress.initial_window_complete", CHAT_JS)
         self.assertIn("首轮候选已就绪，后续位置留给自动补数", CHAT_JS)
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for previewable gallery filter test')
     def test_gallery_defaults_to_previewable_candidates_without_losing_raw_hits(self):
-        source = CHAT_JS[CHAT_JS.index('function candidateAllGroups(view)'):
+        source = CHAT_JS[CHAT_JS.index('function candidateResultTab(view)'):
                          CHAT_JS.index('function candidateHint(text)')]
         script = r"""
 const assert=require('node:assert/strict');
@@ -123,7 +145,8 @@ assert.deepEqual(groups({tab:'candidates',previewOnly:false,items}).map(group=>g
         self.assertIn("candidateTimer=setInterval(()=>{if(!candidateCurrent(view))return;", CHAT_JS)
         self.assertNotIn("if(!candidateCurrent(view)){closeCandidateBrowser();return}", CHAT_JS)
         self.assertIn("if(candidateActive?.tab!=='candidates')candidateReset", CHAT_JS)
-        self.assertIn("if(candidateActive?.tab!=='accepted')candidateReset", CHAT_JS)
+        self.assertIn("['accepted-tab','accepted']", CHAT_JS)
+        self.assertIn("['failed-tab','failed']", CHAT_JS)
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for model choice persistence test')
     def test_current_model_choice_is_remembered_for_each_chat(self):
@@ -265,7 +288,7 @@ action='revise_terms';fields['llm-model'].value='text';fields['request-text'].va
     @unittest.skipUnless(shutil.which('node'), 'Node required for reference sentence behavior test')
     def test_reference_sentence_is_optional_and_does_not_overwrite_user_text(self):
         source = CHAT_JS[CHAT_JS.index('function insertRequestExample(){'):
-                         CHAT_JS.index('async function restoreDialogueSession(){')]
+                         CHAT_JS.index('async function restoreDialogueSession(')]
         script = r"""
 const assert=require('node:assert/strict');
 const input={value:'',focus(){this.focused=true},setSelectionRange(a,b){this.selection=[a,b]}};
@@ -311,13 +334,13 @@ assert.match(status.textContent,/保留你的文字/);
     def test_history_includes_dialogue_time_and_bounded_delete(self):
         self.assertIn('/v1/retrieval/projects/demo/dialogue-sessions', CHAT_JS)
         self.assertIn("year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'", CHAT_JS)
-        self.assertIn("item.confirmation_count===0", CHAT_JS)
+        self.assertIn("item.confirmation_count>0", CHAT_JS)
         self.assertIn('function visibleDialogueChats(items)', CHAT_JS)
         self.assertIn('item.message_count>0', CHAT_JS)
         self.assertIn("method:'DELETE'", CHAT_JS)
         # Confirmed Chats and legacy tasks both get a force-delete × button.
-        self.assertIn('/v1/retrieval/conversations/${item.conversation_id}?force=true', CHAT_JS)
-        self.assertIn('/v1/retrieval/tasks/${item.task_id}?force=true', CHAT_JS)
+        self.assertIn('/v1/retrieval/projects/demo/chat-history?', CHAT_JS)
+        self.assertIn("path+(force?'?force=true':'')", CHAT_JS)
         start = CHAT_JS[CHAT_JS.index('function startNewChat()'):
                         CHAT_JS.index("const settingsPath=")]
         self.assertNotIn("api('/v1/retrieval/projects/demo/dialogue-sessions'", start)
@@ -356,21 +379,25 @@ assert.equal(reloads,1);assert(removed.includes('dsh-dialogue'));
     def test_authoritative_gap_offers_new_unconfirmed_term_draft(self):
         stop_label = CHAT_JS[CHAT_JS.index('function refillStopLabel('):
                              CHAT_JS.index('function completedNodeOutput(')]
-        source = stop_label + CHAT_JS[CHAT_JS.index('function showResults('):
+        source = stop_label + CHAT_JS[CHAT_JS.index('const resultViewLabels='):
                                       CHAT_JS.index('async function loadMoreResults(')]
         script = r"""
 (async()=>{
 const assert=require('node:assert/strict');
 const state={task:{task_id:'task-one',confirmed_revision:2,run_status:'PARTIAL',pending_draft:null}};
-const fields={'result-list':{replaceChildren(){}},'result-sidebar':{classList:{remove(){}}}};
+const fields={'result-details':{open:false},'result-compact-counts':{},'result-list':{replaceChildren(){}},'result-sidebar':{classList:{remove(){}}},
+  'result-counts':{replaceChildren(){},append(){}},'result-next-action':{},
+  'result-next-title':{},'result-next-detail':{},'result-next-button':{}};
+const document={querySelectorAll:()=>[],querySelector:()=>null,
+  createElement:()=>({append(){},className:'',textContent:''})};
 let cards=[],draft=null;
 const card=(title,rows,actions)=>{cards.push({title,rows,actions});return {}};
 const showPostTaskExpansion=(text,intent,role)=>{draft={text,intent,role}};
 let refillPlan={action:'partial_delivery',stop_reason:'SEARCH_STRATEGIES_EXHAUSTED'};
 const api=async()=>refillPlan;
-const show=new Function('state','$','card','showPostTaskExpansion','api',process.env.RESULT_SOURCE+';return showResults')(
-  state,id=>fields[id],card,showPostTaskExpansion,api);
-const results={available:true,revision:2,run_generation:1,result_set_digest:'digest',
+const show=new Function('state','$','card','showPostTaskExpansion','api','document',process.env.RESULT_SOURCE+';return showResults')(
+  state,id=>fields[id],card,showPostTaskExpansion,api,document);
+const results={available:true,view:'accepted',revision:2,run_generation:1,result_set_digest:'digest',
   counts:{accepted:12,reserve:0,duplicate:0,failed:0,pending_review:0,gap:8},
   stop_reason:'exhausted',items:[],next_cursor:null,note:'partial'};
 show(results,'task-one');
@@ -380,8 +407,7 @@ assert(offer);assert.equal(offer.rows[0][1],8);
 assert.equal(cards.some(row=>row.title==='补数状态读取失败'),false);
 cards=[];show({...results,stop_reason:'INPUT_SCOPE_COMPLETE'},'task-one');
 await new Promise(setImmediate);
-assert.equal(cards.find(row=>row.title==='权威结果统计').rows.find(row=>row[0]==='停止原因')[1],
-  '固定输入范围已处理完，可部分交付');
+assert.equal(state.currentResults.stop_reason,'INPUT_SCOPE_COMPLETE');
 offer.actions[0][1]();
 assert.equal(draft.role,'system');
 assert.equal(draft.intent.kind,'expansion');
@@ -484,7 +510,7 @@ const results={available:true,counts:{accepted:1}};
 const manifest={kind:'candidate_manifest_proposal',confirmed:false,candidate_count:0,
   expected_task_version:7};
 const api=async path=>{
-  if(path.endsWith('/progress')&&!path.includes('/first-search/'))return progress;
+  if(path.endsWith('/summary'))return {progress};
   if(path.includes('/results?'))return results;
   if(path.endsWith('/first-search/manifest'))return manifest;
   if(path.endsWith('/first-search/progress'))throw Error('REVISION_CONFLICT: Retrieval task scope is stale');
@@ -520,7 +546,7 @@ const stale=()=>{const e=Error('REVISION_CONFLICT: Retrieval task scope is stale
 const api=async path=>{
   if(path.endsWith('/first-search/progress')){calls.search++;stale()}
   if(path.endsWith('/first-search/manifest')){calls.manifest++;stale()}
-  if(path.endsWith('/progress'))return {task_version:version,nodes:[{node:'retrieval',node_status:'succeeded'}]};
+  if(path.endsWith('/summary'))return {progress:{task_version:version,nodes:[{node:'retrieval',node_status:'succeeded'}]}};
   if(path.includes('/results?'))return {available:true,counts:{accepted:1}};
   throw Error('unexpected '+path);
 };
@@ -555,7 +581,7 @@ const api=async path=>{
     pagination_stopped:false,initial_window_complete:true,members:[]};
   if(path.endsWith('/first-search/manifest'))return {confirmed,candidate_count:60,expected_task_version:2};
   if(path.includes('/first-search/candidates'))return {verified_count:1};
-  if(path.endsWith('/progress'))return {task_version:2,nodes:[]};
+  if(path.endsWith('/summary'))return {progress:{task_version:2,nodes:[]}};
   if(path.includes('/results?'))return {available:false};
   throw Error('unexpected '+path);
 };
@@ -612,7 +638,7 @@ const open=new Function('state','localStorage','sessionStorage','readStoredModel
         self.assertIn('五节点进度：扩检索词、检索、清洗、补数、打包', CHAT_HTML)
         self.assertIn("function renderPlanningWorkflow(stage='request')", CHAT_JS)
         self.assertIn("renderPlanningWorkflow('expansion')", CHAT_JS)
-        self.assertIn("renderPlanningWorkflow('request');syncRefillFields();await loadBuildVersion()", CHAT_JS)
+        self.assertIn("renderPlanningWorkflow('request');resetResultWorkspace();syncRefillFields();void loadBuildVersion()", CHAT_JS)
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for refill round evidence test')
     def test_refill_rounds_show_returned_new_and_cumulative_valid_counts(self):
@@ -629,7 +655,7 @@ const execution={issued_rounds:2,completed_rounds:2,stagnant_rounds:1,vlm_calls:
           {iteration:2,baseline_accepted:5,candidate_count:3,vlm_calls:3,outcome:'empty',accepted_after:5,new_unique_accepted:0}]};
 const plan={action:'partial_delivery',target_count:10,accepted_count:5,gap:5,stop_reason:'NO_PROGRESS',execution};
 let cards=[];const card=(title,rows)=>{cards.push({title,rows});return {}};
-const api=async path=>{assert.equal(path,'/v1/retrieval/tasks/task-one/refill');return plan};
+const api=async path=>{if(path.includes('/nodes/refill/items?'))return {...plan,items:execution.rounds,next_cursor:null};assert.equal(path,'/v1/retrieval/tasks/task-one/refill');return plan};
 const nodes=[];const doc={createElement(){const el={children:[],textContent:'',append(...xs){this.children.push(...xs)},replaceChildren(){this.children=[]}};nodes.push(el);return el}};
 const build=new Function('state','card','api','document','openDelivery','offerGapExpansion',
   process.env.SOURCE+';return {offerRefillAction,loadRefillRounds,refillRoundRows}');
@@ -667,7 +693,7 @@ assert.equal(button.disabled,false);
         self.assertIn("尚未发布独立输出", CHAT_JS)
 
     def test_restore_replays_saved_assistant_without_duplicate_summary(self):
-        restore = CHAT_JS[CHAT_JS.index('async function restoreDialogueSession()'):
+        restore = CHAT_JS[CHAT_JS.index('async function restoreDialogueSession('):
                           CHAT_JS.index('async function prepareTask()')]
         self.assertIn("!current.messages.some(item=>item.role==='assistant')", restore)
         self.assertNotIn("await prepareGuidedExpansion(current.request.raw_request,current.request.target_count);return", restore)
@@ -676,7 +702,7 @@ assert.equal(button.disabled,false);
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for history restore behavior test')
     def test_history_terms_restore_does_not_wait_for_model(self):
-        source = CHAT_JS[CHAT_JS.index('async function restoreDialogueSession()'):
+        source = CHAT_JS[CHAT_JS.index('async function restoreDialogueSession('):
                          CHAT_JS.index('async function prepareTask()')]
         script = r"""
 const assert=require('node:assert/strict');
@@ -944,6 +970,13 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertIn('合格预览分类', CHAT_JS)
         self.assertIn('page.result_set_digest!==results.result_set_digest', CHAT_JS)
         self.assertIn('request!==readToken', CHAT_JS)
+        self.assertIn('/nodes/cleaning/outputs?', CHAT_JS)
+        self.assertIn('/cleaning/steps?summary=true', CHAT_JS)
+        self.assertIn('step_execution_id:step.step_execution_id', CHAT_JS)
+        self.assertIn("['pending','处理中']", CHAT_JS)
+        self.assertIn("['blocked','阻断']", CHAT_JS)
+        self.assertIn('加载更多步骤结果', CHAT_JS)
+        self.assertNotIn('step.items.filter', CHAT_JS)
         self.assertIn('尚未正式交付', CHAT_JS)
         self.assertIn('检索已完成 · 已固定', CHAT_JS)
         self.assertIn("initialize", CHAT_JS)
@@ -956,6 +989,14 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertIn("openTask", CHAT_JS)
         self.assertIn("openConversation", CHAT_JS)
         self.assertIn('renderSavedTaskMessages(data.task_messages)', CHAT_JS)
+        self.assertIn('renderExecutionHistory(data.executions)', CHAT_JS)
+        self.assertIn('/events?after_sequence=${state.eventSequence}&limit=100', CHAT_JS)
+        self.assertIn('/events/stream?after_sequence=${state.eventSequence}', CHAT_JS)
+        self.assertIn("Accept:'text/event-stream'", CHAT_JS)
+        self.assertIn("if(error.code==='EVENT_HISTORY_EXPIRED')", CHAT_JS)
+        self.assertIn('startTaskEvents(task.task_id,progress.as_of_sequence)', CHAT_JS)
+        self.assertIn('startTaskEvents(taskId,progress.as_of_sequence)', CHAT_JS)
+        self.assertIn('SSE 已恢复到事件序列', CHAT_JS)
         self.assertNotIn('方案已确认 · revision', CHAT_JS)
         self.assertNotIn("['确认时间',item.confirmed_at]", CHAT_JS)
         self.assertIn('renderSavedTaskMessages([...(history?.clarification_messages||[]),...(history?.task_messages||[])])', CHAT_JS)
@@ -975,10 +1016,9 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertNotIn("'推进门禁'", CHAT_JS)
         self.assertNotIn("'推进模式'", CHAT_JS)
         self.assertIn("progress.counts.accepted===null?'未知'", CHAT_JS)
-        self.assertIn("结果尚未发布", CHAT_JS)
-        self.assertIn("权威结果统计", CHAT_JS)
-        self.assertIn("SHA-256 精确重复已自动合并", CHAT_JS)
-        self.assertIn("只按 SHA-256 完全一致自动去重，无需人工复核", CHAT_JS)
+        self.assertIn("if(!results.available){resetResultWorkspace();return}", CHAT_JS)
+        self.assertIn('id="result-sidebar"', CHAT_HTML)
+        self.assertIn("renderResultCounts", CHAT_JS)
         self.assertIn("delivery.manifest.eligible_unique_count", CHAT_JS)
         self.assertIn("delivery.manifest.exact_duplicate_count", CHAT_JS)
         self.assertIn("delivery.manifest.packaged_file_count", CHAT_JS)
@@ -986,7 +1026,11 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertIn("delivery.manifest.members||[]).length", CHAT_JS)
         self.assertNotIn("人工复核近重复簇", CHAT_JS)
         self.assertNotIn("确认合并，仅保留所选图片", CHAT_JS)
-        self.assertIn("preview_status==='unavailable'", CHAT_JS)
+        self.assertIn("仅排除此图", CHAT_JS)
+        self.assertIn("排除相似簇", CHAT_JS)
+        self.assertIn("升级为规则", CHAT_JS)
+        self.assertIn("/result-exclusions", CHAT_JS)
+        self.assertIn("item.preview_status==='available'", CHAT_JS)
         self.assertIn("loadMoreResults", CHAT_JS)
         self.assertIn("检索词：", CHAT_JS)
         self.assertIn("检索词", CHAT_JS)
@@ -1263,7 +1307,8 @@ const tick=new Function('state','document','refreshTaskSidebar','setTimeout','cl
         self.assertIn('使用 API 与密钥配置', CHAT_HTML)
         self.assertIn('id="api-key" type="password"', CHAT_HTML)
         self.assertIn('密钥不写入浏览器存储', CHAT_HTML)
-        self.assertIn('id="new-chat"', CHAT_HTML)
+        self.assertIn('id="new-task"', CHAT_HTML)
+        self.assertNotIn('id="new-chat"', CHAT_HTML)
         self.assertIn('新建 Chat', CHAT_HTML)
         self.assertIn('class="right-rail"', CHAT_HTML)
         self.assertGreater(CHAT_HTML.index('class="right-rail"'), CHAT_HTML.index('class="chat"'))
@@ -1271,7 +1316,7 @@ const tick=new Function('state','document','refreshTaskSidebar','setTimeout','cl
         self.assertNotIn('把检索需求整理成', CHAT_HTML)
         self.assertNotIn('先梳理目标、分组和推进方式', CHAT_HTML)
         self.assertIn('class="context-bar"', CHAT_HTML)
-        self.assertIn("$('new-chat').addEventListener('click',startNewChat)", CHAT_JS)
+        self.assertIn("$('new-task').addEventListener('click',startNewChat)", CHAT_JS)
         self.assertIn("function renameChat", CHAT_JS)
         self.assertIn("expected_draft_version=state.resumeDraft.draft_version", CHAT_JS)
         self.assertIn("function saveApiConfig", CHAT_JS)

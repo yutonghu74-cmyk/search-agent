@@ -325,6 +325,22 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
             rows.sort(key=lambda task: task.created_at, reverse=True)
             return tuple(rows[:100])
 
+    def list_tasks_with_feedback(self, actor, project_id):
+        with self._lock:
+            tasks = self.list_tasks(actor, project_id)
+            return tuple((task, self.get_pending_feedback(actor, task.task_id))
+                         for task in tasks)
+
+    def list_tasks_page_with_feedback(self, actor, project_id, *, limit, after=None):
+        with self._lock:
+            rows = [replace(task) for task in self._tasks.values()
+                    if (task.tenant_id, task.owner_user_id, task.project_id)
+                    == (actor.tenant_id, actor.user_id, project_id)
+                    and (after is None or (task.created_at, task.task_id) < after)]
+            rows.sort(key=lambda task: (task.created_at, task.task_id), reverse=True)
+            return tuple((task, self.get_pending_feedback(actor, task.task_id))
+                         for task in rows[:limit])
+
     def get_conversation(self, actor, conversation_id):
         with self._lock:
             messages = self._conversation_messages.get(conversation_id)

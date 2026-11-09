@@ -10,7 +10,7 @@ import json
 import math
 
 
-VIEWS = {"accepted", "reserve"}
+VIEWS = {"accepted", "reserve", "failed", "review", "user_excluded"}
 
 
 class ResultCursorError(ValueError):
@@ -24,12 +24,15 @@ class ResultItem:
     candidate_ids: tuple[str, ...] = ()
     sources: tuple[dict, ...] = ()
 
-    def to_view(self, near_duplicate_matches=()):
+    def to_view(self, near_duplicate_matches=(), *, preview_available=False,
+                assessment=None):
         return {"candidate_id": self.candidate_id, "asset_version": self.asset_version,
-                "preview_status": "unavailable",
+                "preview_status": "available" if preview_available else "unavailable",
                 "duplicate_candidate_count": max(0, len(self.candidate_ids) - 1),
                 "source_count": len(self.sources), "sources": list(self.sources),
-                "near_duplicate_matches": list(near_duplicate_matches)}
+                "near_duplicate_matches": list(near_duplicate_matches),
+                "cleaning_status": (assessment or {}).get("cleaning_status", "pass"),
+                "reasons": list((assessment or {}).get("reasons", ()))}
 
 
 def _positive(value, name):
@@ -150,12 +153,12 @@ def _group_progress(proposal, result_set):
 
 def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
                       view_type: str = "accepted", limit: int = 20,
-                      cursor: str | None = None) -> dict:
+                      cursor: str | None = None, _projection: bool = False) -> dict:
     """Return a frozen page without inventing results, previews, or authorization."""
     task_id, revision, task_version, generation, target = _binding(task, proposal)
     if view_type not in VIEWS:
-        raise ValueError("view must be accepted or reserve")
-    if type(limit) is not int or limit < 1 or limit > 100:
+        raise ValueError("view must be accepted, reserve, failed, review or user_excluded")
+    if type(limit) is not int or limit < 1 or limit > (1_000_000 if _projection else 100):
         raise ValueError("limit must be between 1 and 100")
     base = {"schema_version": "task-results@1", "task_id": task_id,
             "revision": revision, "task_version": task_version,
@@ -170,7 +173,8 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
         return {**base, "available": False, "result_set_id": None,
                 "result_set_digest": None, "counts": {
                     "eligible_unique": None, "accepted": None, "reserve": None,
-                    "duplicate": None, "failed": None, "pending_review": None,
+                    "duplicate": None, "failed": None, "user_excluded": None,
+                    "pending_review": None,
                     "near_duplicate_review": None, "gap": None},
                 "counts_status": "unavailable", "stop_reason": None,
                 "near_duplicate_review": {"pending_clusters": None,
@@ -227,6 +231,9 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
     numeric = ("duplicate_count", "failed_count", "pending_review_count", "gap")
     if any(type(result_set.get(name)) is not int or result_set[name] < 0 for name in numeric):
         raise ValueError("result set counts are invalid")
+    user_excluded_count = result_set.get("user_excluded_count", 0)
+    if type(user_excluded_count) is not int or user_excluded_count < 0:
+        raise ValueError("result exclusion count is invalid")
     near_count = result_set.get("near_duplicate_review_count", len(normalized_pairs))
     if type(near_count) is not int or near_count != len(normalized_pairs):
         raise ValueError("near-duplicate review count is invalid")
@@ -252,7 +259,26 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
     if (type(cluster_count) is not int or cluster_count != computed_clusters
             or not isinstance(decisions, (tuple, list))):
         raise ValueError("near-duplicate review summary is invalid")
-    rows = accepted if view_type == "accepted" else reserve
+    audit_field = {"failed": "failed_items", "review": "review_items",
+                   "user_excluded": "user_excluded_items"}.get(view_type)
+    if audit_field is None:
+        rows = accepted if view_type == "accepted" else reserve
+    else:
+        rows = result_set.get(audit_field, ())
+        if not isinstance(rows, (tuple, list)) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("candidate_id"), str)
+                or not isinstance(item.get("asset_version"), str)
+                or item.get("cleaning_status") not in {
+                    "fail", "unknown", "user_excluded"}
+                or not isinstance(item.get("reasons"), (tuple, list))
+                for item in rows):
+            raise ValueError("result audit items are invalid")
+        expected_count = {"failed": result_set["failed_count"],
+                          "review": result_set["pending_review_count"],
+                          "user_excluded": user_excluded_count}[view_type]
+        if len(rows) != expected_count:
+            raise ValueError("result audit count is inconsistent")
     offset = 0 if cursor is None else _decode_cursor(cursor, result_digest, view_type)
     if offset > len(rows):
         raise ResultCursorError("cursor is outside the frozen result view")
@@ -265,14 +291,23 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
                 "eligible_unique": expected["eligible_unique_count"],
                 "accepted": expected["accepted_count"], "reserve": expected["reserve_count"],
                 "duplicate": result_set["duplicate_count"], "failed": result_set["failed_count"],
+                "user_excluded": user_excluded_count,
                 "pending_review": result_set["pending_review_count"],
                 "near_duplicate_review": near_count, "gap": result_set["gap"]},
             "counts_status": result_set.get("counts_status"),
             "stop_reason": result_set.get("stop_reason"),
             "near_duplicate_review": {"pending_clusters": cluster_count,
                                       "decision_count": len(decisions)},
-            "items": [item.to_view(tuple(sorted(near_by_candidate[item.candidate_id],
-                       key=lambda match: (match["hamming_distance"], match["candidate_id"]))))
-                      for item in page], "next_cursor": next_cursor,
+            "items": ([{**item, "reasons": list(item.get("reasons", ())),
+                         **({"user_exclusion": {**item["user_exclusion"],
+                             "candidate_ids": list(item["user_exclusion"]["candidate_ids"])}}
+                            if item.get("user_exclusion") else {})}
+                       for item in page] if audit_field else [
+                      item.to_view(tuple(sorted(near_by_candidate[item.candidate_id],
+                          key=lambda match: (match["hamming_distance"], match["candidate_id"]))),
+                          preview_available=bool(result_set.get("candidate_preview_available")),
+                          assessment=result_set.get("candidate_assessments", {}).get(
+                              item.candidate_id)) for item in page]),
+            "next_cursor": next_cursor,
             "note": ("当前交付已发布，可在打包节点下载；访问仍受当前权限约束。" if result_set.get('kind') == 'delivery'
                      else "当前为合格预览，入选不代表正式交付；图片可在清洗详情查看，此列表仅显示逻辑标识和权威统计。")}

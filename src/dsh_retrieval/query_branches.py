@@ -34,9 +34,14 @@ def compile_query_branches(query: dict) -> dict:
 
     def add(text, role, term, group_id=None, version="user-input@1"):
         normalized = " ".join(text.split())
-        fingerprint = digest({"compiler": COMPILER_VERSION, "query_text": normalized,
-                              "media_type": query.get("media_type"),
-                              "rules": rules, "source_constraints": sources})
+        fingerprint_input = {"compiler": COMPILER_VERSION, "query_text": normalized,
+                             "media_type": query.get("media_type"),
+                             "rules": rules, "source_constraints": sources}
+        # Keep every existing text-only branch ID byte-for-byte stable. Only a
+        # real reference-image input extends the fingerprint namespace.
+        if query.get("query_input") is not None:
+            fingerprint_input["query_input"] = query["query_input"]
+        fingerprint = digest(fingerprint_input)
         origin = {"group_id": group_id, "query_role": role,
                   "source_term": term, "skill_version": version}
         if fingerprint not in branches:
@@ -49,8 +54,9 @@ def compile_query_branches(query: dict) -> dict:
         if origin not in branches[fingerprint]["origins"]:
             branches[fingerprint]["origins"].append(origin)
 
-    add(raw, "original", raw)
-    if plan:
+    query_input = query.get("query_input")
+    add(raw, "reference_image" if query_input else "original", raw)
+    if plan and not query_input:
         for group in plan["groups"]:
             label = group["primary_label"]
             add(label, "primary", label, group["group_id"], plan["generator"])
@@ -65,7 +71,9 @@ def compile_query_branches(query: dict) -> dict:
         "constraints": {"rules": deepcopy(rules), "source_constraints": deepcopy(sources)},
         "status": "preview_only", "executable": False,
         "library_resolution": "unresolved",
-        "note": "仅逻辑查询预览，尚未选库、编码或批准执行。否定条件仍须编译为后置验证规则；召回命中不代表合格。",
+        "note": ("参考图仅作为图像向量输入；文字作为选库与后置清洗约束。尚未选库、编码或批准执行。"
+                 if query_input else
+                 "仅逻辑查询预览，尚未选库、编码或批准执行。否定条件仍须编译为后置验证规则；召回命中不代表合格。"),
     }
     return {**payload, "preview_digest": digest(payload)}
 

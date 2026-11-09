@@ -57,15 +57,23 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.task_id = created['task_id']
         self.local = self.make_local()
 
-    def make_local(self):
+    def make_local(self, *, start=True):
         configs = build_local_catalog(self.source, self.config_ledger, ModelRuntime())
         local = LocalFirstSearch(self.tasks, configs, ledger_path=self.ledger,
             source_path=self.source,
             capabilities_path=CONFIG / 'local-first-search-capabilities.example.json',
             fixture_path=self.fixture_path,
-            cursor_secret=b'test-only-local-cursor-secret-12345')
+            cursor_secret=b'test-only-local-cursor-secret-12345', start=start)
         self.addCleanup(local.close)
         return local
+
+    def test_browse_only_adapter_does_not_recover_or_start_worker(self):
+        from unittest.mock import patch
+        with patch('dsh_retrieval.first_search_local.SQLitePlanSetApprovalRepository.recoverable',
+                   side_effect=AssertionError('browse-only recovered work')):
+            local = self.make_local(start=False)
+        self.assertFalse(local._worker.is_alive())
+        local.close()
 
     def test_refill_authority_only_allows_library_search(self):
         authority = self.local._authority()
