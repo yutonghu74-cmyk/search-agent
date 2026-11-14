@@ -25,11 +25,341 @@ class Transport:
         output = next(self.outputs)
         if isinstance(output, Exception):
             raise output
-        return BytesIO(json.dumps({'choices': [{'finish_reason': 'stop',
-            'message': {'content': json.dumps(output)}}]}).encode())
+        if self.calls[-1].get('tools') and isinstance(output, dict):
+            tool = self.calls[-1]['tools'][0]['function']['name']
+            message = {'tool_calls': [{'type': 'function', 'id': 'fixture-call', 'function': {
+                'name': tool, 'arguments': json.dumps({'proposal': output})}}]}
+            finish = 'tool_calls'
+        else:
+            message = {'content': output if self.calls[-1].get('tools') and isinstance(output, str)
+                       else json.dumps(output)}
+            finish = 'stop'
+        return BytesIO(json.dumps({'choices': [{'message': message, 'finish_reason': finish}]}).encode())
 
 
 class ModelRuntimeTest(unittest.TestCase):
+    def test_unified_model_proposal_keeps_quantity_and_condition_in_one_intent(self):
+        from draft_helpers import BODY
+        spec = deepcopy(BODY['query_spec'])
+        spec['target_count'] = spec['refill_policy']['target_count'] = 20
+        intent = {'kind': 'requirement', 'target_count': None, 'requested_terms_per_group': None,
+                  'count_edits': [{'target': 'images', 'labels': [], 'operation': 'add', 'value': 5}],
+                  'cleaning_changes': [{'op': 'add', 'condition_id': None, 'source_text': '无水印', 'group_id': None}]}
+        runtime = self.runtime([intent])
+        result = runtime.classify_followup('客厅图片', [], '再多5张，只要无水印', 'text',
+            task_context={'structured_changes': True, 'requirement_spec': spec, 'target_count': 20})
+        self.assertEqual(result['kind'], 'requirement')
+        self.assertEqual(result['count_edits'][0]['value'], 5)
+        self.assertEqual(result['cleaning_changes'][0]['source_text'], '无水印')
+        self.assertEqual(len(self.transport.calls), 1)
+        self.assertFalse(self.transport.calls[0]['parallel_tool_calls'])
+        consistent = ModelRuntime._validate_followup({**intent, 'target_count': 25}, '再多5张，只要无水印', [],
+                                                    {'structured_changes': True, 'requirement_spec': spec})
+        self.assertIsNone(consistent['target_count'])
+        mislabeled = ModelRuntime._validate_followup({**intent, 'kind': 'cleaning', 'cleaning_instruction': '只要无水印'},
+            '再多5张，只要无水印', [], {'structured_changes': True, 'requirement_spec': spec})
+        self.assertEqual(mislabeled['kind'], 'requirement')
+        self.assertNotIn('cleaning_instruction', mislabeled)
+        with self.assertRaises(ServiceError):
+            ModelRuntime._validate_followup({**intent, 'target_count': 99}, '再多5张，只要无水印', [],
+                                           {'structured_changes': True, 'requirement_spec': spec})
+        with self.assertRaises(ServiceError):
+            ModelRuntime._validate_followup({**intent, 'requested_terms_per_group': 3}, '再多5张，只要无水印', [],
+                                           {'structured_changes': True, 'requirement_spec': spec})
+
+    def test_ordinary_conversation_can_bypass_dsh_without_changing_selected_model(self):
+        from dsh_retrieval.adapters.dsh.runtime import DshModelRuntime
+        runtime = self.runtime(['请说明希望保留什么画面。'])
+        with TemporaryDirectory() as directory:
+            harness = DshModelRuntime(runtime.profiles.values(), python='/unavailable/python',
+                                      home=directory, opener=self.transport)
+            direct = harness.conversation_runtime()
+            self.assertIs(type(direct), ModelRuntime)
+            answer = direct.classify_followup('客厅图片', [], '能怎么筛选', 'text')
+            self.assertEqual(answer['kind'], 'answer')
+            self.assertEqual(self.transport.calls[0]['model'], 'text-v1')
+            self.assertFalse(list(Path(directory).glob('*/retrieval-*')))
+
+    def test_structured_followup_uses_current_condition_ids_and_grounded_operations(self):
+        from dsh_retrieval.requirement_changes import conditions_for
+        spec = {'raw_request': '狗，不要水印'}
+        rows = conditions_for(spec)
+        runtime = self.runtime([{'kind': 'cleaning', 'target_count': None,
+            'requested_terms_per_group': None, 'count_edits': [], 'cleaning_changes': [
+                {'op': 'remove', 'condition_id': rows[1]['condition_id'], 'source_text': None, 'group_id': None},
+                {'op': 'add', 'condition_id': None, 'source_text': '画面清晰', 'group_id': None}]}])
+        result = runtime.classify_followup('狗，不要水印', [], '删掉第二条，增加画面清晰', 'text',
+            task_context={'structured_changes': True, 'cleaning_conditions': rows, 'requirement_spec': spec})
+        self.assertEqual([row['op'] for row in result['cleaning_changes']], ['remove', 'add'])
+        self.assertEqual(len(self.transport.calls), 1)
+
+    def test_task_conversation_endpoint_saves_preview_without_second_model_call(self):
+        from http.server import ThreadingHTTPServer
+        import threading
+        from urllib.request import Request, urlopen
+        from dsh_retrieval.api import create_handler
+        from draft_helpers import BODY, make_service, confirmation
+        from dsh_retrieval.adapters.memory import InMemoryTaskRepository
+        from dsh_retrieval.models import Actor
+        from dsh_retrieval.requirement_changes import conditions_for
+        outputs = [{'kind': 'cleaning', 'target_count': None, 'requested_terms_per_group': None,
+                    'cleaning_changes': [{'op': 'add', 'condition_id': None,
+                                          'source_text': '无水印', 'group_id': None}]}]
+        runtime = self.runtime(outputs)
+        service = make_service(InMemoryTaskRepository())
+        actor = Actor('tenant', 'owner')
+        body = deepcopy(BODY)
+        body['query_spec']['rules'] = [{'rule_id': 'semantic-match', 'predicate_ref': 'image.semantic-match@1',
+            'operator': 'eq', 'value': True, 'hardness': 'hard', 'origin': 'user_confirmed'}]
+        task, _ = service.create_task(actor, 'create', confirmation(service, actor, body=body))
+        server = ThreadingHTTPServer(('127.0.0.1', 0), create_handler(service, model_runtime=runtime))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def call(body, key, path='conversation-turn', owner='owner'):
+            request = Request(f'http://127.0.0.1:{server.server_port}/v1/retrieval/tasks/{task["task_id"]}/{path}',
+                data=json.dumps(body).encode() if body is not None else None, headers={'Content-Type': 'application/json',
+                'X-Tenant-Id': 'tenant', 'X-User-Id': owner, 'Idempotency-Key': key})
+            try:
+                with urlopen(request) as response:
+                    return response.status, json.load(response)
+            except HTTPError as error:
+                return error.code, json.load(error)
+        try:
+            base = {'text': '增加无水印', 'llm_id': 'text', 'expected_revision': 1,
+                    'expected_task_version': task['task_version']}
+            status, result = call(base, 'turn1')
+            self.assertEqual(status, 200, result)
+            draft = result['feedback_draft']
+            self.assertEqual(result['cleaning_review']['cleaning_plan_preview']['after_count'], 2)
+            self.assertEqual(len(self.transport.calls), 1)
+            self.assertEqual(service.get_task(actor, task['task_id'])['confirmed_revision'], 1)
+            status, repeated = call(base, 'turn1')
+            self.assertEqual(status, 200, repeated)
+            self.assertEqual(repeated['feedback_draft'], draft)
+            self.assertEqual(len(self.transport.calls), 1)
+            status, receipt = call(None, 'read', 'conversation-turns/turn1')
+            self.assertEqual(status, 200, receipt)
+            self.assertEqual(receipt['status'], 'completed')
+            status, denied = call(None, 'read', 'conversation-turns/turn1', owner='intruder')
+            self.assertNotEqual(status, 200, denied)
+            rows = conditions_for(draft['proposal']['query_spec'])
+            outputs.append({'kind': 'cleaning', 'target_count': None, 'requested_terms_per_group': None,
+                'cleaning_changes': [{'op': 'replace', 'condition_id': rows[-1]['condition_id'],
+                                      'source_text': '不要文字', 'group_id': None}]})
+            ref = {key: draft[key] for key in ('draft_id', 'draft_version', 'proposal_digest')}
+            status, result = call({**base, 'text': '第二条改成不要文字', 'feedback_ref': ref}, 'turn2')
+            self.assertEqual(status, 200, result)
+            self.assertEqual(result['feedback_draft']['draft_version'], 2)
+            self.assertEqual(result['cleaning_review']['cleaning_plan_preview']['nodes'][-1]['source'], '不要文字')
+            saved = result['feedback_draft']
+            status, result = call({'draft_id': saved['draft_id'], 'expected_draft_version': saved['draft_version'],
+                'proposal_digest': saved['proposal_digest'], 'model_selection': {'llm': '', 'vlm': ''}},
+                'restore', 'feedback-suggestions')
+            self.assertEqual(status, 200, result)
+            self.assertEqual(result['status'], 'reviewable')
+            self.assertEqual(result['cleaning_plan_preview']['nodes'][-1]['source'], '不要文字')
+            status, obsolete = call(base, 'turn1')
+            self.assertEqual(status, 200, obsolete)
+            self.assertFalse(obsolete['is_current'])
+            status, result = call({**base, 'text': '第二条改成不要文字', 'feedback_ref': ref}, 'turn3')
+            self.assertEqual(status, 409)
+            self.assertEqual(len(self.transport.calls), 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_cleaning_advisory_alias_cannot_change_image_quantity(self):
+        proposal = {'kind': 'cleaning', 'target_count': None,
+                    'requested_terms_per_group': None, 'count_edits': [],
+                    'expansion_instruction': '排除模糊图片'}
+        result = ModelRuntime._validate_followup(dict(proposal), '太模糊的去掉', [], {'target_count': 10})
+        self.assertEqual(result['cleaning_instruction'], '排除模糊图片')
+        self.assertNotIn('expansion_instruction', result)
+        self.assertIsNone(result['target_count'])
+        with self.assertRaises(ServiceError):
+            ModelRuntime._validate_followup({**proposal, 'count_edits': [
+                {'target': 'images', 'labels': [], 'operation': 'add', 'value': 1}]},
+                '增加一个检测', [], {'target_count': 10})
+
+    def test_explicit_new_cleaning_node_is_routed_without_losing_context(self):
+        runtime = self.runtime([])
+        for text in ('新增一个检测节点检查是否有水印', '增加一个节点检查两只动物是否同框', '清洗时再检查有没有文字'):
+            result = runtime.classify_followup('大象和老虎合影10张', [], text, 'text',
+                task_context={'cleaning_plan': [{'node_id': 'step_1', 'source': '大象和老虎合影'}]})
+            self.assertEqual(result['kind'], 'cleaning')
+        self.assertEqual(self.transport.calls, [])
+
+    def test_slow_search_question_does_not_invent_causes_or_ignore_completion(self):
+        from test_workflow_state import status_context
+        runtime = self.runtime([])
+        for question in ('为什么检索这么慢', '检索怎么这么慢？', '检索速度很慢', '搜索太慢了'):
+            answer = runtime.classify_followup('大象和老虎合影10张', [], question, '', task_context=status_context())
+            self.assertTrue(answer['status_requested'])
+            self.assertIn('检索已结束', answer['reply'])
+            self.assertIn('尚未确认', answer['reply'])
+            self.assertNotIn('网络', answer['reply'])
+            self.assertNotIn('数据量', answer['reply'])
+        reply = runtime.classify_followup('大象和老虎合影10张', [], '为什么检索这么慢', '',
+                                           task_context=status_context(stopped=False))['reply']
+        self.assertIn('没有足够', reply)
+        self.assertEqual(self.transport.calls, [])
+
+    def test_status_question_uses_execution_facts_without_model_guessing(self):
+        from test_workflow_state import status_context
+        runtime = self.runtime([])
+        groups = [{'primary_label': '毛驴', 'auxiliary_terms': ['毛驴在田野']}]
+        answer = runtime.classify_followup('毛驴10张', groups, '接下来做什么', '',
+            task_context=status_context(confirmed=True), recent_messages=[{'role': 'assistant', 'text': '正在检索，请等待'}])
+        self.assertEqual(answer['kind'], 'answer')
+        self.assertIn('检索已结束', answer['reply'])
+        self.assertIn('确认清洗方案', answer['reply'])
+        self.assertNotIn('预计', answer['reply'])
+        self.assertIn('检索正在进行', runtime.classify_followup('毛驴10张', groups, '现在什么状态',
+            '', task_context=status_context(stopped=False))['reply'])
+        self.assertIn('清洗正在进行', runtime.classify_followup('毛驴10张', groups, '下一步怎么做',
+            '', task_context=status_context(cleaning=True))['reply'])
+        self.assertEqual(self.transport.calls, [])
+
+    def test_model_status_routing_and_unsupported_execution_claims_use_the_shared_projection(self):
+        from test_workflow_state import status_context
+        context = status_context(confirmed=True)
+        for output in ({'kind': 'status', 'target_count': None, 'requested_terms_per_group': None},
+                       '现在正在检索目标图片，预计会找到10张。'):
+            runtime = self.runtime([output])
+            answer = runtime.classify_followup('狗10张', [], '嗯，这个事情呢？', 'text', task_context=context)
+            self.assertTrue(answer['status_requested'])
+            self.assertEqual(answer['reply'], context['workflow']['status_reply'])
+            self.assertNotIn('预计', answer['reply'])
+            self.assertEqual(len(self.transport.calls), 1)
+
+    def test_unchanged_constraint_proposal_is_read_only(self):
+        result = ModelRuntime._validate_dialogue_proposal(
+            {'action': 'revise_terms', 'constraints': '不要水印',
+             'reply': '词表还在等待确认，确认后才会检索。'},
+            {'constraints': ['不要水印'], 'target_count': 12},
+            '为什么还没开始检索？', None)
+        self.assertEqual(result['action'], 'answer')
+        self.assertIsNone(result['constraints'])
+
+    def test_quantity_after_natural_clarification_keeps_scene_in_expansion_input(self):
+        from dsh_retrieval.dialogue import DialogueCoordinator, DialogueStore
+        from dsh_retrieval.adapters.projects import LocalProjectAccess
+        from dsh_retrieval.models import Actor
+        runtime = self.runtime(['需要多少张这样的图片？', {
+            'action': 'update', 'subject': '小狗在海边散步', 'media_type': 'image',
+            'target_count': 12, 'constraints': '无水印', 'reply': '会按这两个画面要求整理检索词。'}])
+        coordinator = DialogueCoordinator(DialogueStore(), runtime,
+            LocalProjectAccess([('tenant-a', 'user-a', 'demo', 'default')]))
+        actor = Actor('tenant-a', 'user-a')
+        first = coordinator.turn(actor, 'demo', {'session_id': None, 'expected_version': 0,
+            'phase': 'request', 'llm_id': 'text', 'message': '想找小狗在海边散步，不要水印',
+            'generate_terms_when_complete': True})
+        second = coordinator.turn(actor, 'demo', {'session_id': first['session_id'],
+            'expected_version': first['version'], 'phase': 'request', 'llm_id': 'text',
+            'message': '12张', 'generate_terms_when_complete': True})
+        self.assertEqual(second['stage'], 'terms')
+        self.assertIn('小狗在海边散步', second['request']['effective_request'])
+        self.assertIn('无水印', second['request']['effective_request'])
+        sent = self.transport.calls[-1]['messages']
+        self.assertIn('想找小狗在海边散步，不要水印', [item['content'] for item in sent])
+
+    def test_light_conversation_effort_is_scoped_to_known_models_and_dialogue(self):
+        from dsh_retrieval.dialogue import PROMPT
+        runtime = self.runtime(['可以先聊画面内容。', {'parent_label': None, 'groups': []}])
+        profile = ModelProfile('glm', 'llm', ModelConfig('fixture', 'glm-5.3', 'https://fixture.invalid/v1', 'fake'))
+        runtime._request(profile, PROMPT, '你好')
+        self.assertEqual(self.transport.calls[-1]['reasoning_effort'], 'low')
+        runtime._request(profile, 'Return JSON expansion', '生成词表')
+        self.assertNotIn('reasoning_effort', self.transport.calls[-1])
+
+    def test_conversation_answers_use_text_and_draft_edits_use_tools_across_turns(self):
+        from dsh_retrieval.dialogue import DialogueCoordinator, DialogueStore
+        from dsh_retrieval.adapters.projects import LocalProjectAccess
+        from dsh_retrieval.models import Actor
+        runtime = self.runtime([
+            '可以先聊画面内容，数量确定后再整理检索词。',
+            {'action': 'update', 'subject': '小狗在雪地玩耍', 'media_type': 'image',
+             'constraints': '无水印', 'reply': '画面和无水印要求记下了，想要几张？'},
+            '数量用来确定交付目标，你也可以先补充画面要求。',
+            '这些词分别覆盖了奔跑和趴卧两种画面。',
+            {'action': 'revise_terms', 'count_edits': [
+                {'target': 'images', 'labels': [], 'operation': 'scale', 'value': .5}],
+             'reply': '目标减到 10 张，检索词沿用。'},
+            '现在要 10 张小狗在雪地玩耍的图片，要求无水印。'])
+        actor = Actor('tenant-a', 'user-a')
+        projects = LocalProjectAccess([('tenant-a', 'user-a', 'demo', 'default')])
+        with TemporaryDirectory() as folder:
+            store = DialogueStore(Path(folder) / 'dialogue.sqlite3')
+            coordinator = DialogueCoordinator(store, runtime, projects)
+            current = {'session_id': None, 'version': 0, 'stage': 'request'}
+            groups = [{'primary_label': '小狗', 'auxiliary_terms': ['小狗在雪地奔跑', '小狗趴在雪地上']}]
+            def turn(text):
+                nonlocal current
+                body = {'session_id': current['session_id'], 'expected_version': current['version'],
+                        'phase': current['stage'], 'llm_id': 'text', 'message': text,
+                        'generate_terms_when_complete': True}
+                if current['stage'] == 'terms':
+                    body.update(current_groups=groups, current_target_count=current['request']['target_count'])
+                current = coordinator.turn(actor, 'demo', body)
+                return current
+            self.assertEqual(turn('你好，先聊聊怎么找素材')['action'], 'answer')
+            self.assertNotIn('response_format', self.transport.calls[0])
+            self.assertEqual(self.transport.calls[0]['tools'][0]['function']['name'], 'update_request_draft')
+            supplied = turn('想找小狗在雪地玩耍，先不要水印')
+            self.assertEqual(supplied['reply'], '画面和无水印要求记下了，想要几张？')
+            self.assertEqual(supplied['question'], 'target_count')
+            self.assertEqual(turn('为什么先问数量')['request'], supplied['request'])
+            self.assertEqual(turn('20张')['stage'], 'terms')
+            explained = turn('这些词为什么这么写？')
+            self.assertEqual(explained['action'], 'answer')
+            changed = turn('图片数量减半，词不要动')
+            self.assertEqual(changed['request']['target_count'], 10)
+            self.assertEqual(changed['reply'], '目标减到 10 张，检索词沿用。')
+            self.assertEqual(turn('再说一下我现在要什么')['action'], 'answer')
+            context = json.loads(self.transport.calls[-1]['messages'][1]['content'])
+            self.assertEqual(context['current_request']['target_count'], 10)
+            self.assertEqual(context['current_request']['constraints'], '无水印')
+            self.assertNotIn('recent_messages', context)
+            self.assertEqual(len(self.transport.calls), 6)
+            reopened = DialogueCoordinator(DialogueStore(Path(folder) / 'dialogue.sqlite3'), runtime, projects)
+            restored = reopened.snapshot(actor, 'demo', current['session_id'])
+            self.assertEqual(restored['request'], current['request'])
+            self.assertEqual(restored['messages'][-1]['text'], current['reply'])
+
+    def test_plain_text_cannot_claim_or_encode_an_unsubmitted_change(self):
+        from dsh_retrieval.dialogue import PROMPT
+        runtime = self.runtime(['我已经把目标改成3张。', '{"action":"update","target_count":3}'])
+        for _ in range(2):
+            with self.assertRaises(ServiceError) as rejected:
+                runtime._request(runtime.select('text', 'llm'), PROMPT, '为什么这样选词？')
+            self.assertEqual(rejected.exception.code, 'MODEL_OUTPUT_INVALID')
+        runtime = self.runtime(['当前仍在检索中，尚无已发布的交付结果。'])
+        answer = runtime.classify_followup('找20张狗图片', [], '任务怎么样了？', 'text',
+                                           task_context={'run_status': 'RUNNING', 'target_count': 20})
+        self.assertEqual(answer['kind'], 'answer')
+        self.assertIsNone(answer['target_count'])
+
+    def test_exact_group_term_count_followup_skips_model_and_preserves_other_groups(self):
+        runtime = self.runtime([])
+        groups = [{'primary_label': '猫', 'auxiliary_terms': ['猫在草地', '猫在窗边', '猫在树下']},
+                  {'primary_label': '狗', 'auxiliary_terms': ['狗在草地', '狗在室内']}]
+        result = runtime.classify_followup('找20张猫狗图片', groups,
+            '把猫组检索词改成2个，其他不变', 'text')
+        self.assertEqual(result['count_edits'], [
+            {'target': 'terms', 'labels': ['猫'], 'operation': 'set', 'value': 2}])
+        self.assertTrue(result['term_count_only'])
+        self.assertEqual(self.transport.calls, [])
+        unchanged = runtime.classify_followup('找20张猫狗图片', groups,
+            '猫组检索词改成3个，其他不变', 'text')
+        self.assertEqual(unchanged['kind'], 'answer')
+        self.assertEqual(self.transport.calls, [])
+        runtime = self.runtime([{'kind': 'clarify', 'target_count': None,
+                                 'requested_terms_per_group': None, 'reply': '狗组需要怎样调整？'}])
+        runtime.classify_followup('找20张猫狗图片', groups,
+            '猫组检索词改成2个，狗组多找户外场景', 'text')
+        self.assertEqual(len(self.transport.calls), 1)
+
     def test_vlm_cleaning_plan_uses_selected_vision_model_and_requires_coverage(self):
         runtime = self.runtime([{'instructions': ['检查有人和狗', '检查画面无水印']}])
         binding = runtime.binding('text', 'vision')
@@ -73,11 +403,25 @@ class ModelRuntimeTest(unittest.TestCase):
         self.assertEqual(result['count_edits'], edits)
         context = json.loads(self.transport.calls[0]['messages'][1]['content'])
         self.assertEqual(context['current_groups'], groups)
-        self.assertEqual(context['recent_messages'], state['messages'])
+        self.assertNotIn('recent_messages', context)
+        self.assertEqual(self.transport.calls[0]['messages'][2:-1],
+                         [{'role': item['role'], 'content': item['text']} for item in state['messages']])
+        self.assertIsNone(context['reference_request'])
         self.assertFalse(context['execution_context']['search_started'])
         sent_messages = self.transport.calls[0]['messages']
         self.assertEqual(sent_messages[-1], {'role': 'user', 'content': '它减半吧，图再少二十张'})
         self.assertEqual(sent_messages[-2], {'role': 'assistant', 'content': '希望减少多少？'})
+
+    def test_new_request_reference_is_context_not_latest_user_message(self):
+        runtime = self.runtime([{'action': 'update', 'subject': '猫', 'target_count': 20,
+                                 'media_type': 'image', 'constraints': '无水印'}])
+        state = {'stage': 'request', 'question': None, 'messages': [],
+                 'reference_request': '找10张狗图片；无水印'}
+        result = runtime.interpret_dialogue_turn(state, '再找20张猫，条件一样', 'text')
+        self.assertEqual(result['subject'], '猫')
+        context = json.loads(self.transport.calls[0]['messages'][1]['content'])
+        self.assertEqual(context['reference_request'], '找10张狗图片；无水印')
+        self.assertEqual(self.transport.calls[0]['messages'][-1]['content'], '再找20张猫，条件一样')
 
     def test_dialogue_invalid_shape_repairs_with_same_context(self):
         runtime = self.runtime([{'action': 'execute', 'approved': True},
@@ -285,7 +629,8 @@ class ModelRuntimeTest(unittest.TestCase):
             self.assertEqual(answered['kind'], 'answer')
             context = json.loads(self.transport.calls[-1]['messages'][1]['content'])
             self.assertEqual(context['current_groups'], preview)
-            self.assertEqual(context['recent_messages'][0]['text'], '少找点，主体还是狗，不要情绪，多找户外画面')
+            self.assertNotIn('recent_messages', context)
+            self.assertEqual(self.transport.calls[-1]['messages'][2]['content'], '少找点，主体还是狗，不要情绪，多找户外画面')
             self.assertEqual(context['task_context']['target_count'], 5)
             history = call('/v1/retrieval/conversations/' + task['conversation_id'])
             self.assertEqual([item['role'] for item in history['task_messages']],
@@ -582,6 +927,8 @@ class ModelRuntimeTest(unittest.TestCase):
             self.assertEqual(len(self.transport.calls), 0)
             status, suggested = call(path, body)
             self.assertEqual((status, suggested['status']), (200, 'advisory_only'))
+            self.assertGreater(suggested['cleaning_plan_preview']['after_count'], suggested['cleaning_plan_preview']['before_count'])
+            self.assertIn('去掉文字', suggested['cleaning_plan_preview']['nodes'][-1]['source'])
             self.assertEqual(suggested['draft_id'], feedback['draft_id'])
             self.assertEqual(suggested['proposal_digest'], feedback['proposal_digest'])
             self.assertEqual(len(self.transport.calls), 1)
@@ -628,14 +975,26 @@ class ModelRuntimeTest(unittest.TestCase):
 
     def test_temporary_upstream_limit_retries_with_bounded_wait(self):
         limited = HTTPError('https://fixture.invalid/v1/chat/completions', 429,
-                            'private upstream error', {'Retry-After': '99'}, BytesIO(b'private'))
+                            'private upstream error', {'Retry-After': '8'}, BytesIO(b'private'))
         runtime = self.runtime([limited, {'parent_label': None, 'groups': [
             {'primary_label': '狗', 'auxiliary_terms': []}]}])
         with patch('dsh_retrieval.model_runtime.time.sleep') as sleep:
             result = runtime.expand('狗', 'text', 'vision')
         self.assertEqual(result['plan']['groups'][0]['primary_label'], '狗')
         self.assertEqual(len(self.transport.calls), 2)
-        sleep.assert_called_once_with(5)
+        sleep.assert_called_once_with(8)
+
+    def test_long_upstream_cooldown_does_not_retry_prematurely(self):
+        limited = HTTPError('https://fixture.invalid/v1/chat/completions', 429,
+                            'private upstream error', {'Retry-After': '99'}, BytesIO(b'private'))
+        runtime = self.runtime([limited])
+        with patch('dsh_retrieval.model_runtime.time.sleep') as sleep:
+            with self.assertRaises(ServiceError) as caught:
+                runtime.expand('狗', 'text', 'vision')
+        self.assertEqual(caught.exception.code, 'MODEL_RATE_LIMIT')
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(len(self.transport.calls), 1)
+        sleep.assert_not_called()
 
     def test_permanent_http_invalid_response_and_retry_exhaustion_fail_closed(self):
         def error(code):

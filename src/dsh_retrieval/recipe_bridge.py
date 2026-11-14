@@ -128,20 +128,21 @@ def compile_confirmed_recipe(task: Task, registry) -> CleaningRecipe:
     # A single confirmed semantic image rule can be evaluated through several
     # source-grounded checks. Each is a separate VLM call and rule verdict.
     plan = getattr(registry, 'instruction_plan', ())
-    if delivery_targets(proposal["query_spec"].get("grouped_expansion")):
+    if ('cleaning_conditions' in proposal['query_spec']
+            or delivery_targets(proposal["query_spec"].get("grouped_expansion"))):
         expected = confirmed_instruction_plan(proposal["query_spec"])
         if (len(hard) != 1 or hard[0].get('predicate_ref') != 'image.semantic-match@1'
                 or hard[0].get('operator') != 'eq' or hard[0].get('value') is not True
                 or tuple((node['node_id'], node['backend_ref'], node['predicate_ref'],
-                          node['group_id']) for node in plan)
+                          node.get('group_id')) for node in plan)
                 != tuple((node['node_id'], node['backend_ref'], node['predicate_ref'],
-                          node['group_id']) for node in expected)):
+                          node.get('group_id')) for node in expected)):
             raise ServiceError('RECIPE_RULE_MISMATCH',
                                'Group checks differ from confirmed quotas', 409)
         steps = tuple(DetectionStep(node['node_id'], node['backend_ref'],
                                     'vlm.boolean@1', 'vlm.observation@1') for node in plan)
         rules = tuple(CleaningRule(node['rule_id'], node['node_id'], node['predicate_ref'],
-                                   'eq', True, group_id=node['group_id']) for node in plan)
+                                   'eq', True, group_id=node.get('group_id')) for node in plan)
         recipe = CleaningRecipe(task.media_type, review_digest,
                                 registry.registry_digest, steps, rules,
                                 registry.frozen_instructions)
@@ -230,7 +231,7 @@ def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
         hard = [row for row in spec["rules"] if row["hardness"] == "hard"]
         if recipe.instructions:
             plan_for_instructions(spec, recipe.instructions)
-        if delivery_targets(spec.get("grouped_expansion")):
+        if 'cleaning_conditions' in spec or delivery_targets(spec.get("grouped_expansion")):
             plan = confirmed_instruction_plan(spec)
             if (len(hard) != 1 or hard[0].get('predicate_ref') != 'image.semantic-match@1'
                     or hard[0].get('operator') != 'eq' or hard[0].get('value') is not True
@@ -242,7 +243,7 @@ def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
                         or (rule.rule_id, rule.step_id, rule.predicate_ref, rule.operator,
                             rule.value, rule.hardness, rule.group_id)
                         != (node['rule_id'], node['node_id'], node['predicate_ref'],
-                            'eq', True, 'hard', node['group_id'])):
+                            'eq', True, 'hard', node.get('group_id'))):
                     mismatch()
             return
         if any(rule.group_id is not None for rule in recipe.rules):

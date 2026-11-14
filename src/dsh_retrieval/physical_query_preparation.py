@@ -50,7 +50,7 @@ class PhysicalQueryPreparer:
             if (not isinstance(capability, TextQueryCapability)
                     or not isinstance(capability.binding, IndexBinding)
                     or capability.binding in self.capabilities
-                    or capability.media_type != 'image'
+                    or capability.media_type not in ('image', 'video')
                     or not isinstance(capability.filter_template_ref, str)
                     or not capability.filter_template_ref.strip()
                     or type(capability.max_batch_size) is not int
@@ -69,6 +69,9 @@ class PhysicalQueryPreparer:
                 or not isinstance(authorization_version, str) or not authorization_version.strip()):
             raise ServiceError('INVALID_RETRIEVAL_PLAN', 'Invalid preparation bounds', 422)
         query = json.loads(task.confirmed_proposal_json)['query_spec']
+        if query.get('media_type') == 'video':
+            from .video_query import normalize_video_fields
+            normalize_video_fields(query)
         preview = compile_query_branches(query)
         if preview_digest != preview['preview_digest']:
             raise ServiceError('PLAN_DIGEST_MISMATCH', 'Logical preview changed', 409)
@@ -100,7 +103,7 @@ class PhysicalQueryPreparer:
             raise ServiceError('INPUT_LIMIT', 'Batch exceeds binding limit', 422)
         self.authorization.require_access(context, 'library:' + binding.library_id, 'search')
         query_input = query.get('query_input')
-        if query_input is not None:
+        if query_input is not None and query_input.get('type') == 'reference_image':
             encoder = getattr(self.embeddings, 'encode_reference', None)
             if not callable(encoder):
                 raise ServiceError('QUERY_UNSUPPORTED', 'No verified reference-image encoder', 422)

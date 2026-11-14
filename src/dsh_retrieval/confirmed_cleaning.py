@@ -146,6 +146,9 @@ class ConfirmedCleaningService:
             plan = self.repository.incremental_recompute(
                 actor, task_id, recipe,
                 detector_release_digest=registry.release_digest)
+        if not plan.get('available'):
+            plan = {'available': True, 'candidate_source': 'confirmed_candidate_manifest',
+                    'reused_candidate_count': 0, 'revalidated_candidate_count': len(proposal.candidates)}
         describe = getattr(self.registry_provider, 'describe', None)
         execution = (describe(task, instructions=instructions) if callable(describe) else None)
         return {**self._proposal_view(proposal), 'incremental_recompute': plan,

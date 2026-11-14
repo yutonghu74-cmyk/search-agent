@@ -38,6 +38,29 @@ class ExplicitTargetParsingTests(unittest.TestCase):
         for text in ('狗2张', '找一些户外的狗', '猫2张的照片'):
             self.assertEqual(explicit_category_targets(text), [], text)
 
+    def test_added_cleaning_conditions_create_nodes_for_each_quota_group(self):
+        groups = with_delivery_targets(preview_edited_groups(None, [
+            {'primary_label': '狗', 'auxiliary_terms': ['狗在草地']},
+            {'primary_label': '猫', 'auxiliary_terms': ['猫在草地']}])['plan'], {'狗': 2, '猫': 2})
+        spec = {'raw_request': '狗2张，猫2张', 'grouped_expansion': groups}
+        self.assertEqual(len(confirmed_instruction_plan(spec)), 2)
+        spec['raw_request'] += '\n追加检测条件：不要水印'
+        nodes = confirmed_instruction_plan(spec)
+        self.assertEqual(len(nodes), 4)
+        for group in groups['groups']:
+            checks = [node for node in nodes if node['group_id'] == group['group_id']]
+            self.assertEqual(len(checks), 2)
+            self.assertIn('不要水印', checks[1]['source'])
+
+    def test_single_subject_total_is_not_sealed_as_a_group_allocation(self):
+        result = preview_edited_groups(None, [{'primary_label': '毛驴',
+            'auxiliary_terms': [f'毛驴场景{i}' for i in range(8)]}])
+        for text in ('一只毛驴 10张', '找10张毛驴图片', '毛驴图片需要10张'):
+            self.assertIsNone(explicit_group_targets(text, ['毛驴'], 10))
+            sealed = seal_explicit_targets(result, text, 10)
+            self.assertEqual(len(sealed['plan']['groups'][0]['auxiliary_terms']), 8)
+            self.assertIsNone(sealed['plan']['groups'][0]['delivery_target'])
+
     def test_label_first_phrasing_from_the_acceptance_example(self):
         self.assertEqual(explicit_group_targets('狗 20 张、猫 30 张', self.LABELS, 50),
                          {'狗': 20, '猫': 30})
@@ -201,6 +224,39 @@ class QuotaLedgerFlowTests(unittest.TestCase):
         self.assertEqual({rule.group_id for rule in recipe.rules}, set(self.groups.values()))
         self.assertEqual(len(recipe.steps), 2)
         require_confirmed_rules(self.task(), recipe)
+
+    def test_structured_cleaning_edit_reuses_confirmed_candidates_in_new_revision(self):
+        f = self.fixture
+        self.fixed_manifest()
+        old = self.task()
+        draft, _ = f.tasks.save_feedback(f.actor, self.task_id, 'structured-feedback', {
+            'text': '只给猫增加眼睛睁开', 'scope': 'all', 'cleaning_feedback': True,
+            'cleaning_changes': [{'op': 'add', 'condition_id': None,
+                                  'source_text': '眼睛睁开', 'group_id': self.groups['猫']}],
+            'expected_revision': old.confirmed_revision, 'expected_task_version': old.task_version})
+        f.tasks.confirm_feedback(f.actor, self.task_id, 'structured-confirm', {
+            'draft_id': draft['draft_id'], 'expected_draft_version': draft['draft_version'],
+            'proposal_digest': draft['proposal_digest'], 'expected_task_version': draft['base_task_version'],
+            'action': 'confirm'})
+        current = self.task()
+        registry = ConfirmedTaskVLMRegistry(self.runtime).build(f.actor, current)
+        recipe = compile_confirmed_recipe(current, registry)
+        self.assertEqual(len(recipe.steps), 3)
+        self.assertEqual(recipe.rules[-1].group_id, self.groups['猫'])
+        repo = self.repo()
+        from dsh_retrieval.integration_models import AccessContext
+        context = AccessContext(f.actor, self.task_id, 'cleaning_input', 'current')
+        for resource, action in (('library:dogs', 'search'), ('media:unavailable', 'write'),
+                                 ('media:unavailable', 'read')):
+            with self.assertRaises(ServiceError):
+                f.local._authority().require_access(context, resource, action)
+        prepared = repo.prepare_incremental_recompute(f.actor, self.task_id, recipe,
+                                                     detector_release_digest=registry.release_digest)
+        self.assertEqual(len(prepared.candidates), 4)
+        self.assertEqual(prepared.revision, current.confirmed_revision)
+        reopened = self.repo()
+        self.assertEqual(json.loads(reopened.tasks.get(f.actor, self.task_id).confirmed_proposal_json)
+                         ['query_spec']['cleaning_conditions'][-1]['text'], '眼睛睁开')
 
     def test_total_met_but_dog_group_short_is_not_reported_as_met(self):
         _, _, view = self.publish_all_passing()

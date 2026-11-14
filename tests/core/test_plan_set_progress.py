@@ -3,6 +3,7 @@ from dataclasses import replace
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from dsh_retrieval.errors import ServiceError
 from dsh_retrieval.integration_models import SearchPage
@@ -93,6 +94,42 @@ print(repo.get_progress(actor, approved)[0].operation_id)
         result = subprocess.run([sys.executable, '-c', script, str(self.fixture.path),
                                  self.fixture.task_id], capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), operation)
+
+    def test_progress_decodes_only_this_task_and_rechecks_grants(self):
+        operation = self.reserve(self.first, 'first')
+        self.commit(operation, self.first)
+        def history(memory, state):
+            saved, plan_id, request, page = state['operations'][operation]
+            scope = replace(saved.scope, task_id='unrelated-task')
+            historical = replace(saved, scope=scope, members=tuple(
+                replace(member, plan=replace(member.plan, scope=scope))
+                for member in saved.members))
+            state['operations']['unrelated-operation'] = (historical, plan_id, request, page)
+        self.repo._transaction(True, history)
+        from dsh_retrieval.adapters.task_storage import sqlite
+        original = sqlite.decode
+        def decode(value):
+            if (isinstance(value, dict) and value.get('type') == 'RetrievalScope'
+                    and value['value']['task_id'] == 'unrelated-task'):
+                raise AssertionError('decoded another task history')
+            return original(value)
+        with patch.object(sqlite, 'decode', side_effect=decode), patch.object(
+                self.repo.tasks, '_load', side_effect=AssertionError('decoded full task ledger')):
+            self.assertEqual(self.repo.get_current(self.actor, self.fixture.task_id), self.approved)
+            self.assertEqual(self.progress()[0].committed_pages, 1)
+            self.fixture.denied.add('library:lib1')
+            self.assert_code('ACCESS_DENIED', self.progress)
+
+    def test_dirty_task_projection_falls_back_without_stale_version(self):
+        with self.repo.tasks._connect() as db:
+            db.execute('UPDATE task_read_summaries_meta SET dirty=1 WHERE id=1')
+        with patch.object(self.repo.tasks, '_load', wraps=self.repo.tasks._load) as loader:
+            self.assertEqual(self.progress()[0].committed_pages, 0)
+            self.assertEqual(loader.call_count, 1)
+        # Wrong ownership must still fail, including with a dirty projection.
+        from dsh_retrieval.models import Actor
+        self.assert_code('NOT_FOUND', lambda: self.repo.get_progress(
+            Actor(self.actor.tenant_id, 'another-owner'), self.approved))
 
     def test_revoked_library_denies_whole_snapshot(self):
         self.reserve(self.first, 'first')

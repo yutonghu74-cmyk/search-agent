@@ -1,13 +1,14 @@
 """Local multi-branch ledger. No network search or automatic dispatch."""
 from contextlib import closing
 from collections import Counter
-from dataclasses import asdict, replace
+from dataclasses import asdict, replace, dataclass
 import json
 import re
 import sqlite3
 import uuid
 
 from .sqlite import SQLiteTaskRepository, MAX_BYTES, encode, decode, dump
+from . import plan_read_views, plan_sources
 from ...errors import ServiceError
 from ...candidate_contracts import (CandidateManifest, CandidateManifestProposal,
                                     ManifestItem, candidate_identity)
@@ -20,6 +21,12 @@ from ...query_spec import digest
 from ...retrieval_contracts import RetrievalScope, validate_page
 from ...service import require_key
 from ...candidate_browsing import create_projection, append_hit
+
+
+@dataclass(frozen=True)
+class _ReadOnlyResult:
+    """A validated replay branch that has not mutated either source ledger."""
+    value: object
 
 
 def empty_state():
@@ -185,7 +192,12 @@ class SQLitePlanSetApprovalRepository:
                     db.execute('CREATE TABLE plan_set_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)')
                     db.execute('INSERT INTO plan_set_ledger VALUES (1,3,?)', (serialize(empty_state()),))
                 create_projection(db)
-                self._project_hits(db, restore(db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone()))
+                state = restore(db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone())
+                self._project_hits(db, state)
+                plan_read_views.create(db)
+                plan_read_views.sync(db, state)
+                plan_sources.create(db)
+                plan_sources.sync(db, state)
         except sqlite3.Error as error:
             raise ServiceError('STORAGE_UNAVAILABLE', 'Plan set storage unavailable', 503) from error
 
@@ -199,23 +211,103 @@ class SQLitePlanSetApprovalRepository:
                 append_hit(db, approved.proposal_digest, str(operation_id)+':'+str(index),
                            plan_id, branch, json.dumps(encode(hit)))
 
-    def _transaction(self, write, operation):
+    def _transaction(self, write, operation, *, task_id=None):
         try:
             with closing(self.tasks._connect()) as db, db:
                 db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
-                memory = self.tasks._load(db.execute('SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+                task_row = db.execute('SELECT format,payload FROM local_ledger WHERE id=1').fetchone()
+                memory = self.tasks._load(task_row)
+                source_ready = db.execute('SELECT version,dirty FROM plan_source_meta WHERE id=1').fetchone() == (1, 0)
+                summaries_ready = (write and task_id is not None and source_ready and db.execute(
+                    'SELECT dirty FROM task_read_summaries_meta WHERE id=1').fetchone() == (0,)
+                    and db.execute('SELECT ready FROM chat_read_meta WHERE id=1').fetchone() == (1,))
+                views_ready = (write and task_id is not None and db.execute(
+                    'SELECT version,dirty FROM plan_task_read_meta WHERE id=1').fetchone() == (1, 0))
                 state = restore(db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone())
                 committed_before = {key for key, value in state['operations'].items() if value[3] is not None} if write else set()
                 result = operation(memory, state)
+                if isinstance(result, _ReadOnlyResult):
+                    return result.value
                 if write:
                     task_payload, set_payload = dump(memory), serialize(state)
-                    db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (task_payload,))
+                    if task_payload != task_row[1]:
+                        db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (task_payload,))
                     db.execute('UPDATE plan_set_ledger SET format=3,payload=? WHERE id=1', (set_payload,))
                     self._project_hits(db, {'operations': {key: value for key, value in state['operations'].items() if key not in committed_before}})
-                    self.tasks._sync_task_read_summaries(db, memory)
+                    self.tasks._sync_task_read_summaries(db, memory,
+                        task_ids={task_id} if summaries_ready else None)
+                    plan_read_views.sync(db, state, task_ids={task_id} if views_ready else None)
+                    plan_sources.sync(db, state)
                 return result
         except sqlite3.Error as error:
             raise ServiceError('STORAGE_UNAVAILABLE', 'Plan set transaction failed', 503) from error
+
+    def _page_transaction(self, actor, approved, operation):
+        """Prepare partition deltas without a write lock; fence the final commit.
+
+        A connection-local data_version check after BEGIN IMMEDIATE detects any
+        intervening committed write, including task/version and legacy writers.
+        Only pure page ledger callbacks use this path; retries have no external
+        execution side effects.
+        """
+        from copy import deepcopy
+        task_id = approved.scope.task_id
+        try:
+            for attempt in range(3):
+                with closing(self.tasks._connect()) as db:
+                    db.execute('BEGIN')
+                    version = db.execute('PRAGMA data_version').fetchone()[0]
+                    state = plan_sources.load_task(db, task_id)
+                    if state is None:
+                        db.rollback()
+                        return self._transaction(True, operation, task_id=task_id)
+                    task_row = db.execute('SELECT format,payload FROM local_ledger WHERE id=1').fetchone()
+                    shadow = db.execute('SELECT payload FROM plan_set_ledger WHERE id=1').fetchone()[0]
+                    summaries_ready = (db.execute('SELECT dirty FROM task_read_summaries_meta WHERE id=1').fetchone() == (0,)
+                        and db.execute('SELECT ready FROM chat_read_meta WHERE id=1').fetchone() == (1,))
+                    views_ready = db.execute('SELECT version,dirty FROM plan_task_read_meta WHERE id=1').fetchone() == (1, 0)
+                    db.commit()
+                    # Task-ledger restoration, page validation and compatibility
+                    # encoding hold neither a read nor a write transaction.
+                    memory = self.tasks._load(task_row)
+                    before = deepcopy(state)
+                    result = operation(memory, state)
+                    replayed = isinstance(result, _ReadOnlyResult)
+                    if not replayed:
+                        shadow = plan_sources.patch_shadow(shadow, before, state)
+                        if len(shadow.encode()) > MAX_BYTES:
+                            raise ServiceError('STORAGE_LIMIT', 'Plan set ledger exceeds local limit', 507)
+                        prepared = plan_sources.prepare(state)
+                        committed_before = {key for key, value in before['operations'].items() if value[3] is not None}
+                        new_pages = {key: value for key, value in state['operations'].items()
+                                     if key not in committed_before and value[3] is not None}
+                    db.execute('BEGIN IMMEDIATE')
+                    if db.execute('PRAGMA data_version').fetchone()[0] != version:
+                        db.rollback()
+                        continue
+                    try:
+                        # Permission grants may live outside SQLite and can be
+                        # revoked during preparation; recheck before publishing.
+                        self._authorize(memory, actor, task_id, approved, 'approve')
+                        if replayed:
+                            db.commit()
+                            return result.value
+                        db.execute('UPDATE plan_set_ledger SET format=3,payload=? WHERE id=1', (shadow,))
+                        plan_sources.save(db, task_id, prepared)
+                        self._project_hits(db, {'operations': new_pages})
+                        self.tasks._sync_task_read_summaries(db, memory,
+                            task_ids={task_id} if summaries_ready else None,
+                            searches=state['current'] if summaries_ready else None)
+                        plan_read_views.sync(db, state if views_ready else restore((3, shadow)),
+                                             task_ids={task_id} if views_ready else None)
+                        db.commit()
+                        return result
+                    except BaseException:
+                        db.rollback()
+                        raise
+            raise ServiceError('REVISION_CONFLICT', '分页状态正在变化，请用原请求重试。', 409, True)
+        except sqlite3.Error as error:
+            raise ServiceError('STORAGE_UNAVAILABLE', 'Partitioned page transaction failed', 503, True) from error
 
     def _authorize(self, memory, actor, task_id, proposal=None, action='read'):
         task = memory.get(actor, task_id)
@@ -240,7 +332,7 @@ class SQLitePlanSetApprovalRepository:
             self._epoch(state, proposal)
             self._authorize(memory, actor, task.task_id, proposal, 'approve')
             state['proposals'][(task.task_id, proposal.proposal_digest)] = proposal
-        self._transaction(True, put)
+        self._transaction(True, put, task_id=proposal.scope.task_id)
 
     def confirm(self, actor, task_id, *, proposal_digest, expected_task_version, action, key):
         require_key(key)
@@ -287,7 +379,7 @@ class SQLitePlanSetApprovalRepository:
             state['events'].append({'kind': 'plan_set_approved',
                                     'event_id': 'plan-set:' + approved.proposal_digest, 'plan_set': approved})
             return approved, False
-        return self._transaction(True, approve)
+        return self._transaction(True, approve, task_id=task_id)
 
     def get_current(self, actor, task_id):
         def read(memory, state):
@@ -298,38 +390,93 @@ class SQLitePlanSetApprovalRepository:
                 validate_plan_set(actor, task, current)
                 self._authorize(memory, actor, task_id, current)
             return current
-        return self._current_transaction(read)
+        return self._read_transaction(actor, task_id, read)
 
-    def _current_transaction(self, operation):
-        """Read approved headers without decoding every historical search page.
+    def _read_transaction(self, actor, task_id, operation, *, pages=False, manifests=False):
+        """Read one task in a SQLite snapshot, without decoding other tasks' pages.
 
-        SQLite extracts the existing current section in the same read snapshot
-        as the task. Callers still validate scope and current library grants.
-        This is not a cached authorization or an independently stored projection.
+        Use the transactionally maintained per-task view when clean. Dirty or
+        absent views fall back to the authoritative ledger in this snapshot.
+        Authorization is always checked against the current task and grants.
         """
+        from ..memory import InMemoryTaskRepository
         try:
             with closing(self.tasks._connect()) as db, db:
                 db.execute('BEGIN')
-                memory = self.tasks._load(db.execute(
-                    'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
-                rows = db.execute('''SELECT ledger.format,
-                    json_extract(ledger.payload, '$.type'),
-                    json_extract(section.value, '$[1]')
-                    FROM plan_set_ledger AS ledger,
-                         json_each(ledger.payload, '$.value') AS section
-                    WHERE ledger.id=1 AND json_extract(section.value, '$[0]')='current'
-                ''').fetchall()
-                if (len(rows) != 1 or rows[0][0] not in (1, 2, 3)
-                        or rows[0][1] != 'dict'):
-                    raise ValueError('invalid current plan section')
-                current = decode(json.loads(rows[0][2]))
-                if (type(current) is not dict or any(
-                        type(key) is not str or type(value) is not RetrievalPlanSet
-                        for key, value in current.items())):
+                task = self.tasks._read_task_binding(db, actor, task_id)
+                if task is None:
+                    memory = self.tasks._load(db.execute(
+                        'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+                else:
+                    memory = InMemoryTaskRepository()
+                    memory._tasks[task_id] = task
+                row = plan_read_views.read(db, task_id)
+                if row is None:
+                    row = db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone()
+                if (row is None or row[0] not in (1, 2, 3)
+                        or not isinstance(row[1], str) or len(row[1].encode()) > MAX_BYTES):
+                    raise ValueError('invalid plan ledger')
+                tagged = json.loads(row[1])
+                if (type(tagged) is not dict or set(tagged) != {'type', 'value'}
+                        or tagged['type'] != 'dict' or type(tagged['value']) is not list):
+                    raise ValueError('invalid plan ledger')
+                sections = dict(tagged['value'])
+                if len(sections) != len(tagged['value']):
+                    raise ValueError('duplicate plan section')
+                names = ('current', 'operations', 'requests', 'cursors') if pages or manifests else ('current',)
+                if manifests:
+                    names += ('candidate_proposals', 'candidate_manifests', 'candidate_published')
+                state = {}
+                for name in names:
+                    section = sections[name]
+                    if (type(section) is not dict or set(section) != {'type', 'value'}
+                            or section['type'] != 'dict' or type(section['value']) is not list):
+                        raise ValueError('invalid plan section')
+                    if name == 'current':
+                        pairs = [pair for pair in section['value'] if pair[0] == task_id]
+                    elif name == 'operations':
+                        pairs = [pair for pair in section['value']
+                                 if pair[1]['value'][0]['value']['scope']['value']['task_id'] == task_id]
+                    elif name == 'candidate_proposals':
+                        pairs = [pair for pair in section['value']
+                                 if pair[1]['value']['scope']['value']['task_id'] == task_id]
+                    elif name == 'candidate_manifests':
+                        pairs = [pair for pair in section['value']
+                                 if pair[1]['value']['proposal']['value']['scope']['value']['task_id'] == task_id]
+                    else:
+                        pairs = section['value']
+                    state[name] = decode({'type': 'dict', 'value': pairs})
+                    if len(state[name]) != len(pairs):
+                        raise ValueError('duplicate plan entry')
+                if any(type(key) is not str or type(value) is not RetrievalPlanSet
+                       for key, value in state['current'].items()):
                     raise ValueError('invalid current plans')
-                return operation(memory, {'current': current})
-        except (ValueError, TypeError, KeyError, RecursionError) as error:
-            raise ServiceError('STORAGE_CORRUPT', 'Invalid current plan ledger', 500) from error
+                if manifests:
+                    for key, proposal in state['candidate_proposals'].items():
+                        if type(proposal) is not CandidateManifestProposal or proposal.proposal_digest != key:
+                            raise ValueError('invalid candidate proposal')
+                    for ref, manifest in state['candidate_manifests'].items():
+                        if (type(manifest) is not CandidateManifest or manifest.manifest_ref != ref
+                                or state['candidate_proposals'].get(manifest.proposal.proposal_digest) != manifest.proposal
+                                or state['candidate_published'].get(manifest.proposal.proposal_digest) != ref):
+                            raise ValueError('invalid candidate publication')
+                    for key, ref in state['candidate_published'].items():
+                        if key in state['candidate_proposals'] and (
+                                ref not in state['candidate_manifests']
+                                or state['candidate_manifests'][ref].proposal.proposal_digest != key):
+                            raise ValueError('missing candidate publication')
+                    events = decode(sections['candidate_events'])
+                    if type(events) is not list:
+                        raise ValueError('invalid candidate events')
+                    expected = [{'event_id': 'candidate-published:' + ref,
+                        'kind': 'candidate_manifest_published', 'manifest_ref': ref,
+                        'task_id': task_id, 'proposal_digest': manifest.proposal.proposal_digest}
+                        for ref, manifest in state['candidate_manifests'].items()]
+                    if [event for event in events if event['task_id'] == task_id] != expected:
+                        raise ValueError('candidate publication events differ')
+                return operation(memory, state)
+        except (ValueError, TypeError, KeyError, IndexError, RecursionError) as error:
+            raise ServiceError('STORAGE_CORRUPT', 'Invalid task plan ledger', 500) from error
         except sqlite3.Error as error:
             raise ServiceError('STORAGE_UNAVAILABLE', 'Plan set transaction failed', 503) from error
 
@@ -347,7 +494,7 @@ class SQLitePlanSetApprovalRepository:
             validate_plan_set(actor, replace(task, task_version=current.scope.task_version,
                                             run_status=RunStatus.RUNNING, stage='retrieving'), current)
             return current
-        return self._current_transaction(read)
+        return self._read_transaction(actor, task_id, read)
 
     def next_epoch(self, actor, task_id):
         """Return the next monotonic epoch without validating a superseded current set."""
@@ -461,7 +608,7 @@ class SQLitePlanSetApprovalRepository:
                 result.append(head)
             self._authorize(memory, actor, task_id, current)
             return tuple(result)
-        return self._transaction(False, read)
+        return self._read_transaction(actor, approved.scope.task_id, read, pages=True)
 
     def list_committed_pages(self, actor, approved, *, allow_downstream=False):
         """Local read projection for candidate mapping, never a media grant.
@@ -729,7 +876,7 @@ class SQLitePlanSetApprovalRepository:
             state['candidate_keys'][scoped] = (fingerprint, ref)
             return state['candidate_manifests'][ref], replayed
 
-        return self._transaction(True, confirm)
+        return self._transaction(True, confirm, task_id=proposal.scope.task_id)
 
     def get_candidate_manifest(self, actor, task_id, manifest_ref):
         def read(memory, state):
@@ -762,7 +909,7 @@ class SQLitePlanSetApprovalRepository:
             self._validate_candidate_manifest(memory, state, actor,
                                               matches[0].proposal, reading=True)
             return matches[0]
-        return self._transaction(False, read)
+        return self._read_transaction(actor, task_id, read, manifests=True)
 
     def candidate_manifest_candidate_ids(self, actor, task_id, approved):
         """Return identities already fixed by earlier batches of this plan set."""
@@ -797,7 +944,7 @@ class SQLitePlanSetApprovalRepository:
             if old is not None:
                 if old[0] != fingerprint:
                     raise ServiceError('IDEMPOTENCY_CONFLICT', 'Reservation key changed', 409)
-                return old[1], True
+                return _ReadOnlyResult((old[1], True))
             chain = (approved.proposal_digest, plan_id)
             if request.cursor is not None and (*chain, request.cursor) not in state['cursors']:
                 raise ServiceError('CURSOR_INVALID', 'No committed member predecessor', 409)
@@ -815,7 +962,7 @@ class SQLitePlanSetApprovalRepository:
                 state['requests'][fingerprint] = operation_id
             state['reserve_keys'][identity] = (fingerprint, operation_id)
             return operation_id, replay
-        return self._transaction(True, reserve)
+        return self._page_transaction(actor, approved, reserve)
 
     def commit_page(self, actor, approved, *, operation_id, plan_id, request, page,
                     allow_downstream=False):
@@ -831,7 +978,7 @@ class SQLitePlanSetApprovalRepository:
             if record[3] is not None:
                 if record[3] != page:
                     raise ServiceError('RESULT_CONFLICT', 'Committed page is immutable', 409)
-                return True
+                return _ReadOnlyResult(True)
             chain = (approved.proposal_digest, plan_id)
             previous = None
             if request.cursor is not None:
@@ -851,4 +998,4 @@ class SQLitePlanSetApprovalRepository:
                                     'operation_id': operation_id, 'set_digest': approved.proposal_digest,
                                     'plan_id': plan_id})
             return False
-        return self._transaction(True, commit)
+        return self._page_transaction(actor, approved, commit)

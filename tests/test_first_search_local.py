@@ -454,6 +454,39 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.assertGreater(len(progress['members']), 8)
         self.assertEqual({item['committed_pages'] for item in progress['members']}, {1})
 
+    def test_current_manifest_read_keeps_publication_and_media_authority_checks(self):
+        from unittest.mock import patch
+        self.local.auto_start(self.actor, self.task_id, key='manifest-read-search')
+        self.wait_stopped(self.local, self.task_id)
+        preview = self.local.preview_manifest(self.actor, self.task_id)
+        published, _ = self.local.confirm_manifest(self.actor, self.task_id,
+            proposal_digest=preview['proposal_digest'],
+            expected_task_version=preview['expected_task_version'],
+            key='manifest-read-confirm', action='confirm')
+        repo = self.local.repository
+        with patch.object(repo.tasks, '_load', side_effect=AssertionError('decoded full task ledger')):
+            saved = repo.get_current_candidate_manifest(self.actor, self.task_id)
+            self.assertEqual(saved.manifest_ref, published['manifest_ref'])
+        original = repo.authorization.require_access
+        def deny_media(context, resource, action):
+            if action == 'read':
+                raise ServiceError('ACCESS_DENIED', 'media revoked', 403)
+            return original(context, resource, action)
+        with patch.object(repo.authorization, 'require_access', side_effect=deny_media):
+            with self.assertRaises(ServiceError) as error:
+                repo.get_current_candidate_manifest(self.actor, self.task_id)
+            self.assertEqual(error.exception.code, 'ACCESS_DENIED')
+        from contextlib import closing
+        with closing(repo.tasks._connect()) as db, db:
+            payload = json.loads(db.execute('SELECT payload FROM plan_set_ledger WHERE id=1').fetchone()[0])
+            for name, section in payload['value']:
+                if name == 'candidate_events':
+                    section['value'] = []
+            db.execute('UPDATE plan_set_ledger SET payload=? WHERE id=1', (json.dumps(payload),))
+        with self.assertRaises(ServiceError) as error:
+            repo.get_current_candidate_manifest(self.actor, self.task_id)
+        self.assertEqual(error.exception.code, 'STORAGE_CORRUPT')
+
     def test_finished_search_can_fix_verified_candidate_manifest(self):
         self.select_and_approve()
         with self.assertRaises(ServiceError) as pending:

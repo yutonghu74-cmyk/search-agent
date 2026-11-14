@@ -770,18 +770,59 @@ class SQLiteMultiRuleApprovalRepository:
                          for operation_id, approval in state['approvals'].items()
                          if operation_id in state['results'] and approval.proposal.task_id == task_id
                          and approval.proposal.revision < task.confirmed_revision]
-            if not completed:
-                raise ServiceError('RECOMPUTE_SOURCE_UNAVAILABLE',
-                                   'No historical cleaning input is available', 409)
-            revision = max(row[0].proposal.revision for row in completed)
-            generation = max(row[0].proposal.generation for row in completed
-                             if row[0].proposal.revision == revision)
-            sources = sorted((row for row in completed if
-                             (row[0].proposal.revision, row[0].proposal.generation)
-                             == (revision, generation)), key=lambda row: row[0].operation_id)
-            current_groups = set(self._group_targets(task) or {})
+            raw_manifests = []
+            if completed:
+                revision = max(row[0].proposal.revision for row in completed)
+                generation = max(row[0].proposal.generation for row in completed
+                                 if row[0].proposal.revision == revision)
+                sources = sorted((row for row in completed if
+                                 (row[0].proposal.revision, row[0].proposal.generation)
+                                 == (revision, generation)), key=lambda row: row[0].operation_id)
+            else:
+                # Cleaning conditions can change before the first cleaning run.
+                # Rebind only already confirmed inputs; never manufacture a pass.
+                historical = [manifest for manifest in (
+                    list(candidates['manifests'].values()) +
+                    list(candidates['_plan_sets']['candidate_manifests'].values()))
+                    if (manifest.proposal.scope.tenant_id, manifest.proposal.scope.owner_user_id,
+                        manifest.proposal.scope.project_id, manifest.proposal.scope.task_id)
+                    == (task.tenant_id, task.owner_user_id, task.project_id, task_id)
+                    and manifest.proposal.scope.revision < task.confirmed_revision]
+                if not historical:
+                    raise ServiceError('RECOMPUTE_SOURCE_UNAVAILABLE',
+                                       'No confirmed historical candidates are available', 409)
+                revision = max(manifest.proposal.scope.revision for manifest in historical)
+                generation = max(manifest.proposal.scope.generation for manifest in historical
+                                 if manifest.proposal.scope.revision == revision)
+                raw_manifests = [manifest for manifest in historical
+                                 if (manifest.proposal.scope.revision, manifest.proposal.scope.generation)
+                                 == (revision, generation)]
+                old_spec = next(row['proposal']['query_spec'] for row in memory.list_revisions(actor, task_id)
+                                if row['revision'] == revision)
+                new_spec = json.loads(task.confirmed_proposal_json)['query_spec']
+                from ...requirement_changes import same_retrieval_input
+                legacy_append = (any(new_spec['raw_request'].startswith(old_spec['raw_request'] + marker)
+                                     for marker in ('\n追加反馈：', '\n追加检测条件：'))
+                                 and all(new_spec.get(key) == old_spec.get(key)
+                                         for key in ('target_count', 'grouped_expansion', 'query_input')))
+                if not (same_retrieval_input(old_spec, new_spec) or legacy_append):
+                    raise ServiceError('RECOMPUTE_RETRIEVAL_REQUIRED',
+                                       'Search changes require a new retrieval plan', 409)
+                sources = []
+            current_groups = {group_id for group_id, _target in (self._group_targets(task) or ())}
             items, reused, seen = [], [], set()
             context = AccessContext(actor, task_id, 'cleaning_input', 'current')
+            for manifest in raw_manifests:
+                for item in manifest.proposal.items:
+                    if item.candidate_id in seen:
+                        continue
+                    if len(items) >= 100:
+                        raise ServiceError('INPUT_LIMIT', 'At most 100 historical candidates are supported', 422)
+                    if current_groups and not set(item.group_ids) <= current_groups:
+                        raise ServiceError('RECOMPUTE_RETRIEVAL_REQUIRED', 'Changed groups require retrieval', 409)
+                    self.manifests.authorization.require_access(context, item.media.authorized_media_ref, 'read')
+                    seen.add(item.candidate_id)
+                    items.append(ManifestItem(item.media, item.hits, item.group_ids))
             for approval, result in sources:
                 manifest = (candidates['manifests'].get(approval.proposal.manifest_ref)
                             or candidates['_plan_sets']['candidate_manifests'].get(

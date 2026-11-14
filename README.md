@@ -39,13 +39,13 @@ DSH 文本 Agent 已有独立 SDK 适配，需在启动时显式配置 `--dsh-py
 组件通过 `ports.py` 中的端口接入，不能用当前内存实现进入生产。确认后的任务停留在 PLANNING，当前没有调度 Worker。
 
 用户登录已确定对接内部 W3，当前状态为 `NOT_CONNECTED`，本地身份头仍仅供开发。
-接入所需资料与边界见 [W3 登录对接约定](docs/p0/w3-integration.md)。
+接入所需资料与边界见 [平台接入契约](检索Agent平台接入契约_v0.md)。
 
 公司内部使用 ClickHouse 和 Milvus，暂无可复用的 PostgreSQL。
 任务服务已通过 `TaskRepository` 接口与存储解耦；HTTP 开发入口仍使用内存适配器，交互演示已使用本地 SQLite 快照适配器；
 生产任务存储保持待选，PostgreSQL DDL 仅为候选草案。
-参见 [内网对接约定](docs/p0/internal-integration.md) 和
-[对接配置模板](config/internal-integration.example.json)。模板尚未接入运行时加载。
+参见 [平台接入契约](检索Agent平台接入契约_v0.md) 和
+[平台部署配置模板](config/platform.example.json) 和 [接入实现说明](docs/dev/platform-integration.md)。平台实际字段需在私有 wire 配置中核验后接线。
 
 DSH 的独立开发环境已安装在 `.venv-dsh`。文本 Agent 入口使用固定 SDK/运行时 `0.2.1rc2`；依赖见 `requirements-dsh.lock`。运行任何 `dsh` 命令都必须显式提供隔离的 `DSH_HOME`，禁止隐式共享用户级目录。真实检索/清洗的生产接入状态仍按各模块单独验收。
 
@@ -213,3 +213,18 @@ DSH_HOME="$PWD/var/first-search-local/dsh" PYTHONPATH=src python3 -m dsh_retriev
 - `db/migrations/`：可选 PostgreSQL 业务账本 DDL 草案，未应用。
 - `tests/`：无外部服务的契约与状态测试。
 - `docs/p0/`：能力基线和待决参数；`UNRESOLVED` 不得作为门禁通过。
+
+
+## 平台接入入口
+
+统一契约见 [平台接入契约](检索Agent平台接入契约_v0.md)，实现与部署见
+[平台接入说明](docs/dev/platform-integration.md)。原两份 P0 接入说明已移除。
+
+平台入口使用 `python -m dsh_retrieval.platform_server --config /absolute/private/platform.json`，
+配置结构见 [脱敏示例](config/platform.example.json)。入口强制真实身份/项目适配和持久化，
+默认通过声明式 wire 配置转换实际 API 字段，不回退开发身份、本地素材或服务账户权限。
+已装配项目切换、应用会话/CSRF、加密委托及重启恢复、项目素材交集、检索/候选/清洗/补数/交付。
+本地开发入口继续使用原 CLI，二者分开部署。
+
+内网实际 wire 字段、PAT 支持、授权版本映射及测试用户/项目/素材仍须平台提供和验证；
+示例配置不是可直接访问的内网配置。本地测试不能视为 W3/PAT/真实数据接通或上线验收。

@@ -124,8 +124,10 @@ class ExpansionJobs:
         if type(count_only) is not bool or count_only and (
                 not task_id or current is None or not targets
                 or set(targets) != {group['primary_label'] for group in current}
-                or any(targets[group['primary_label']] >= len(group['auxiliary_terms'])
-                       for group in current)):
+                or any(targets[group['primary_label']] > len(group['auxiliary_terms'])
+                       for group in current)
+                or not any(targets[group['primary_label']] < len(group['auxiliary_terms'])
+                           for group in current)):
             raise ServiceError('INVALID_SPEC', 'Count-only reduction needs a smaller existing term target', 422)
         if direct_groups is not None and count_only:
             raise ServiceError('INVALID_SPEC', 'Explicit replacement cannot be count-only', 422)
@@ -152,6 +154,8 @@ class ExpansionJobs:
                                    targets[group['primary_label']] >= len(group['auxiliary_terms'])
                                    for group in current)) else None)
             initial = {'status': 'queued', 'groups': starting_groups, 'targets': targets,
+                       'queued_at': self._now(), 'first_batch_at': self._now() if starting_groups else None,
+                       'completed_at': None,
                        'direct_edit': direct_groups is not None,
                        'model_binding': binding,
                        'deferred_count_edits': deferred_edits,
@@ -205,6 +209,12 @@ class ExpansionJobs:
                 if self._load(job_id)[1]['status'] in ('queued', 'running'):
                     self._schedule(job_id)
 
+    def close(self):
+        # Drain work before closing the ledger or its credential dependencies.
+        self.pool.shutdown(wait=True)
+        with self.lock:
+            self.db.close()
+
     def _schedule(self, job_id):
         if job_id not in self.running:
             self.running.add(job_id)
@@ -221,17 +231,45 @@ class ExpansionJobs:
 
     def _public(self, job_id):
         payload, state, meta = self._load(job_id)
+        def elapsed(end):
+            if not state.get('queued_at') or not state.get(end):
+                return None
+            return max(0, round((datetime.fromisoformat(state[end]) -
+                                 datetime.fromisoformat(state['queued_at'])).total_seconds() * 1000))
+        preview = [{'primary_label': group['primary_label'],
+                    'auxiliary_terms': group['auxiliary_terms'][:8],
+                    'generated_terms': len(group['auxiliary_terms'])}
+                   for group in state.get('groups') or []]
+        changes = None
+        if state['status'] == 'completed' and payload.get('current_groups') is not None:
+            old = {(group['primary_label'], term) for group in payload['current_groups']
+                   for term in group['auxiliary_terms']}
+            new = {(group['primary_label'], term) for group in state.get('groups') or []
+                   for term in group['auxiliary_terms']}
+            old_labels = {group['primary_label'] for group in payload['current_groups']}
+            new_labels = {group['primary_label'] for group in state.get('groups') or []}
+            changes = {'target_before': payload.get('current_target_count') or payload['target_count'],
+                       'target_after': payload['target_count'],
+                       'added_terms': len(new - old), 'removed_terms': len(old - new),
+                       'added_groups': len(new_labels - old_labels), 'removed_groups': len(old_labels - new_labels)}
         return {'job_id': job_id, 'dialogue_session_id': meta[3], 'dialogue_version': meta[4],
                 'task_id': meta[3][5:] if meta[3].startswith('task:') else None,
                 'task_version': meta[4] if meta[3].startswith('task:') else None,
                 'revision': payload.get('source_revision'),
                 'raw_request': payload['raw_request'], 'target_count': payload['target_count'],
+                'model_selection': dict(payload['model_selection']),
+                'elapsed_ms': max(0, round((datetime.fromisoformat(state.get('completed_at') or self._now()) -
+                    datetime.fromisoformat(state.get('queued_at') or self._now())).total_seconds() * 1000)),
                 'feedback_text': payload.get('feedback_text'),
                 'confirmation_feedback_text': payload.get('confirmation_feedback_text'),
                 'requested_terms_per_group': payload.get('requested_terms_per_group'),
                 'source_groups': payload.get('current_groups') if payload.get('term_count_only') else None,
                 'status': state['status'], 'completed_terms': state['completed'],
                 'target_terms': state['total'], 'failed_batch': state['failed_batch'],
+                'preview_groups': preview,
+                'changes': changes,
+                'timing_ms': {'first_batch': elapsed('first_batch_at'),
+                              'complete': elapsed('completed_at')},
                 'error': state['error'], 'result': state['result']}
 
     def _work(self, job_id):
@@ -280,8 +318,11 @@ class ExpansionJobs:
                         raise ServiceError('MODEL_CONFIG_CHANGED', 'Model profile changed; restart expansion', 409)
                     if state['groups'] is None:
                         batch_marker = {'group': '初始分组', 'offset': 0, 'size': 8}
+                        small_initial = (payload['target_count'] <= 300 and not payload.get('current_groups')
+                                         and not state.get('initial_count') and not state.get('targets')
+                                         and not state.get('deferred_count_edits'))
                         seed = self.runtime.expand_chunk(payload['raw_request'], selection['llm'], selection['vlm'],
-                            limit=8, feedback_text=payload.get('feedback_text'), current_groups=payload.get('current_groups'))
+                            limit=3 if small_initial else 8, feedback_text=payload.get('feedback_text'), current_groups=payload.get('current_groups'))
                         groups = seed['plan']['groups']
                         groups = [{'primary_label': group['primary_label'], 'auxiliary_terms': group['auxiliary_terms']} for group in groups]
                         if state.get('deferred_count_edits'):
@@ -297,6 +338,7 @@ class ExpansionJobs:
                         if set(targets) != {group['primary_label'] for group in groups}:
                             raise ServiceError('MODEL_OUTPUT_INVALID', 'Generated group labels changed', 422)
                         state['groups'] = groups
+                        state['first_batch_at'] = state.get('first_batch_at') or self._now()
                         state['targets'] = targets
                         state['total'] = sum(targets.values())
                         state['completed'] = sum(len(group['auxiliary_terms']) for group in groups)
@@ -322,6 +364,7 @@ class ExpansionJobs:
                         if state.get('direct_edit'):
                             state['result']['note'] = '按用户逐字指定的完整词表生成；未调用扩词模型。当前仍是待确认草稿。'
                         state['status'] = 'completed'
+                        state['completed_at'] = self._now()
                         state['completed'] = state['total']
                         state['failed_batch'] = None
                         with self.lock:

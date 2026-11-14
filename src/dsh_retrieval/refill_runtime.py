@@ -12,12 +12,12 @@ class RefillRuntime:
     def __init__(self, ledger_path, service, first_search, *, start=True,
                  poll_seconds=1.0):
         mode = getattr(first_search, "mode", None)
-        if mode == "LOCAL_CLIP":
+        if mode in ("LOCAL_CLIP", "PLATFORM"):
             adapter = LocalCLIPRefillAdapter(first_search)
         elif mode == "CLIP_COMBINED":
             adapter = CombinedCLIPRefillAdapter(first_search)
         else:
-            raise ValueError("refill runtime requires LOCAL_CLIP or CLIP_COMBINED")
+            raise ValueError("refill runtime requires a supported approved search mode")
         authority = first_search._authority()
         self.reservations = SQLiteRefillReservationRepository(
             ledger_path, projects=service.projects, authorization=authority)
@@ -67,7 +67,7 @@ class RefillRuntime:
 def build_refill_runtime(ledger_path, service, first_search, *, start=True,
                          poll_seconds=1.0):
     """Return an enabled runtime only for search modes with refill executors."""
-    if getattr(first_search, "mode", None) not in {"LOCAL_CLIP", "CLIP_COMBINED"}:
+    if getattr(first_search, "mode", None) not in {"LOCAL_CLIP", "CLIP_COMBINED", "PLATFORM"}:
         return None
     return RefillRuntime(ledger_path, service, first_search, start=start,
                          poll_seconds=poll_seconds)

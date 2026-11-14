@@ -1,0 +1,12 @@
+{
+  "api_base_url": "https://platform.example.invalid/api/v1",
+  "protocol_config": "/srv/agent-config/platform-wire.json",
+  "tenant_id": "platform-instance-namespace",
+  "task_ledger": "/srv/agent-state/tasks.sqlite3",
+  "dialogue_ledger": "/srv/agent-state/dialogue.sqlite3",
+  "catalog_ledger": "/srv/agent-state/catalog.sqlite3",
+  "credential_store": "/srv/agent-state/delegation.sqlite3",
+  "credential_key": "/srv/agent-secrets/delegation.key",
+  "allowed_actions": ["read", "create", "approve"],
+  "frame_origins": ["https://platform.example.invalid"]
+}

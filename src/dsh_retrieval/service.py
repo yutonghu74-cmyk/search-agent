@@ -6,6 +6,7 @@ import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as Base64Error
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
@@ -27,6 +28,7 @@ def _revision_changes(previous: dict[str, Any], current: dict[str, Any]) -> tupl
         ("target_count", "目标数量"),
         ("grouped_expansion", "分组与配额"),
         ("conditions", "清洗条件"),
+        ("cleaning_conditions", "清洗检测条件"),
         ("constraints", "清洗约束"),
         ("refill_policy", "补数策略"),
     )
@@ -85,7 +87,7 @@ class TaskService:
         proposal = normalize_proposal(raw)
         self.projects.require_access(actor, project_id, proposal["dimension_id"], "create")
         query_input = proposal["query_spec"].get("query_input")
-        if query_input is not None:
+        if query_input is not None and query_input.get("type") == "reference_image":
             if self.query_images is None:
                 raise ServiceError("QUERY_IMAGES_UNAVAILABLE", "参考图输入尚未启用", 503)
             self.query_images.require_input(actor, project_id, query_input)
@@ -129,6 +131,13 @@ class TaskService:
             raise invalid("proposal_digest must be a SHA-256 digest", "$.proposal_digest")
         draft = self.repository.get_draft(actor, body["draft_id"])
         self.projects.require_access(actor, draft.project_id, draft.dimension_id, "approve")
+        from .video_query import require_video_execution
+        query_spec = json.loads(draft.proposal_json)["query_spec"]
+        if query_spec.get("media_type") == "video" and (
+                draft.draft_version != body["expected_draft_version"]
+                or draft.proposal_digest != body["proposal_digest"]):
+            raise ServiceError("DRAFT_VERSION_CONFLICT", "draft version or proposal digest is stale", 409)
+        require_video_execution(query_spec)
         stored, replayed = self.repository.confirm_draft(actor, idempotency_key, body["draft_id"],
                                                         body["expected_draft_version"], body["proposal_digest"])
         return stored.to_summary(), replayed
@@ -157,11 +166,16 @@ class TaskService:
 
     def save_feedback(self, actor: Actor, task_id: str, key: str, body: dict[str, Any],
                       draft_id: str | None = None) -> tuple[dict[str, Any], bool]:
+        return self.commit_feedback(actor, self.prepare_feedback(actor, task_id, key, body, draft_id))
+
+    def prepare_feedback(self, actor: Actor, task_id: str, key: str, body: dict[str, Any],
+                         draft_id: str | None = None) -> dict:
+        """Freeze a validated write before a durable command may commit it."""
         require_key(key)
         fields = {"text", "scope", "expected_revision", "expected_task_version"}
         update_fields = fields | {"expected_draft_version"}
         required = update_fields if draft_id else fields
-        optional = {"grouped_expansion", "target_count"}
+        optional = {"grouped_expansion", "target_count", "cleaning_feedback", "cleaning_changes", "requirement_changes"}
         if (not isinstance(body, dict) or not required <= set(body)
                 or set(body) - required - optional
                 or ("target_count" in body) != ("grouped_expansion" in body)):
@@ -188,7 +202,36 @@ class TaskService:
         current = proposal.get("query_spec", {}).get("raw_request")
         if not isinstance(current, str) or not current:
             raise ServiceError("STORAGE_CORRUPT", "confirmed proposal is invalid", 500)
-        proposal["query_spec"]["raw_request"] = current + "\n追加反馈：" + text.strip()
+        if 'cleaning_feedback' in body and body['cleaning_feedback'] is not True:
+            raise invalid('cleaning_feedback must be true', '$.cleaning_feedback')
+        if 'cleaning_changes' in body or 'requirement_changes' in body:
+            if not body.get('cleaning_feedback') or 'grouped_expansion' in body:
+                raise invalid('structured cleaning changes cannot change retrieval fields')
+            if 'cleaning_changes' in body and 'requirement_changes' in body:
+                raise invalid('use one structured change protocol')
+            from .requirement_changes import apply_changes
+            hard = [row for row in proposal['query_spec'].get('rules', []) if row.get('hardness') == 'hard']
+            if (len(hard) != 1 or hard[0].get('predicate_ref') != 'image.semantic-match@1'
+                    or hard[0].get('operator') != 'eq' or hard[0].get('value') is not True):
+                raise ServiceError('STRUCTURED_CLEANING_UNAVAILABLE', '此任务尚未配置逐图语义清洗规则。', 409)
+            if draft_id:
+                pending = self.get_feedback(actor, task_id, draft_id)
+                if (pending['status'] != 'ready' or pending['draft_version'] != body['expected_draft_version']
+                        or pending['base_revision'] != task.confirmed_revision
+                        or pending['base_task_version'] != task.task_version):
+                    raise ServiceError('DRAFT_VERSION_CONFLICT', '清洗草稿已变化，请刷新。', 409)
+                proposal = deepcopy(pending['proposal'])
+            if 'requirement_changes' in body:
+                from .requirement_changes import apply_requirement_changes
+                proposal['query_spec'] = apply_requirement_changes(proposal['query_spec'], body['requirement_changes'], text)
+            else:
+                proposal['query_spec']['cleaning_conditions'] = apply_changes(
+                    proposal['query_spec'], body['cleaning_changes'], text)
+        else:
+            if 'cleaning_conditions' in proposal['query_spec'] and body.get('cleaning_feedback'):
+                raise ServiceError('STRUCTURED_CHANGE_REQUIRED', '此需求请使用结构化修改，不能追加文本。', 422)
+            marker = "\n追加检测条件：" if body.get('cleaning_feedback') else "\n追加反馈："
+            proposal["query_spec"]["raw_request"] = current + marker + text.strip()
         if "grouped_expansion" in body:
             proposal["query_spec"]["grouped_expansion"] = body["grouped_expansion"]
             proposal["query_spec"]["target_count"] = body["target_count"]
@@ -205,13 +248,31 @@ class TaskService:
                 actor.tenant_id, actor.user_id, task.project_id, feedback_draft_id,
                 len(conversation.messages) + 1, "feedback", text.strip(), datetime.now(UTC),
             )
-        return self.repository.save_feedback_draft(
-            actor, key, task_id, expected_revision=body["expected_revision"],
-            expected_task_version=body["expected_task_version"], proposal_json=proposal_json,
-            feedback_text=text.strip(), scope="all", draft_id=feedback_draft_id,
-            expected_draft_version=body.get("expected_draft_version"),
-            conversation_message=message,
-        )
+        message_data = asdict(message) if message else None
+        if message_data:
+            message_data['created_at'] = message.created_at.isoformat()
+        return {'tenant_id': actor.tenant_id, 'user_id': actor.user_id, 'task_id': task_id,
+                'project_id': task.project_id, 'dimension_id': task.dimension_id, 'key': key,
+                'args': {'expected_revision': body['expected_revision'],
+                         'expected_task_version': body['expected_task_version'], 'proposal_json': proposal_json,
+                         'feedback_text': text.strip(), 'scope': 'all', 'draft_id': feedback_draft_id,
+                         'expected_draft_version': body.get('expected_draft_version')},
+                'message': message_data}
+
+    def commit_feedback(self, actor: Actor, prepared: dict) -> tuple[dict, bool]:
+        """Replay exactly the frozen write; repository receipts precede stale checks."""
+        if (prepared.get('tenant_id'), prepared.get('user_id')) != (actor.tenant_id, actor.user_id):
+            raise ServiceError('ACCESS_DENIED', 'Prepared feedback belongs to another actor', 403)
+        task = self.repository.get(actor, prepared['task_id'])
+        self.projects.require_access(actor, task.project_id, task.dimension_id, 'create')
+        if (task.project_id, task.dimension_id) != (prepared['project_id'], prepared['dimension_id']):
+            raise ServiceError('STORAGE_CORRUPT', 'Prepared feedback scope changed', 500)
+        message = deepcopy(prepared['message'])
+        if message:
+            message['created_at'] = datetime.fromisoformat(message['created_at'])
+            message = ConversationMessage(**message)
+        return self.repository.save_feedback_draft(actor, prepared['key'], task.task_id,
+                                                   **prepared['args'], conversation_message=message)
 
     def get_feedback(self, actor: Actor, task_id: str, draft_id: str) -> dict[str, Any]:
         task = self.repository.get(actor, task_id)

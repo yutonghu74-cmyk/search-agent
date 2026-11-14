@@ -1,0 +1,56 @@
+{
+  "dimension_id": "default",
+  "query_spec": {
+    "schema_version": "query-spec@3",
+    "raw_request": "找10个喝水的原视频",
+    "media_type": "video",
+    "target_count": 10,
+    "business_domain": "video",
+    "intra_batch_dedup": {
+      "policy_ref": "exact-content",
+      "config_version": "1"
+    },
+    "cross_batch_dedup": {
+      "scope": "none",
+      "references": [],
+      "comparison_methods": [],
+      "reference_digest": null
+    },
+    "refill_policy": {
+      "mode": "input_only",
+      "target_count": 10,
+      "approved_library_ids": [],
+      "progression": "manual"
+    },
+    "count_unit": "distinct_video",
+    "query_input": {
+      "mode": "text",
+      "text": "有人喝水"
+    },
+    "video_conditions": {
+      "clauses": [
+        {
+          "id": "visual_1",
+          "channel": "visual",
+          "predicate": "有人喝水"
+        },
+        {
+          "id": "visual_2",
+          "channel": "visual",
+          "predicate": "画面包含杯子"
+        }
+      ],
+      "relation": {
+        "operator": "all",
+        "scope": "same_video"
+      }
+    }
+  },
+  "node_modes": {
+    "expansion": "manual",
+    "retrieval": "manual",
+    "cleaning": "manual",
+    "refill": "manual",
+    "packaging": "manual"
+  }
+}

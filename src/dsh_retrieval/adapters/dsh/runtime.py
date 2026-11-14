@@ -10,11 +10,13 @@ import subprocess
 import uuid
 
 from ...errors import ServiceError
+from ... import model_budget
 from ...intent_model import IntentModelClient, SYSTEM_PROMPT
 from ...dialogue import PROMPT as DIALOGUE_PROMPT
-from ...model_runtime import EXPANSION_PROMPT, ModelRuntime
+from ...model_runtime import EXPANSION_PROMPT, ModelRuntime, conversation_mode
 from ...query_spec import digest
 from .runs import RunIndex
+from ...conversation import conversation_effort
 
 _scope = ContextVar('dsh_request_scope', default=None)
 
@@ -117,18 +119,30 @@ class DshModelRuntime(ModelRuntime):
                      'expansion_draft' if system.startswith(EXPANSION_PROMPT) else 'proposal')
         context = {'tool_mode': tool_mode,
                    'messages': (conversation or []) + [{'role': 'user', 'content': content}]}
+        chat_mode = conversation_mode(system)
+        if chat_mode:
+            context['conversation_mode'] = chat_mode
+        if tool_mode == 'request_draft' or chat_mode:
+            context['context_delivery'] = 'inline'
         request_timeout = profile.config.request_timeout_seconds or 90
+        remaining = model_budget.remaining()
+        if remaining < request_timeout:
+            request_timeout = max(1, int(remaining))
         request = {'run_id': run_id, 'turn_dir': str(root), 'model': profile.config.model,
                    'base_url': profile.config.base_url, 'api_key': profile.config.api_key,
                    'max_tokens': profile.config.max_tokens or 8000,
                    'request_timeout_seconds': request_timeout,
                    'system': system, 'context': context}
+        if chat_mode and conversation_effort(profile.config.model):
+            request['reasoning_effort'] = conversation_effort(profile.config.model)
         metadata = {'run_id': run_id, 'principal_digest': principal, 'engine': 'dsh',
                     'runtime_version': '0.2.1rc2', 'status': 'running',
                     'request_id': scope.get('request_id'), 'route': scope.get('route')}
         metadata['business_binding'] = {key: scope[key] for key in
             ('project_id', 'dialogue_session_id', 'expected_version', 'task_id', 'task_version',
              'revision', 'generation') if key in scope}
+        if request.get('reasoning_effort'):
+            metadata['reasoning_effort'] = request['reasoning_effort']
         audit = root / 'audit.json'
         audit.write_text(json.dumps(metadata))
         self.runs.start(run_id, principal=principal, tenant=scope['tenant_id'], scope=scope,
@@ -147,7 +161,8 @@ class DshModelRuntime(ModelRuntime):
             budget = self.timeout
             if profile.config.request_timeout_seconds:
                 budget = max(budget, min(300, request_timeout + 30))
-            stdout, _ = proc.communicate(payload, timeout=budget)
+            stdout, _ = proc.communicate(payload, timeout=min(budget, model_budget.remaining()))
+            model_budget.remaining()
             if len(stdout) > 200_000:
                 raise ValueError()
             result = json.loads(stdout)
@@ -158,6 +173,7 @@ class DshModelRuntime(ModelRuntime):
                 'TIMEOUT': ('DSH_TIMEOUT', '模型响应超时，原需求未改变，请重试。', 504, True),
                 'TRANSPORT': ('MODEL_UNAVAILABLE', '模型服务暂时不可用，请稍后重试。', 503, True),
                 'INVALID_REQUEST': ('MODEL_REQUEST_FAILED', '模型服务拒绝此请求，请检查账号状态、额度或接口配置。', 502, False),
+                'INVALID_PROPOSAL': ('MODEL_OUTPUT_INVALID', '对话回复未通过校验，原需求保持不变。', 502, False),
             }
             if result.get('error') in errors:
                 raise ServiceError(*errors[result['error']])
@@ -171,6 +187,11 @@ class DshModelRuntime(ModelRuntime):
             return result['proposal']
         except subprocess.TimeoutExpired:
             metadata['status'] = 'timeout'
+            try:
+                model_budget.remaining()
+            except ServiceError as error:
+                metadata['error_code'] = error.code
+                raise
             raise ServiceError('DSH_TIMEOUT', 'Agent timed out; no proposal accepted, retry permitted', 504, True) from None
         except ServiceError as error:
             metadata['status'] = 'rejected'

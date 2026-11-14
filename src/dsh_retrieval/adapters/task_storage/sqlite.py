@@ -195,6 +195,8 @@ class SQLiteTaskRepository:
                 tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 allowed = {"local_ledger", "retrieval_ledger", "candidate_ledger",
                            "multi_rule_cleaning_ledger", "plan_set_ledger",
+                           "plan_task_read_views", "plan_task_read_meta",
+                           "plan_source_meta", "plan_task_sources", "plan_page_sources",
                            "search_dispatch_outbox", "candidate_browse_hits", "sqlite_sequence",
                            "image_deliveries", "image_delivery_events", "cleaning_dispatch_attempts", "cleaning_checkpoints",
                            "refill_reservations", "refill_dispatch_outbox",
@@ -357,33 +359,36 @@ class SQLiteTaskRepository:
                                    _published_page=page).to_view()
 
     @staticmethod
-    def _sync_task_read_summaries(db, memory):
+    def _sync_task_read_summaries(db, memory, *, task_ids=None, searches=None):
         """Keep the bounded list projection in the business write transaction."""
         from ...chat_history import sync as sync_chat_history
-        sync_chat_history(db, memory)
+        sync_chat_history(db, memory, task_ids=task_ids)
         live = set(memory._tasks)
         tables = {row[0] for row in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-        searches = {}
-        if 'plan_set_ledger' in tables:
+        supplied_searches = searches is not None
+        searches = searches or {}
+        if not supplied_searches and 'plan_set_ledger' in tables:
             from .plan_sets import restore as restore_plan_sets
             searches = restore_plan_sets(db.execute(
                 'SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone())['current']
         pending = {}
         for draft in memory._feedback_drafts.values():
-            if draft['status'] == 'ready':
+            if draft['status'] == 'ready' and (task_ids is None or draft['task_id'] in task_ids):
                 task_id = draft['task_id']
                 if task_id in pending:
                     raise ServiceError('STORAGE_CORRUPT',
                         'multiple pending feedback drafts', 500)
                 pending[task_id] = memory._feedback_view(draft)
         for (task_id,) in db.execute('SELECT task_id FROM task_read_summaries'):
-            if task_id not in live:
+            if task_id not in live and (task_ids is None or task_id in task_ids):
                 for table in ('task_node_read_heads', 'task_node_read_items'):
                     db.execute(f'DELETE FROM {table} WHERE task_id=?', (task_id,))
                 db.execute('DELETE FROM task_read_summaries WHERE task_id=?',
                            (task_id,))
         for task in memory._tasks.values():
+            if task_ids is not None and task.task_id not in task_ids:
+                continue
             if task.confirmed_proposal_json is not None:
                 try:
                     proposal = json.loads(task.confirmed_proposal_json)
@@ -910,6 +915,12 @@ class SQLiteTaskRepository:
         row = db.execute("SELECT format, payload FROM plan_set_ledger WHERE id=1").fetchone()
         state, purged_digests = purge(load(row), task_ids)
         db.execute("UPDATE plan_set_ledger SET format=3, payload=? WHERE id=1", (dump(state),))
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_task_read_views'").fetchone():
+            from .plan_read_views import sync
+            sync(db, state)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_task_sources'").fetchone():
+            from . import plan_sources
+            plan_sources.sync(db, state)
         return purged_digests
 
     def put_cleaning_proposal(self, *args, **kwargs): return self._call("put_cleaning_proposal", True, *args, **kwargs)

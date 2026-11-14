@@ -9,6 +9,7 @@ from .errors import ServiceError, invalid
 from .query_spec import normalize_query_spec, digest
 from .expansion_models import delivery_targets, normalize_grouped_expansion
 from .refill_planning import normalize_refill_limits
+from .video_query import VIDEO_FIELDS, normalize_video_fields, video_draft_summary
 
 NODES = ("expansion", "retrieval", "cleaning", "refill", "packaging")
 GROUP_QUOTAS_ENV = "DSH_GROUP_QUOTAS"
@@ -41,8 +42,10 @@ def normalize_proposal(body: dict) -> dict:
         raise invalid("query_spec must be an object", "$.query_spec")
     if {"dedup_policy", "allow_auto_refill", "auto_refill"} & set(spec):
         raise ServiceError("SCHEMA_CONFLICT", "legacy dedup/refill fields are not accepted", 422)
-    if spec.get("schema_version") != "query-spec@2":
-        raise ServiceError("SCHEMA_CONFLICT", "new drafts require query-spec@2", 422)
+    version = spec.get("schema_version")
+    if version not in ("query-spec@2", "query-spec@3"):
+        raise ServiceError("SCHEMA_CONFLICT", "new drafts require query-spec@2 or query-spec@3", 422)
+    video_fields = normalize_video_fields(spec) if version == "query-spec@3" else {}
     constraints = spec.get("source_constraints", [])
     if not isinstance(constraints, list) or any(not isinstance(item, dict) for item in constraints):
         raise invalid("source_constraints must be an array of objects", "$.query_spec.source_constraints")
@@ -94,16 +97,18 @@ def normalize_proposal(body: dict) -> dict:
     except ValueError as error:
         raise invalid(str(error), "$.query_spec.refill_limits") from None
     grouped_expansion = spec.get("grouped_expansion")
-    query_input = _normalize_query_input(spec.get("query_input"))
+    query_input = _normalize_query_input(spec.get("query_input")) if version == "query-spec@2" else None
     legacy = {k: v for k, v in spec.items()
-              if k not in required | {"grouped_expansion", "refill_limits", "query_input"}}
+              if k not in required | {"grouped_expansion", "refill_limits", "query_input", "cleaning_conditions"}
+              | (VIDEO_FIELDS if version == "query-spec@3" else set())}
     legacy["schema_version"] = "query-spec@1"
     # Reuse field/rule validation, not the old wire contract or its defaults.
     legacy["allow_auto_refill"] = False
-    normalized = normalize_query_spec(legacy)
+    normalized = normalize_query_spec(legacy, stage="P3" if video_fields else "P1")
     normalized.pop("allow_auto_refill", None)
     normalized.pop("dedup_policy", None)
-    normalized["schema_version"] = "query-spec@2"
+    normalized["schema_version"] = version
+    normalized.update(video_fields)
     normalized.update({key: deepcopy(spec[key]) for key in required})
     normalized["refill_limits"] = refill_limits
     if query_input is not None:
@@ -124,6 +129,9 @@ def normalize_proposal(body: dict) -> dict:
             if sum(target for _, target in targets) != normalized["target_count"]:
                 raise invalid("group delivery targets must sum to target_count",
                               "$.query_spec.grouped_expansion")
+    if 'cleaning_conditions' in spec:
+        from .requirement_changes import normalize_conditions
+        normalized['cleaning_conditions'] = normalize_conditions(spec['cleaning_conditions'], normalized)
     return {"dimension_id": dimension, "query_spec": normalized, "node_modes": dict(modes)}
 
 
@@ -144,9 +152,12 @@ class Draft:
         return digest({"project_id": self.project_id, "proposal": json.loads(self.proposal_json)})
 
     def to_summary(self) -> dict:
+        proposal = json.loads(self.proposal_json)
         return {"draft_id": self.draft_id, "draft_version": self.draft_version,
                 "project_id": self.project_id, "dimension_id": self.dimension_id,
                 "conversation_id": self.conversation_id,
-                "proposal": json.loads(self.proposal_json), "proposal_digest": self.proposal_digest,
+                "proposal": proposal, "proposal_digest": self.proposal_digest,
                 "status": "confirmed" if self.confirmed_task_id else "draft",
-                "confirmed_task_id": self.confirmed_task_id}
+                "confirmed_task_id": self.confirmed_task_id,
+                **({"video_summary": video_draft_summary(proposal["query_spec"])}
+                   if proposal["query_spec"].get("media_type") == "video" else {})}

@@ -26,8 +26,8 @@ class LocalCLIPRefillAdapter:
     """Continue exactly one pending page of the approved LOCAL_CLIP plan set."""
 
     def __init__(self, first_search):
-        if getattr(first_search, "mode", None) != "LOCAL_CLIP":
-            raise ValueError("LOCAL_CLIP first search is required")
+        if getattr(first_search, "mode", None) not in ("LOCAL_CLIP", "PLATFORM"):
+            raise ValueError("approved plan-set first search is required")
         self.search = first_search
 
     def list_refill_positions(self, actor, task_id, *, revision, generation):
@@ -48,7 +48,7 @@ class LocalCLIPRefillAdapter:
             branch = branches.get(member.branch_id)
             if branch is None:
                 raise ServiceError("STORAGE_CORRUPT", "approved CLIP branch disappeared", 500)
-            params = {"mode": "LOCAL_CLIP", "set_digest": approved.proposal_digest,
+            params = {"mode": self.search.mode, "set_digest": approved.proposal_digest,
                       "plan_id": request.plan_id,
                       "binding_id": request.binding.binding_id,
                       "filter_template_ref": request.filter_template_ref,

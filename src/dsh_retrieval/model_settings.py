@@ -313,17 +313,23 @@ class ModelSettings:
         return None
 
     def save_defaults(self, body, runtime):
-        if set(body) != {'llm', 'vlm'}:
+        if not {'llm', 'vlm'} <= set(body) or set(body) - {'llm', 'vlm', 'dialogue_llm'}:
             invalid('请配置默认 LLM 和 VLM')
-        for kind in ('llm', 'vlm'):
-            if not isinstance(body[kind], str):
+        previous = self.defaults()
+        defaults = {**body}
+        if 'dialogue_llm' not in defaults and 'dialogue_llm' in previous:
+            defaults['dialogue_llm'] = previous['dialogue_llm']
+        for key, kind in (('llm', 'llm'), ('vlm', 'vlm'), ('dialogue_llm', 'llm')):
+            if key not in defaults:
+                continue
+            if not isinstance(defaults[key], str):
                 invalid('默认模型 ID 无效')
-            if body[kind]:
-                runtime.select(body[kind], kind)
+            if defaults[key]:
+                runtime.select(defaults[key], kind)
         with self.lock, self.db:
             self.db.execute('INSERT OR REPLACE INTO model_defaults VALUES (?,?)',
-                            (self._owner(), json.dumps(body)))
-        return {'defaults': body}
+                            (self._owner(), json.dumps(defaults)))
+        return {'defaults': defaults}
 
     def close(self):
         self.db.close()

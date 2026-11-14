@@ -1,5 +1,22 @@
 # LLM/VLM 接入与选择
 
+## 对话与规划分离（2026-11-12）
+
+普通提单对话及 `/tasks/{id}/conversation-turn` 使用 `conversation_runtime()` 直接调用已选模型，
+不启动 DSH worker，不自动换模型。扩词、目录建议及旧版诊断接口仍沿用配置的规划运行时；
+`--agent-runtime direct` 是受支持的规划适配选项，不再仅限旧版诊断。
+既有规划引擎缺省仍为 dsh，保持历史模型绑定摘要兼容。`/v1/build` 同时提供
+`conversation_engine` 和 `model_engine`。下文 2026-10-24 的“全部经 DSH”描述为历史边界，
+与本节冲突时以本节为准。尚未完成两种规划运行时的系统性性能对照。
+
+结构化清洗修改及迁移边界见 [对话架构重构](../docs/dev/conversation-architecture-plan.md)。
+
+提单前 Chat 新增 `dialogue-command` 入口，同步结果沿用 `dialogue-turn@1`。
+携带 `Prefer: respond-async` 时先返回 `dialogue-command@1` 回执（处理中为 HTTP 202），
+再查询 `dialogue-commands/{command_key}`。命令、会话和消息同账本事务提交；重放完成回执
+不调用模型，没有检查点的中断须显式重试。背景线程继承请求身份和受限模型上下文，
+不自行切换模型或创建正式业务任务。普通任务的 `conversation-turn` 仍保留同步响应与既有回执恢复。
+
 ## DSH 运行入口（2026-10-24）
 
 带 `--model-config` 的 API 启动默认使用 DSH；必须提供 `--dsh-python`（已安装
@@ -87,3 +104,101 @@ ModelRuntime.assess 为后端 VLM 接入点：接受已授权、已验证的有�
 ## 检索期间继续对话
 
 正式任务的 `/followup-intent` 兼容扩展新增 `new_request` 意图，表示另一个独立检索需求，不是当前 task 的 `expansion`。检索期间保持对话输入可用；前端只提示新建 Chat，并将原话预填到新 Chat。旧检索继续后台运行，新正式 task 仍需用户审阅和确认。`new_request` 不返回数量修改操作，也不直接执行。
+
+
+### Unified task requirement changes
+
+With structured task context, `submit_proposal.kind=requirement` proposes total image quantity
+operations (`count_edits`, images only) and optional ordered `cleaning_changes` in one draft.
+`requested_terms_per_group` and `expansion_instruction` remain null; `term_count_only` is false.
+`target_count` should be null; an echoed absolute count is accepted only when it exactly equals
+server computation of the operation. Source-grounded conditions and bounded quantity operations
+are validated together against the current bound pending draft. No partial write or approval occurs.
+The preview includes `target={before,after}` and `impact.retrieval=rerun|retain_candidates`.
+A changed total schedules new-version retrieval only after issuer confirmation. Existing category
+quotas require clarification; word/subject plus condition changes are not yet an atomic protocol.
+Conversation requests set `parallel_tool_calls=false`; multiple proposals remain invalid.
+
+
+`requirement` additionally supports optional `retrieval_changes`: an ordered array (1–20 edits)
+of `{op: upsert|remove, group_id, primary_label, auxiliary_terms, source_text}`. An upsert supplies
+the complete target group terms; null group_id adds a group. Remove requires an existing group_id
+and null label/terms. source_text quotes the current user message; a new subject label must occur
+in that quote. The service reuses grouped-expansion normalization and reseals its digest while
+preserving existing model binding, untouched groups and quotas. It rejects orphaned condition
+scopes and remaining conditions requiring a removed subject. All operations share the same atomic
+draft and confirmation. `cleaning_plan_preview.retrieval` contains before/after groups and changed.
+Pending groups are authoritative for subsequent turns; model-generated terms remain proposals.
+
+
+### Explicit edits and compact follow-up inputs
+
+For structured task conversations, whole-message absolute/relative image quantities and a complete,
+unambiguous quoted single-group term replacement may directly produce a requirement draft. They do
+not call a model, load execution status/history, or approve anything. Additional clauses, ambiguous
+references, object counts, multi-group scope and unbound browser expansion previews use the existing
+model path. Existing quota, revision, source, permission, command and confirmation checks remain.
+
+Initial model input deduplicates raw audit text, words, conditions and derived workflow prose.
+Complete current words occur in `current_groups`, condition identities/source/scope occur in
+`task_context.cleaning_conditions`, and group identities/quotas stay in the effective requirement
+metadata. All recent messages, independent constraints and actual node details remain. The single
+existing repair attempt restores the full authoritative input; there is no extra retry or model switch.
+
+Redundant set-count assertions for words are accepted only if one affected group and its complete
+proposed list agree exactly; they are discarded before applying changes. `replace` of an existing
+retrieval group is normalized to upsert, never to an implicit new group. Removing a cleaning condition
+may omit the necessarily-null source_text. A sole literal global subject check in a sole renamed group
+follows that explicit subject rename in the reviewed diff; compound/scoped checks are not inferred.
+Missing required new-subject checks remain invalid. Character/serialized-request sizes and explicit
+path hits are numeric timing counters, not token or billing estimates. Prepared input sizes aggregate
+per model-generation round, not per HTTP retry transmission.
+
+
+Formal task turns support `Prefer: respond-async`. Semantic turns return a durable
+`task-conversation-command@1` receipt (202 while active, 200 when already completed/failed);
+status and deterministic edits may still return the ordinary turn directly. Poll the existing
+command GET route; do not create a new key after a lost response. Async commands share a bounded
+per-service worker pool (2 workers, 8 running/queued slots); saturation returns retryable
+COMMAND_QUEUE_FULL with the original failed receipt retained. Retry uses the original body/key
+and X-Conversation-Retry:true. Synchronous legacy calls and other model job types are not covered
+by that async budget. `timings.queue_wait_ms` records queue waiting separately from processing.
+
+
+### Compact task proposal transport
+
+Direct structured task dialogue uses `submit_task_change` with `{proposal: ...}`. Required `kind` is
+requirement/expansion/answer/clarify/status/new_request. Mutating proposals echo the current
+`reference_scope` as `scope`. Omit unused fields; business text is generated after validation.
+
+- `images={op:set|add|scale,value}` expresses a single total-image operation.
+- `conditions`: add `{op,text,group?}`, replace `{op,ref,text}`, remove `{op,ref}`. c references identify
+  current conditions. Existing replace/remove cannot change their category scope. Null/omitted group
+  on add is global; supplied g reference must exist.
+- `groups`: add `{op,label,words,source}`, replace `{op,ref,label?,words,source}`, remove `{op,ref,source}`.
+  Complete word lists and source quotes retain the existing business validation.
+- Expansion-only `instruction`, `term_targets=[{group,op,value}]` and `count_only` retain the existing
+  planning contract; mixed changes use requirement instead. Read-only/new-request routing cannot carry edits.
+
+Aliases and scope are per invocation, including the single repair attempt; the tool schema enumerates
+only current references. Decode restores stable business IDs before existing source/permission/version/
+quota/confirmation checks and durable checkpoints. Literal source text is not rewritten. A bounded v1
+compatibility bridge accepts only identifiers in the same current table. DSH's explicitly selected
+legacy planning adapter keeps its original tool protocol; there is no engine fallback or new agent loop.
+
+
+### Shared dialogue deadline
+
+A dialogue command has a default 30-second monotonic budget, starting before acceptance/claim
+and including in-process queue wait, model HTTP attempts, Retry-After/backoff, and the existing
+single proposal-repair attempt. Nested interpretation inherits the same deadline. Model socket
+timeouts are capped by the remaining time; response bodies are checked between bounded reads.
+An explicit DSH call within this context inherits the remaining worker timeout and its process
+tree is terminated by the existing cleanup path. Non-dialogue calls without this context retain
+their configured per-model timeout behavior.
+
+`MODEL_TIME_BUDGET_EXCEEDED` is retryable HTTP 504. An expired queued command does not start
+model work; a late model response cannot create a new checkpoint. The durable command retains
+the request and error; explicit retry of the same key/body starts a fresh budget. A checkpoint
+prepared before expiry remains recoverable and may finish its fenced business commit. This is
+not a new autonomous approval or execution capability.

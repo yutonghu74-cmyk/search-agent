@@ -24,8 +24,8 @@ class AutoRefillIntakeService:
         self.cleaning_service = cleaning_service
         self.cleaning_dispatch = cleaning_dispatch
         self.refill_service = refill_service
-        if getattr(first_search, "mode", None) != "LOCAL_CLIP":
-            raise ValueError("automatic refill intake currently requires LOCAL_CLIP")
+        if getattr(first_search, "mode", None) not in ("LOCAL_CLIP", "PLATFORM"):
+            raise ValueError("automatic refill intake requires an approved plan-set search")
 
     @staticmethod
     def _automatic(task):

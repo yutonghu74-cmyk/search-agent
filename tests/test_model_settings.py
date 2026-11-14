@@ -31,6 +31,26 @@ class Transport:
 
 
 class ModelSettingsTest(unittest.TestCase):
+    def test_independent_dialogue_default_is_scoped_and_legacy_default_updates_preserve_it(self):
+        with self.store.scope('t', 'u'):
+            identifier = self.register()
+            llm, vlm = self.bind(identifier), self.bind(identifier, 'vlm')
+            dialogue = self.store.bind(identifier, {'model': 'conversation-fast', 'kind': 'llm'})['profile_id']
+            saved = self.store.save_defaults({'llm': llm, 'vlm': vlm, 'dialogue_llm': dialogue}, self.runtime)
+            self.assertEqual(saved['defaults']['dialogue_llm'], dialogue)
+            self.assertEqual(self.store.save_defaults({'llm': llm, 'vlm': vlm}, self.runtime)['defaults']['dialogue_llm'], dialogue)
+            with self.assertRaises(ServiceError):
+                self.store.save_defaults({'llm': llm, 'vlm': vlm, 'dialogue_llm': vlm}, self.runtime)
+            self.assertEqual(self.store.defaults()['dialogue_llm'], dialogue)
+        with self.store.scope('t', 'other'):
+            self.assertEqual(self.store.defaults(), {})
+            with self.assertRaises(ServiceError):
+                self.store.save_defaults({'llm': '', 'vlm': '', 'dialogue_llm': dialogue}, self.runtime)
+        reopened = ModelSettings(self.path/'settings.db', self.path/'key', ['https://models.example/v1'])
+        self.addCleanup(reopened.close)
+        with reopened.scope('t', 'u'):
+            self.assertEqual(reopened.defaults()['dialogue_llm'], dialogue)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

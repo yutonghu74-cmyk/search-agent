@@ -1,0 +1,135 @@
+{
+  "schema": "platform-wire@1",
+  "user_id_path": "<STABLE_USER_ID_PATH>",
+  "operations": {
+    "exchange": {
+      "path": "/third-party/local/cli/exchange",
+      "method": "POST",
+      "body": {
+        "refresh_key": "$refresh_key"
+      },
+      "fields": {
+        "token": "<PAT_FIELD_PATH>",
+        "expires_in": "<TTL_FIELD_PATH>"
+      }
+    },
+    "projects": {
+      "path": "/app/list",
+      "method": "GET",
+      "body": {
+        "page_size": 100
+      },
+      "fields": {
+        "id": "id",
+        "name": "name",
+        "alias": "alias"
+      },
+      "items_path": "items",
+      "total_path": "total",
+      "page_parameter": "page"
+    },
+    "project_datasets": {
+      "path": "/<VERIFIED_PROJECT_DATASETS_PATH>",
+      "method": "POST",
+      "body": {
+        "project_id": "$project_id"
+      },
+      "fields": {
+        "library_id": "<LIBRARY_ID_PATH>",
+        "version_id": "<VERSION_ID_PATH>"
+      },
+      "items_path": "<ITEMS_PATH>",
+      "total_path": "<TOTAL_PATH>",
+      "page_parameter": "<PAGE_PARAMETER>"
+    },
+    "user_datasets": {
+      "path": "/image_retriever/all_dataset",
+      "method": "GET",
+      "body": {},
+      "fields": {
+        "library_id": "<REGISTERED_LIBRARY_MAPPING>",
+        "version_id": {
+          "path": "<VERSION_ID_PATH>",
+          "type": "string"
+        }
+      },
+      "unpaged": true,
+      "items_path": ""
+    },
+    "encode_query": {
+      "path": "/<VERIFIED_ENCODE_QUERY_PATH>",
+      "method": "POST",
+      "body": {
+        "text": "$text",
+        "binding": "$binding"
+      },
+      "fields": {
+        "encoder_ref": "<ENCODER_REF_PATH>",
+        "values": "<VALUES_PATH>"
+      }
+    },
+    "search": {
+      "path": "/<VERIFIED_SEARCH_PATH>",
+      "method": "POST",
+      "body": {
+        "versions": "$versions",
+        "request": "$request"
+      },
+      "fields": {
+        "hits": "<HITS_PATH>",
+        "next_cursor": "<NEXT_CURSOR_PATH>",
+        "stop_reason": "<STOP_REASON_PATH>",
+        "consistency": "<CONSISTENCY_PATH>",
+        "snapshot_ref": "<SNAPSHOT_REF_PATH>"
+      },
+      "version_scope_path": "versions",
+      "hit_fields": {
+        "vector_id": "<VECTOR_ID_PATH>",
+        "score": "<SCORE_PATH>"
+      }
+    },
+    "resolve_hits": {
+      "path": "/<VERIFIED_RESOLVE_HITS_PATH>",
+      "method": "POST",
+      "body": {
+        "hits": "$hits"
+      },
+      "fields": {
+        "vector_id": "<VECTOR_ID_PATH>",
+        "media_unit_id": "<MEDIA_UNIT_ID_PATH>",
+        "asset_version": "<ASSET_VERSION_PATH>",
+        "source_namespace": "<SOURCE_NAMESPACE_PATH>",
+        "source_asset_id": "<SOURCE_ASSET_ID_PATH>",
+        "authorized_media_ref": "<AUTHORIZED_MEDIA_REF_PATH>",
+        "content_digest": "<CONTENT_DIGEST_PATH>"
+      },
+      "items_path": "<ITEMS_PATH>"
+    },
+    "media_version": {
+      "path": "/<VERIFIED_MEDIA_VERSION_PATH>",
+      "method": "POST",
+      "body": {
+        "media_ref": "$media_ref"
+      },
+      "fields": {
+        "library_id": "<LIBRARY_ID_PATH>",
+        "version_id": "<VERSION_ID_PATH>"
+      }
+    },
+    "preview": {
+      "path": "/data/object/preview",
+      "method": "GET",
+      "body": {
+        "<VERIFIED_MEDIA_REF_PARAMETER>": "$media_ref"
+      },
+      "fields": {
+        "url": "<TEMPORARY_URL_PATH>"
+      }
+    }
+  },
+  "libraries": [],
+  "capabilities": [],
+  "media_origins": [
+    "https://objects.example.invalid"
+  ]
+}

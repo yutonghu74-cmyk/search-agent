@@ -438,6 +438,31 @@ class MultiRulePipelineTests(unittest.TestCase):
             self.repo.get_result_read_page(self.actor, self.task_id,
                                            view_type='accepted'))
 
+    def test_cleaning_feedback_can_rebind_confirmed_candidates_before_first_cleaning(self):
+        task = self.repo.tasks.get(self.actor, self.task_id)
+        service = make_service(self.repo.tasks)
+        draft, _ = service.save_feedback(self.actor, self.task_id, 'early-feedback', {
+            'text': '不要闭眼的图片', 'scope': 'all', 'cleaning_feedback': True,
+            'expected_revision': task.confirmed_revision, 'expected_task_version': task.task_version})
+        self.assertIn('追加检测条件：不要闭眼的图片', draft['proposal']['query_spec']['raw_request'])
+        service.confirm_feedback(self.actor, self.task_id, 'early-confirm', {
+            'draft_id': draft['draft_id'], 'expected_draft_version': draft['draft_version'],
+            'proposal_digest': draft['proposal_digest'], 'expected_task_version': draft['base_task_version'],
+            'action': 'confirm'})
+        current = self.repo.tasks.get(self.actor, self.task_id)
+        recipe = compile_confirmed_recipe(current, self.registry)
+        proposal = self.repo.prepare_incremental_recompute(self.actor, self.task_id, recipe,
+            detector_release_digest=self.registry.release_digest)
+        self.assertEqual(proposal.revision, current.confirmed_revision)
+        self.assertEqual(len(proposal.candidates), 1)
+        self.assertNotEqual(proposal.manifest_ref, self.f.manifest.manifest_ref)
+        self.assertEqual(self.detector.calls, 0)
+        self.assertEqual(self.gateway.reads, 0)
+        self.assert_code('NOT_FOUND', lambda: self.repo.get_current_result_set(self.actor, self.task_id))
+        self.f.f.auth.denied = True
+        self.assert_code('ACCESS_DENIED', lambda: self.repo.prepare_incremental_recompute(
+            self.actor, self.task_id, recipe, detector_release_digest=self.registry.release_digest))
+
     def test_feedback_recompute_republishes_current_revision_without_model_rerun(self):
         old_view, _ = self.run_pipeline()
         task = self.repo.tasks.get(self.actor, self.task_id)

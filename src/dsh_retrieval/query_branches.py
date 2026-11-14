@@ -26,7 +26,11 @@ def compile_query_branches(query: dict) -> dict:
             or any(not isinstance(rule, dict) or not isinstance(rule.get("rule_id"), str)
                    or not rule["rule_id"] for rule in rules)):
         raise ValueError("constraint references are invalid")
+    video = query.get("media_type") == "video"
     constraints = ["rule:" + rule["rule_id"] for rule in rules]
+    if video:
+        constraints += ["video_condition:" + clause["id"]
+                        for clause in query["video_conditions"]["clauses"]]
     constraints += [f"source_constraints:{index}" for index in range(len(sources))]
     grouped = query.get("grouped_expansion")
     plan = normalize_grouped_expansion(grouped) if grouped is not None else None
@@ -41,6 +45,10 @@ def compile_query_branches(query: dict) -> dict:
         # real reference-image input extends the fingerprint namespace.
         if query.get("query_input") is not None:
             fingerprint_input["query_input"] = query["query_input"]
+        if video:
+            fingerprint_input["video_conditions"] = query["video_conditions"]
+            fingerprint_input["count_unit"] = query["count_unit"]
+            fingerprint_input["video_options"] = query.get("video_options")
         fingerprint = digest(fingerprint_input)
         origin = {"group_id": group_id, "query_role": role,
                   "source_term": term, "skill_version": version}
@@ -55,8 +63,9 @@ def compile_query_branches(query: dict) -> dict:
             branches[fingerprint]["origins"].append(origin)
 
     query_input = query.get("query_input")
-    add(raw, "reference_image" if query_input else "original", raw)
-    if plan and not query_input:
+    reference_image = query_input is not None and query_input.get("type") == "reference_image"
+    add(query_input["text"] if video else raw, "reference_image" if reference_image else "original", raw)
+    if plan and not reference_image:
         for group in plan["groups"]:
             label = group["primary_label"]
             add(label, "primary", label, group["group_id"], plan["generator"])
@@ -68,11 +77,12 @@ def compile_query_branches(query: dict) -> dict:
     payload = {
         "schema_version": COMPILER_VERSION, "query_spec_digest": digest(query),
         "original_request": raw, "branches": list(branches.values()),
-        "constraints": {"rules": deepcopy(rules), "source_constraints": deepcopy(sources)},
+        "constraints": {"rules": deepcopy(rules), "source_constraints": deepcopy(sources),
+                        **({"video_conditions": deepcopy(query["video_conditions"])} if video else {})},
         "status": "preview_only", "executable": False,
         "library_resolution": "unresolved",
         "note": ("参考图仅作为图像向量输入；文字作为选库与后置清洗约束。尚未选库、编码或批准执行。"
-                 if query_input else
+                 if reference_image else
                  "仅逻辑查询预览，尚未选库、编码或批准执行。否定条件仍须编译为后置验证规则；召回命中不代表合格。"),
     }
     return {**payload, "preview_digest": digest(payload)}

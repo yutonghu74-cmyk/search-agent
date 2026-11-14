@@ -18,6 +18,25 @@ from dsh_retrieval.model_runtime import ModelProfile
 
 
 class ProposalToolTest(unittest.TestCase):
+    def test_backend_inline_request_context_allows_only_request_draft_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'context.json').write_text(json.dumps({
+                'tool_mode': 'request_draft', 'context_delivery': 'inline', 'messages': []}))
+            tools = ProposalTools(root)
+            for name in ('submit_proposal', 'save_expansion_draft', 'bash'):
+                with self.assertRaises(ValueError):
+                    tools.call(name, {'proposal': {}})
+            self.assertFalse(tools.call('update_request_draft', {'proposal': {'action': 'update'}})['executed'])
+            with self.assertRaises(ValueError):
+                tools.call('update_request_draft', {'proposal': {'action': 'confirm'}})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'context.json').write_text(json.dumps({'tool_mode': 'request_draft'}))
+            tools = ProposalTools(root)
+            with self.assertRaises(ValueError):
+                tools.call('update_request_draft', {'proposal': {}, 'context_delivery': 'inline'})
+
     def test_context_required_and_no_arbitrary_tools_or_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -254,6 +273,10 @@ class NativeRuntimeTest(unittest.TestCase):
     def test_real_runtime_mcp_tools_and_provider_stream(self):
         """Real SDK/native DSH + MCP, deterministic local model (not a live model)."""
         calls = []
+        inline = False
+        reject_submission = False
+        expansion = False
+        natural_text = None
         proposal = {'action': 'clarify', 'question': '需要多少张图片？', 'reply': '需要多少张图片？'}
 
         class Handler(BaseHTTPRequestHandler):
@@ -264,9 +287,16 @@ class NativeRuntimeTest(unittest.TestCase):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 calls.append(body)
                 number = len(calls)
-                if number <= 2:
-                    name = 'mcp__retrieval__get_request_context' if number == 1 else 'mcp__retrieval__submit_proposal'
-                    args = {} if number == 1 else {'proposal': proposal}
+                if natural_text is not None:
+                    delta, finish = {'role': 'assistant', 'content': natural_text}, 'stop'
+                elif number <= (1 if inline else 2):
+                    name = ('mcp__retrieval__update_request_draft' if inline else
+                            'mcp__retrieval__get_request_context' if number == 1 else 'mcp__retrieval__submit_proposal')
+                    if expansion and number == 2:
+                        name = 'mcp__retrieval__save_expansion_draft'
+                    if inline and reject_submission:
+                        name = 'mcp__retrieval__save_expansion_draft'
+                    args = {} if not inline and number == 1 else {'proposal': proposal}
                     delta = {'role': 'assistant', 'tool_calls': [{'index': 0, 'id': 'call_' + str(number),
                         'type': 'function', 'function': {'name': name, 'arguments': json.dumps(args)}}]}
                     finish = 'tool_calls'
@@ -298,21 +328,69 @@ class NativeRuntimeTest(unittest.TestCase):
                 runtime.check_installation()
                 result = runtime._request(profile, 'Return action, question and reply JSON.', '找猫图片')
                 self.assertEqual(result, proposal)
-                self.assertEqual(len(calls), 3)
+                self.assertEqual(len(calls), 2)
                 # Per-model output budget reaches the provider request through the patch.
                 self.assertEqual(calls[0].get('max_tokens'), 12000)
                 self.assertNotIn('temperature', calls[0])
                 names = {item['function']['name'] for item in calls[0]['tools']}
                 self.assertEqual(names, {'mcp__retrieval__get_request_context',
-                                         'mcp__retrieval__update_request_draft',
-                                         'mcp__retrieval__save_expansion_draft',
                                          'mcp__retrieval__submit_proposal'})
                 self.assertNotIn('dsh_session_log', calls[0])
                 self.assertNotIn('dsh_plugin_packages', calls[0])
                 self.assertIn('找猫图片', json.dumps(calls[1], ensure_ascii=False))
                 audit = json.loads(next(Path(home).glob('*/*/audit.json')).read_text())
                 self.assertEqual(audit['status'], 'proposal_received')
-                self.assertIn('turn/end', audit['event_types'])
+                self.assertEqual(audit['finish_reason'], 'proposal_submitted')
+                self.assertIn('tool/result', audit['event_types'])
+                calls.clear()
+                inline = True
+                from dsh_retrieval.dialogue import PROMPT
+                result = runtime._request(profile, PROMPT, '想要猫和狗的照片，12张')
+                self.assertEqual(result, proposal)
+                self.assertEqual(len(calls), 1)
+                first_input = json.dumps(calls[0]['messages'], ensure_ascii=False)
+                self.assertIn('想要猫和狗的照片，12张', first_input)
+                self.assertIn('context_delivery', first_input)
+                self.assertEqual({tool['function']['name'] for tool in calls[0]['tools']},
+                                 {'mcp__retrieval__update_request_draft'})
+                calls.clear()
+                reject_submission = True
+                with self.assertRaises(ServiceError) as rejected:
+                    runtime._request(profile, PROMPT, '找猫图片，20张')
+                self.assertEqual(rejected.exception.code, 'DSH_TURN_FAILED')
+                calls.clear()
+                inline, reject_submission, expansion = False, False, True
+                from dsh_retrieval.model_runtime import EXPANSION_PROMPT
+                self.assertEqual(runtime._request(profile, EXPANSION_PROMPT, '生成猫的检索词'), proposal)
+                self.assertEqual(len(calls), 2)
+                calls.clear()
+                inline, expansion = True, False
+                natural_text = '可以先从画面内容聊起，数量确定后再整理检索词。'
+                from dsh_retrieval.dialogue import PROMPT
+                answer = runtime._request(profile, PROMPT, '你好，我想先了解怎么找素材')
+                self.assertEqual(answer['action'], 'answer')
+                self.assertEqual(answer['reply'], natural_text)
+                self.assertIsNone(answer['target_count'])
+                self.assertEqual(len(calls), 1)
+                calls.clear()
+                from dsh_retrieval.model_runtime import FOLLOWUP_ROUTING_PROMPT
+                answer = runtime._request(profile, FOLLOWUP_ROUTING_PROMPT, '这些词是怎么选的？')
+                self.assertEqual(answer['kind'], 'answer')
+                self.assertEqual(len(calls), 1)
+                self.assertEqual({tool['function']['name'] for tool in calls[0]['tools']},
+                                 {'mcp__retrieval__submit_proposal'})
+                calls.clear()
+                tuned = ModelConfig('test', 'glm-5.3', 'https://example.invalid/v1', 'fake', max_tokens=12000)
+                object.__setattr__(tuned, 'base_url', config.base_url)
+                answer = runtime._request(ModelProfile('glm', 'llm', tuned), PROMPT, '你好')
+                self.assertEqual(answer['action'], 'answer')
+                self.assertEqual(calls[0].get('reasoning_effort'), 'low')
+                calls.clear()
+                natural_text = '我已经把目标改成3张。'
+                with self.assertRaises(ServiceError) as fabricated:
+                    runtime._request(profile, PROMPT, '为什么这样选词？')
+                self.assertEqual(fabricated.exception.code, 'MODEL_OUTPUT_INVALID')
+                natural_text = None
         finally:
             server.shutdown()
             server.server_close()

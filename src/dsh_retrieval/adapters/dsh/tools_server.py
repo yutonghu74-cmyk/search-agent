@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import sys
 
+from ...conversation import proposal_tool
+
 TOOLS = [
     {'name': 'get_request_context', 'description': 'Read the current authorized request, candidate terms, confirmed version and execution facts. No task is executed.',
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
@@ -28,6 +30,30 @@ class ProposalTools:
         self.root = Path(turn_dir)
         self.context_read = False
         self.mode = None
+        path = self.root / 'context.json'
+        if path.is_file():
+            context = json.loads(path.read_text())
+            mode = context.get('tool_mode')
+            if mode in ('request_draft', 'expansion_draft', 'proposal'):
+                self.mode = mode
+            if context.get('context_delivery') == 'inline' and (mode == 'request_draft' or
+                    mode == 'proposal' and context.get('conversation_mode') == 'followup'):
+                # This envelope is written by the backend worker, never by a
+                # model tool argument. The same snapshot is in its first input.
+                self.context_read = True
+                self.mode = mode
+
+    def list_tools(self):
+        selected = {'request_draft': 'update_request_draft', 'expansion_draft': 'save_expansion_draft',
+                    'proposal': 'submit_proposal'}.get(self.mode)
+        allowed = {selected} | (set() if self.context_read else {'get_request_context'})
+        result = [dict(tool) for tool in TOOLS if selected is None or tool['name'] in allowed]
+        for tool in result:
+            if tool['name'] == 'update_request_draft' or tool['name'] == 'submit_proposal' and self.context_read:
+                function = proposal_tool(tool['name'])['function']
+                tool['inputSchema'] = function['parameters']
+                tool['description'] = function['description']
+        return result
 
     def call(self, name, arguments):
         if name == 'get_request_context' and arguments == {}:
@@ -73,7 +99,7 @@ def serve(root, source, sink):
             elif method == 'ping':
                 result = {}
             elif method == 'tools/list':
-                result = {'tools': TOOLS}
+                result = {'tools': tools.list_tools()}
             elif method == 'tools/call':
                 params = request.get('params', {})
                 try:

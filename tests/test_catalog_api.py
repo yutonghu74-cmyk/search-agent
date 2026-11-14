@@ -106,8 +106,10 @@ class CatalogApiTest(unittest.TestCase):
             LocalCatalogSource(self.path)
 
     def test_assets_and_js_syntax(self):
-        self.assertIn('已有索引配置', self.call(path='/')[1])
+        self.assertNotIn('已有索引配置', self.call(path='/')[1])
         self.assertEqual(self.call(path='/catalog'), (200, CATALOG_HTML))
+        self.assertIn('<h1>索引来源设置</h1>', CATALOG_HTML)
+        self.assertIn('href="/chat"', CATALOG_HTML)
         self.assertEqual(self.call(path='/catalog.js'), (200, CATALOG_JS))
         self.assertIn('id="main-content"', CATALOG_HTML)
         self.assertIn('class="skip-link"', CATALOG_HTML)

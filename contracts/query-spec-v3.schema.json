@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dsh-retrieval:query-spec:3",
+  "title": "QuerySpec v3 — text-to-whole-video drafts; execution unavailable",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "raw_request",
+    "media_type",
+    "target_count",
+    "business_domain",
+    "intra_batch_dedup",
+    "cross_batch_dedup",
+    "refill_policy",
+    "count_unit",
+    "query_input",
+    "video_conditions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "query-spec@3"
+    },
+    "raw_request": {
+      "$ref": "./query-spec-v2.schema.json#/properties/raw_request"
+    },
+    "media_type": {
+      "const": "video"
+    },
+    "count_unit": {
+      "const": "distinct_video"
+    },
+    "target_count": {
+      "$ref": "./query-spec-v2.schema.json#/properties/target_count"
+    },
+    "quotas": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "business_domain": {
+      "$ref": "./query-spec-v2.schema.json#/properties/business_domain"
+    },
+    "source_constraints": {
+      "$ref": "./query-spec-v2.schema.json#/properties/source_constraints"
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "preferences": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "query_seeds": {
+      "$ref": "./query-spec-v2.schema.json#/properties/query_seeds"
+    },
+    "unknown_policy": {
+      "$ref": "./query-spec-v2.schema.json#/properties/unknown_policy"
+    },
+    "intra_batch_dedup": {
+      "$ref": "./query-spec-v2.schema.json#/properties/intra_batch_dedup"
+    },
+    "cross_batch_dedup": {
+      "$ref": "./query-spec-v2.schema.json#/properties/cross_batch_dedup"
+    },
+    "refill_policy": {
+      "$ref": "./query-spec-v2.schema.json#/properties/refill_policy"
+    },
+    "refill_limits": {
+      "$ref": "./query-spec-v2.schema.json#/properties/refill_limits"
+    },
+    "query_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "text"
+      ],
+      "properties": {
+        "mode": {
+          "const": "text"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "video_conditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clauses",
+        "relation"
+      ],
+      "properties": {
+        "clauses": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "channel",
+              "predicate"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z][A-Za-z0-9_\\-]{0,63}$"
+              },
+              "channel": {
+                "const": "visual"
+              },
+              "predicate": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 640,
+                "pattern": "\\S"
+              },
+              "verification_scope": {
+                "const": "video_content",
+                "default": "video_content"
+              }
+            }
+          }
+        },
+        "relation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operator",
+            "scope"
+          ],
+          "properties": {
+            "operator": {
+              "enum": [
+                "all",
+                "any"
+              ]
+            },
+            "scope": {
+              "const": "same_video"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$comment": "Runtime additionally validates unique clause IDs, target consistency and node modes. Only whole-video visual retrieval is in scope; saving a draft does not enable execution."
+}

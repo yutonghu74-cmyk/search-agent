@@ -41,7 +41,7 @@
               - id: !!js process.env.RETRIEVAL_MODEL_ID
                 contextWindow: 128000
                 maxTokens: !!js Number(process.env.RETRIEVAL_MAX_TOKENS)
-                reasoningEfforts: false
+                reasoningEfforts: !!js "process.env.RETRIEVAL_REASONING_EFFORT ? {low: 'low', high: 'high', max: 'max'} : false"
             compat:
               supportsDeveloperRole: false
               maxTokensField: max_tokens

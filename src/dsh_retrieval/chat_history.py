@@ -17,10 +17,15 @@ def initialize(db):
     db.execute('INSERT OR IGNORE INTO chat_read_meta VALUES (1,0)')
 
 
-def sync(db, memory):
+def sync(db, memory, *, task_ids=None):
     rows = []
+    targets = None if task_ids is None else frozenset(task_ids)
+    conversations = {task.conversation_id for task in memory._tasks.values()
+                     if targets is not None and task.task_id in targets and task.conversation_id}
     tasks = {task.conversation_id: task for task in memory._tasks.values() if task.conversation_id}
     for cid, messages in memory._conversation_messages.items():
+        if targets is not None and cid not in conversations:
+            continue
         if not messages:
             continue
         first = min(messages.values(), key=lambda item: (item.created_at, item.message_id))
@@ -34,15 +39,29 @@ def sync(db, memory):
         rows.append((cid, first.tenant_id, first.owner_user_id, first.project_id,
                      draft.dimension_id, item['created_at'], json.dumps(item, ensure_ascii=False)))
     for task in memory._tasks.values():
-        if task.conversation_id:
+        if task.conversation_id or targets is not None and task.task_id not in targets:
             continue
         item = {'id': task.task_id, 'kind': 'task', 'title': task.raw_request,
                 'created_at': task.created_at.isoformat(), 'task': task.to_summary()}
         rows.append((task.task_id, task.tenant_id, task.owner_user_id, task.project_id,
                      task.dimension_id, item['created_at'], json.dumps(item, ensure_ascii=False)))
-    db.execute('DELETE FROM chat_read_summaries')
-    db.executemany('INSERT INTO chat_read_summaries VALUES (?,?,?,?,?,?,?)', rows)
-    db.execute('UPDATE chat_read_meta SET ready=1 WHERE id=1')
+    if targets is None:
+        db.execute('DELETE FROM chat_read_summaries')
+    else:
+        retained = {row[0] for row in rows}
+        db.executemany('DELETE FROM chat_read_summaries WHERE chat_id=?',
+                       ((key,) for key in (targets | conversations) - retained))
+    db.executemany('''INSERT INTO chat_read_summaries VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(chat_id) DO UPDATE SET tenant_id=excluded.tenant_id,user_id=excluded.user_id,
+        project_id=excluded.project_id,dimension_id=excluded.dimension_id,
+        created_at=excluded.created_at,summary_json=excluded.summary_json
+        WHERE chat_read_summaries.summary_json != excluded.summary_json
+           OR chat_read_summaries.tenant_id != excluded.tenant_id
+           OR chat_read_summaries.user_id != excluded.user_id
+           OR chat_read_summaries.project_id != excluded.project_id
+           OR chat_read_summaries.dimension_id != excluded.dimension_id
+           OR chat_read_summaries.created_at != excluded.created_at''', rows)
+    db.execute('UPDATE chat_read_meta SET ready=1 WHERE id=1 AND ready!=1')
 
 
 def read_rows(repository, actor, project, projects, after, limit):

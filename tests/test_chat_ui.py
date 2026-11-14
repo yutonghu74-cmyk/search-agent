@@ -8,6 +8,474 @@ from dsh_retrieval.production_board_ui import BOARD_CSS, BOARD_HTML, BOARD_JS
 
 
 class ChatUiTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node required for task async receipt tests')
+    def test_task_async_acceptance_polls_without_reposting_and_keeps_failed_key(self):
+        source = CHAT_JS[CHAT_JS.index('function taskTurnStorageKey('):CHAT_JS.index('async function recoverTaskTurn(')]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');const state={},saved=new Map(),headers={'X-Tenant-Id':'t','X-User-Id':'u'};
+const sessionStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)};
+let posts=0,reads=0,accepted=0,fail=false;
+const result={kind:'answer',reply:'完成',is_current:true};
+const api=async(path,options)=>{if(options){posts++;assert.equal(options.asyncCommand,true);return {schema_version:'task-conversation-command@1',status:fail?'failed':'understanding',error:fail?{code:'MODEL_RATE_LIMIT',message:'稍后重试'}:null}}
+ reads++;return {schema_version:'task-conversation-command@1',status:reads===1?'understanding':'completed',result}};
+const funcs=new Function('state','headers','sessionStorage','api','key','setTimeout',process.env.SOURCE+';return {sendTaskTurn,pendingTaskTurn}')(
+ state,headers,sessionStorage,api,()=> 'original',cb=>{cb();return 1});
+const body={text:'解释条件',expected_task_version:1};
+assert.deepEqual(await funcs.sendTaskTurn('task',body,{},false,()=>accepted++),result);
+assert.equal(posts,1);assert.equal(reads,2);assert.equal(accepted,1);assert.equal(funcs.pendingTaskTurn('task'),null);
+fail=true;await assert.rejects(funcs.sendTaskTurn('task',body,{}),e=>e.code==='MODEL_RATE_LIMIT');
+assert.equal(funcs.pendingTaskTurn('task').key,'original');assert.equal(posts,2);
+await assert.rejects(funcs.sendTaskTurn('task',{text:'新消息'},{}),e=>e.code==='COMMAND_UNRESOLVED');assert.equal(posts,2);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for workspace snapshot reuse test')
+    def test_status_workspace_is_reused_but_older_mutation_snapshot_is_reread(self):
+        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(workspaceSeed=null){'):CHAT_JS.index('function showResults(')]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');let workspaceReads=0,resultReads=0;
+const task={task_id:'t',confirmed_revision:1,run_generation:1,task_version:7,mutation_sequence:5};
+const workflow={binding:{task_version:7},summary:'候选已确认',nodes:[],available_actions:[]};
+const seed={...task,workflow,progress:{counts:{returned:3},nodes:[],workflow},manifest:null,search:null};
+const state={task:{...task}};
+const api=async path=>{if(path.endsWith('/workspace')){workspaceReads++;return {...seed,mutation_sequence:10}}resultReads++;return {available:false}};
+const fields={'retrieval-live-status':{},'task-sidebar-summary':{}};
+const refresh=new Function('state','api','$','showProgress',process.env.SOURCE+';return refreshTaskSidebar')(state,api,id=>fields[id],()=>{});
+assert.equal(await refresh(seed),workflow);assert.equal(workspaceReads,0);assert.equal(resultReads,1);
+state.task.mutation_sequence=9;await refresh(seed);assert.equal(workspaceReads,1);assert.equal(state.task.mutation_sequence,10);
+await refresh({...seed,task_id:'other'});assert.equal(workspaceReads,2);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for unified draft UI test')
+    def test_mixed_change_review_displays_total_and_confirmation_follows_search(self):
+        source = CHAT_JS[CHAT_JS.index('function showFeedbackReview('):CHAT_JS.index('async function showCleaningSuggestion(')]
+        source += CHAT_JS[CHAT_JS.index('async function decideFeedback('):CHAT_JS.index('async function prepareUpdatedCleaning(')]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');const messages=[],actions=[],events=[],details=[];
+const state={task:{task_id:'t',task_version:1},feedback:{draft_id:'d',draft_version:1,proposal_digest:'digest',base_task_version:1}};
+const fields={'feedback-box':{classList:{remove(){}}},'feedback-text':{value:''},status:{}};
+const message=(role,title,text)=>{const b={title,text};messages.push(b);return b};
+const api=async()=>({task:{task_id:'t',task_version:2},search_enqueue:{status:'queued'}});
+const funcs=new Function('state','$','message','guidedAction','editFeedback','api','key','setBusy','refreshTaskSidebar','refreshHistory','guidedTick','guidedStartSearch','prepareUpdatedCleaning','reviewDetails',process.env.SOURCE+';return {showFeedbackReview,decideFeedback}')(
+ state,id=>fields[id],message,(b,l,cb)=>actions.push({l,cb}),()=>{},api,()=> 'key',()=>{},async()=>{},async()=>{},async()=>events.push('search'),async()=>events.push('start'),async()=>events.push('cleaning'),(b,l,t)=>details.push(t));
+funcs.showFeedbackReview({feedback_status:'ready',cleaning_plan_preview:{target:{before:10,after:25},retrieval:{changed:true,after:[{primary_label:'猫',auxiliary_terms:['窗边的猫']}]},before_count:1,after_count:2,changes:[{op:'add',after:'无水印'}],nodes:[{source:'狗'},{source:'无水印'}]}});
+assert.equal(messages[0].title,'需求修改待确认');assert.match(messages[0].text,/总目标：10 → 25 张/);assert.match(messages[0].text,/新增：无水印/);assert.match(details[0],/猫 \| 窗边的猫/);assert.match(messages[0].text,/检索主体：.*→ 猫/);assert.equal(actions[0].l,'确认更新需求');
+await actions[0].cb();assert.deepEqual(events,['search']);assert.equal(state.feedback,null);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for workflow action tests')
+    def test_status_reply_uses_refreshed_sidebar_and_recovery_is_historical(self):
+        source = CHAT_JS[CHAT_JS.index('async function applyTaskTurnResult('):CHAT_JS.index('function addWorkflowAction(')]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');
+const state={task:{task_id:'t',task_version:7}};let reads=0;const messages=[],actions=[];
+const latest={status_reply:'候选清单已确认，等待清洗。',available_actions:[{id:'prepare_cleaning'}],binding:{task_version:7}};
+const apply=new Function('state','message','refreshTaskSidebar','addWorkflowAction',process.env.SOURCE+';return applyTaskTurnResult')(
+ state,(role,title,text)=>{const b={title,text};messages.push(b);return b},async()=>{reads++;return latest},(...args)=>actions.push(args));
+const intent={status_requested:true,workflow:{status_reply:'正在检索'},reply:'旧回复'};
+await apply(intent,'t',7,'下一步',{});assert.equal(reads,1);assert.equal(messages[0].text,latest.status_reply);assert.equal(actions.length,1);
+await apply(intent,'t',7,'下一步',{},true);assert.equal(reads,1);assert.match(messages[1].title,/当时状态/);assert.equal(messages[1].text,'正在检索');assert.equal(actions.length,1);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for workflow action tests')
+    def test_workflow_actions_are_allowlisted_and_stale_confirmations_are_blocked(self):
+        source = CHAT_JS[CHAT_JS.index('function addWorkflowAction('):CHAT_JS.index('async function routeTaskFollowup(')]
+        script = r"""
+const assert=require('node:assert/strict');let confirm=0,clicks=0;const callbacks=[];
+const state={task:{task_id:'t',task_version:7,confirmed_revision:1,run_generation:2}},status={};
+const card={tagName:'DETAILS',open:false,querySelector:()=>({click:()=>clicks++}),scrollIntoView:()=>{}};
+const add=new Function('state','guidedAction','showCandidateManifestReview','prepareVlmCleaning','guidedStartSearch','openCandidateBrowser','openDelivery','refreshTaskSidebar','api','showCleaningSuggestion','$','document',process.env.SOURCE+';return addWorkflowAction')(
+ state,(b,l,cb)=>callbacks.push(cb),()=>confirm++,()=>{},()=>{},()=>{},()=>{},()=>{},()=>{},()=>{},()=>status,{querySelector:()=>card});
+const binding={task_version:7,revision:1,generation:2};
+add({}, {id:'confirm_candidates',label:'确认'},'t',binding);callbacks[0]();assert.equal(confirm,1);
+state.task.task_version=8;callbacks[0]();assert.equal(confirm,1);assert.match(status.textContent,/状态已更新/);
+add({}, {id:'toString'},'t',binding);add({}, {id:'arbitrary_url'},'t',binding);assert.equal(callbacks.length,1);
+add({}, {id:'view_cleaning',label:'清洗'},'t',{...binding,task_version:8});callbacks[1]();assert.equal(card.open,true);assert.equal(clicks,1);
+state.task.task_id='other';callbacks[1]();assert.equal(clicks,1);
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for accepted command polling test')
+    def test_accepted_dialogue_command_polls_and_stop_waiting_does_not_resubmit(self):
+        source = CHAT_JS[CHAT_JS.index('async function awaitDialogueCommand('):CHAT_JS.index('async function sendDialogueCommand(')]
+        script = r"""
+const assert=require('node:assert/strict');let reads=0;
+const result={session_id:'dlg_one',version:1};
+const api=async(path,options)=>{reads++;assert.equal(path,'/v1/retrieval/projects/demo/dialogue-commands/key');assert.notEqual(options?.method,'POST');return {schema_version:'dialogue-command@1',status:'completed',result}};
+const wait=new Function('api','dialogueCommandPath',process.env.SOURCE+';return awaitDialogueCommand')(api,key=>'/v1/retrieval/projects/demo/dialogue-commands/'+key);
+const accepted={schema_version:'dialogue-command@1',status:'understanding'};
+const guard=setTimeout(()=>process.exit(9),2500);
+(async()=>{assert.equal(await wait(accepted,'key'),result);assert.equal(reads,1);
+ const controller=new AbortController();const pending=wait(accepted,'key',controller.signal);controller.abort();
+ await assert.rejects(pending,error=>error.name==='AbortError');assert.equal(reads,1);clearTimeout(guard);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for first-message recovery test')
+    def test_first_chat_response_loss_and_reload_restore_one_session_without_reposting(self):
+        source = (CHAT_JS[CHAT_JS.index('function taskTurnStorageKey('):CHAT_JS.index('async function sendTaskTurn(')] +
+                  CHAT_JS[CHAT_JS.index('function dialogueCommandScope('):CHAT_JS.index('async function reviseGuidedExpansion(')])
+        script = r"""
+const assert=require('node:assert/strict');
+const state={dialogueId:null,dialogueVersion:0,newChatToken:'token'};
+const saved=new Map(),headers={'X-Tenant-Id':'tenant','X-User-Id':'owner'};
+const sessionStorage={getItem:key=>saved.get(key)||null,setItem:(key,value)=>saved.set(key,value),removeItem:key=>saved.delete(key)};
+const body={session_id:null,expected_version:0,message:'想找狗图片',llm_id:'original',phase:'request'};
+const turn={session_id:'dlg_one',version:1,action:'clarify',stage:'request',reply:'需要多少张？',is_current:true};
+let posts=0,reads=0,replies=0;
+const api=async(path,options)=>{if(options?.method==='POST'){posts++;assert.equal(path,'/v1/retrieval/projects/demo/dialogue-command');assert.equal(options.keyValue,'dialogue-command-id');assert.deepEqual(options.body,body);throw Object.assign(Error('lost'),{code:'NETWORK_UNAVAILABLE'})}
+ reads++;return {status:'completed',result:turn}};
+const funcs=new Function('state','headers','sessionStorage','key','api','setDialogueBusy','saveDialogueSession','restoreDialogueSession','message','$',process.env.SOURCE+';return {sendDialogueCommand,pendingDialogueCommand,recoverDialogueCommand,pendingTaskTurn};')(
+ state,headers,sessionStorage,prefix=>prefix+'-id',api,()=>{},()=>{},async()=>{state.dialogueId=turn.session_id;state.dialogueVersion=turn.version},()=>{replies++},()=>({textContent:''}));
+const guard=setTimeout(()=>process.exit(9),2000);
+(async()=>{const recovered=await funcs.sendDialogueCommand(body,{llm:'original'});assert.equal(recovered.recovered,true);
+ assert.equal(posts,1);assert.equal(reads,1);assert.equal(funcs.pendingDialogueCommand().result.session_id,'dlg_one');
+ state.pendingTaskTurn=null;await funcs.recoverDialogueCommand();
+ assert.equal(posts,1);assert.equal(reads,2);assert.equal(state.dialogueId,'dlg_one');assert.equal(state.dialogueVersion,1);
+ assert.equal(funcs.pendingTaskTurn('dialogue:new:token'),null);assert.equal(replies,0);clearTimeout(guard);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for pre-task explicit retry test')
+    def test_new_chat_command_waits_for_explicit_retry_and_another_chat_uses_another_scope(self):
+        source = (CHAT_JS[CHAT_JS.index('function taskTurnStorageKey('):CHAT_JS.index('async function sendTaskTurn(')] +
+                  CHAT_JS[CHAT_JS.index('function dialogueCommandScope('):CHAT_JS.index('async function reviseGuidedExpansion(')])
+        script = r"""
+const assert=require('node:assert/strict');
+const body={session_id:null,expected_version:0,message:'找狗图片',llm_id:'original',phase:'request'};
+const state={dialogueId:null,newChatToken:'old'};const saved=new Map(),headers={};
+const sessionStorage={getItem:key=>saved.get(key)||null,setItem:(key,value)=>saved.set(key,value),removeItem:key=>saved.delete(key)};
+const turn={session_id:'dlg_one',version:1,action:'clarify',stage:'request',reply:'多少张？',is_current:true};
+let posts=0,actions=[];
+const api=async(path,options)=>{if(options?.method==='POST'){posts++;assert.equal(options.retryFailed,true);assert.equal(options.keyValue,'original-key');assert.deepEqual(options.body,body);return turn}
+ return {status:'interrupted'}};
+const funcs=new Function('state','headers','sessionStorage','key','api','setDialogueBusy','saveDialogueSession','restoreDialogueSession','message','guidedAction','$',process.env.SOURCE+';return {saveTaskTurn,pendingDialogueCommand,pendingTaskTurn,recoverDialogueCommand};')(
+ state,headers,sessionStorage,()=>{throw Error('must reuse key')},api,()=>{},()=>{},async()=>{state.dialogueId=turn.session_id;state.dialogueVersion=1},()=>({remove(){}}),(_bubble,label,action)=>actions.push([label,action]),()=>({textContent:''}));
+funcs.saveTaskTurn({taskId:'dialogue:new:old',key:'original-key',body,selection:{llm:'original'}});
+const guard=setTimeout(()=>process.exit(9),2000);
+(async()=>{state.newChatToken='new';assert.equal(funcs.pendingDialogueCommand(),null);assert(funcs.pendingTaskTurn('dialogue:new:old'));
+ state.newChatToken='old';await funcs.recoverDialogueCommand();assert.equal(posts,0);assert.equal(actions[0][0],'重试这条消息');
+ await actions[0][1]();assert.equal(posts,1);assert.equal(state.dialogueId,'dlg_one');assert.equal(funcs.pendingTaskTurn('dialogue:new:old'),null);clearTimeout(guard);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for durable command client test')
+    def test_task_command_recovers_lost_response_and_reuses_key_after_page_reload(self):
+        source = CHAT_JS[CHAT_JS.index('function taskTurnStorageKey('):
+                         CHAT_JS.index('async function applyTaskTurnResult(')]
+        script = r"""
+const assert=require('node:assert/strict');
+const state={},saved=new Map(),headers={'X-Tenant-Id':'tenant','X-User-Id':'owner'};
+const sessionStorage={getItem:key=>saved.get(key)||null,setItem:(key,value)=>saved.set(key,value),removeItem:key=>saved.delete(key)};
+const body={text:'增加无水印',expected_task_version:1},selection={llm:'text',vlm:'vision'};
+const result={kind:'cleaning',base_task_version:1};let posts=0,reads=0,offline=false;
+const api=async(path,options)=>{if(options){posts++;assert.equal(options.keyValue,'command');assert.deepEqual(options.body,body);
+ if(offline)throw Object.assign(Error('offline'),{code:'NETWORK_UNAVAILABLE'});
+ if(posts===1)throw Object.assign(Error('response lost'),{code:'NETWORK_UNAVAILABLE'});return result}
+ reads++;if(offline)throw Error('offline');return {status:'completed',result}};
+const funcs=new Function('state','headers','sessionStorage','api','key',process.env.SOURCE+';return {sendTaskTurn,pendingTaskTurn};')(
+ state,headers,sessionStorage,api,()=> 'command');
+const guard=setTimeout(()=>process.exit(9),2000);
+(async()=>{const recovered=await funcs.sendTaskTurn('task',body,selection);assert.equal(recovered.recovered,true);
+ assert.equal(posts,1);assert.equal(reads,1);assert.equal(funcs.pendingTaskTurn('task'),null);
+ offline=true;await assert.rejects(funcs.sendTaskTurn('task',body,selection));
+ state.pendingTaskTurn=null;const pending=funcs.pendingTaskTurn('task');assert.equal(pending.key,'command');
+ assert.deepEqual(pending.body,body);offline=false;await funcs.sendTaskTurn('task',body,selection);
+ assert.equal(funcs.pendingTaskTurn('task'),null);clearTimeout(guard);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for explicit command retry test')
+    def test_failed_task_command_waits_for_explicit_retry_and_keeps_original_request(self):
+        source = CHAT_JS[CHAT_JS.index('function taskTurnStorageKey('):
+                         CHAT_JS.index('async function applyTaskTurnResult(')]
+        script = r"""
+const assert=require('node:assert/strict');
+const body={text:'增加无水印',expected_task_version:1};
+const state={task:{task_id:'task',task_version:1},pendingTaskTurn:{taskId:'task',key:'old-command',body,selection:{llm:'original'}}};
+const saved=new Map(),sessionStorage={getItem:key=>saved.get(key)||null,setItem:(key,value)=>saved.set(key,value),removeItem:key=>saved.delete(key)};
+let actions=[],posts=0,applied=0;
+const api=async(path,options)=>{if(!options)return {status:'failed',error:{message:'模型暂不可用'}};
+ posts++;assert.equal(options.retryFailed,true);assert.equal(options.keyValue,'old-command');assert.deepEqual(options.body,body);
+ return {kind:'cleaning',base_task_version:1}};
+const funcs=new Function('state','headers','sessionStorage','api','key','setFollowupBusy','message','guidedAction','applyTaskTurnResult','$',process.env.SOURCE+';return {recoverTaskTurn};')(
+ state,{},sessionStorage,api,()=>{throw Error('must keep original key')},value=>state.followupBusy=value,
+ ()=>({remove(){}}),(_bubble,label,fn)=>actions.push([label,fn]),async()=>{applied++},()=>({textContent:''}));
+const guard=setTimeout(()=>process.exit(9),2000);
+(async()=>{await funcs.recoverTaskTurn();assert.equal(posts,0);assert.equal(actions[0][0],'重试这条消息');
+ await actions[0][1]();assert.equal(posts,1);assert.equal(applied,1);clearTimeout(guard);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for candidate confirmation behavior')
+    def test_candidate_confirmation_is_one_click_and_reconciles_disconnects(self):
+        source = CHAT_JS[CHAT_JS.index('async function showCandidateManifestReview(){'):CHAT_JS.index('function offerVlmCleaning(')]
+        script = r"""
+const assert=require('node:assert/strict');
+const proposal={kind:'candidate_manifest_proposal',candidate_count:30,proposal_digest:'digest',expected_task_version:2,confirmed:false};
+const confirmed={kind:'candidate_input_manifest',candidate_count:30,confirmed:true};
+async function scenario(mode){
+ const state={task:{task_id:'t',confirmed_revision:1}},lines=[],calls=[],offered=[],actions=[],status={textContent:'old'};
+ let release;
+ const api=async(path,options={})=>{calls.push(options);assert.equal(path,'/v1/retrieval/tasks/t/first-search/manifest');
+  if(mode==='pending'&&calls.length===1)await new Promise(resolve=>release=resolve);
+  if(mode==='get-error')throw Object.assign(Error('offline'),{code:'NETWORK_UNAVAILABLE'});
+  if(options.method==='POST'){
+   assert.equal(options.keyValue,'candidate-manifest:digest');assert.equal(options.body.expected_task_version,2);assert.equal(options.body.action,'confirm');
+   if(['post-error','post-unsaved'].includes(mode))throw Object.assign(Error('offline'),{code:'NETWORK_UNAVAILABLE'});
+   return confirmed;
+  }
+  return mode==='already'||mode==='post-error'&&calls.length>1?confirmed:proposal;
+ };
+ const run=new Function('state','setBusy','message','api','$','offerVlmCleaning','refreshTaskSidebar','guidedAction',process.env.SOURCE+';return showCandidateManifestReview')(
+  state,()=>{},(_role,_title,text)=>{const line={textContent:text};lines.push(line);return {querySelector:()=>line}},api,()=>status,
+  manifest=>offered.push(manifest),async()=>{},(_,label)=>actions.push(label));
+ const first=run();assert.equal(lines[0].textContent,'正在确认候选清单…');
+ if(mode==='pending'){await run();assert.equal(calls.length,1);release();}
+ await first;assert.equal(state.manifestConfirming,false);
+ if(['get-error','post-unsaved'].includes(mode)){assert.match(lines[0].textContent,/连接中断/);assert.deepEqual(actions,['重新确认']);assert.equal(offered.length,0);}
+ else{assert.match(lines[0].textContent,/已确认 30 张/);assert.equal(offered.length,1);assert.equal(state.candidateManifest,confirmed);
+  assert.equal(calls.filter(call=>call.method==='POST').length,mode==='already'?0:1);}
+}
+(async()=>{for(const mode of ['normal','pending','already','post-error','post-unsaved','get-error'])await scenario(mode)})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for expansion model replacement')
+    def test_expansion_regeneration_uses_current_model_and_suppresses_duplicate_clicks(self):
+        source = CHAT_JS[CHAT_JS.index('async function regenerateExpansionJob(job){'):CHAT_JS.index('function watchExpansionJob(job){')]
+        script = r"""
+const assert=require('node:assert/strict'),state={dialogueId:'dlg_one',dialogueVersion:3};
+const fields={'llm-model':{value:'fast'},'vlm-model':{value:'vision'},status:{}};
+let calls=0,release,watched;
+const api=async(path,options)=>{calls++;assert.equal(options.body.model_selection.llm,'fast');
+ assert.equal(options.body.raw_request,'飞天猪20张');assert.equal(options.body.target_count,20);
+ assert(!('action' in options.body));assert.equal(options.body.regeneration_key,'fresh');await new Promise(resolve=>release=resolve);return {job_id:'replacement'}};
+const regenerate=new Function('state','$','api','expansionJobPath','key','watchExpansionJob',process.env.SOURCE+';return regenerateExpansionJob')(
+ state,id=>fields[id],api,()=>'/jobs',()=> 'fresh',job=>watched=job);
+(async()=>{const job={dialogue_session_id:'dlg_one',dialogue_version:3,raw_request:'飞天猪20张',target_count:20};
+ const first=regenerate(job);await regenerate(job);assert.equal(calls,1);release();await first;
+ assert.equal(watched.job_id,'replacement');assert.equal(state.expansionRegenerating,false);
+ state.dialogueVersion=4;await regenerate(job);assert.equal(calls,1);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for expansion waiting feedback')
+    def test_expansion_waiting_feedback_shows_model_and_real_elapsed_time(self):
+        source = CHAT_JS[CHAT_JS.index('function expansionProgress(job){'):CHAT_JS.index('async function regenerateExpansionJob(job){')]
+        script = r"""
+const assert=require('node:assert/strict');
+const describe=new Function('registeredModelProfiles',process.env.SOURCE+';return expansionProgress')([{id:'slow',model:'glm-5.3'}]);
+const waiting=describe({status:'running',completed_terms:0,target_terms:null,elapsed_ms:26000,model_selection:{llm:'slow'}});
+assert.match(waiting,/glm-5.3/);assert.match(waiting,/26 秒/);assert.match(waiting,/首批/);
+assert.doesNotMatch(waiting,/待确定/);assert.match(waiting,/响应较慢/);
+assert.match(describe({status:'running',completed_terms:3,target_terms:8,elapsed_ms:5000}),/3\/8/);
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for natural draft reply test')
+    def test_natural_draft_reply_is_visible_before_background_expansion(self):
+        source = CHAT_JS[CHAT_JS.index('async function prepareTask(){'):
+                         CHAT_JS.index('async function reviseGuidedExpansion(')]
+        start = source.index('function dialogueCommandScope(')
+        end = source.index('async function applyDialogueTurn(')
+        source = (source[:start] + "function pendingDialogueCommand(){return null}"
+                  "async function sendDialogueCommand(body,selection,signal){return api('/v1/retrieval/projects/demo/dialogue-command',{method:'POST',body,signal})}" + source[end:])
+        script = r"""
+const assert=require('node:assert/strict');const state={dialogueVersion:0,dialogueStage:'request'};
+const fields={'request-text':{value:'想收集一些小狗画面'},'llm-model':{value:'llm'},'dialogue-llm-model':{value:'chat-llm'},'vlm-model':{value:'vlm'},
+ 'target-count':{value:''},'stop-request':{classList:{add(){},remove(){}}},status:{textContent:''}};
+const events=[];const api=async(path,options)=>{assert.equal(options.body.llm_id,'chat-llm');return {session_id:'dlg_x',version:1,stage:'terms',action:'update',
+ reply_source:'model',reply:'会保留雪地和无水印这两个要求。',request:{target_count:12,effective_request:'12张雪地小狗图片，无水印'}}};
+const prepare=new Function('state','$','api','message','setDialogueBusy','saveDialogueSession','groupInputBody','prepareGuidedExpansion',process.env.SOURCE+';return prepareTask')(
+ state,id=>fields[id],api,(role,title,text)=>{events.push(text);return {setAttribute(){},remove(){}}},()=>{},()=>{},()=>({}),async(raw,count,signal,selection)=>{assert.equal(selection.llm,'llm');events.push('expansion')});
+(async()=>{await prepare();assert.equal(events.at(-2),'会保留雪地和无水印这两个要求。');assert.equal(events.at(-1),'expansion')})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for connection error behavior test')
+    def test_api_distinguishes_disconnect_from_abort_and_never_retries_posts(self):
+        source = CHAT_JS[CHAT_JS.index('async function api('):CHAT_JS.index('function stopTaskEvents(')]
+        script = r"""
+const assert=require('node:assert/strict');let calls=0,mode='disconnect';
+const fetch=async()=>{calls++;if(mode==='disconnect')throw TypeError('Failed to fetch');
+ if(mode==='body')return {json:async()=>{throw TypeError('Failed to fetch')}};
+ if(mode==='abort'){const e=Error('aborted');e.name='AbortError';throw e}
+ return {ok:false,status:409,json:async()=>({code:'DIALOGUE_CONFLICT',message:'reload'})}};
+const api=new Function('headers','fetch',process.env.SOURCE+';return api')({},fetch);
+(async()=>{await assert.rejects(api('/turn',{method:'POST',body:{message:'fixture'}}),e=>e.code==='NETWORK_UNAVAILABLE');assert.equal(calls,1);
+ mode='body';await assert.rejects(api('/turn'),e=>e.code==='NETWORK_UNAVAILABLE');assert.equal(calls,2);
+ mode='abort';await assert.rejects(api('/turn'),e=>e.name==='AbortError'&&!e.code);
+ mode='conflict';await assert.rejects(api('/turn'),e=>e.code==='DIALOGUE_CONFLICT');assert.equal(calls,4);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for task expansion preview test')
+    def test_task_expansion_first_batch_has_no_confirm_and_complete_review_is_compact(self):
+        source = CHAT_JS[CHAT_JS.index('function taskExpansionPath('):
+                         CHAT_JS.index('async function restoreTaskExpansionJob(')]
+        source = CHAT_JS[CHAT_JS.index('function expansionProgress(job){'):CHAT_JS.index('async function regenerateExpansionJob(job){')] + source
+        script = r"""
+const assert=require('node:assert/strict');
+const state={task:{task_id:'a',task_version:1,confirmed_revision:1}};
+const bubbles=[],actions=[],details=[];
+const message=(role,title,text)=>{const p={textContent:text};const b={p,removed:false,querySelector:s=>s==='p'?p:null,remove(){this.removed=true}};bubbles.push(b);return b};
+const watch=new Function('state','$','message','reviewDetails','guidedAction','key','setTimeout','clearTimeout',process.env.SOURCE+';return watchTaskExpansionJob')(
+ state,()=>({}),message,(b,label,text)=>details.push([label,text]),(b,label)=>actions.push(label),()=> 'token',()=>1,()=>{});
+const job={task_id:'a',task_version:1,revision:1,job_id:'j',target_count:20,status:'running',completed_terms:3,target_terms:10,
+ preview_groups:[{primary_label:'猫',auxiliary_terms:['猫在草地','猫在窗边']} ]};
+watch(job);assert.match(bubbles[0].p.textContent,/猫在草地/);assert.match(bubbles[0].p.textContent,/暂不可确认/);assert.deepEqual(actions,[]);
+const done={...job,status:'completed',changes:{target_before:10,target_after:20,added_terms:1,removed_terms:0},
+ result:{plan:{groups:[{primary_label:'猫',auxiliary_terms:['猫在草地','猫在窗边']}]}}};
+watch(done);assert.equal(bubbles[0].removed,true);assert.match(bubbles[1].p.textContent,/10 → 20/);assert(!bubbles[1].p.textContent.includes('猫在草地'));
+assert.match(details[0][1],/猫在草地/);assert(actions.includes('确认新版词表'));
+watch(done);watch({...done,task_version:0});assert.equal(bubbles.length,2);
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for immediate follow-up feedback test')
+    def test_followup_echoes_before_response_and_preserves_new_input_on_failure_or_navigation(self):
+        source = CHAT_JS[CHAT_JS.index('async function prepareFeedback(){'):
+                         CHAT_JS.index('function taskExpansionPath(')]
+        source = (source[:source.index('function taskTurnStorageKey(')] +
+                  source[source.index('async function applyTaskTurnResult('):])
+        source = ("async function sendTaskTurn(taskId,body){return api('/turn',{body})}"
+                  "function pendingTaskTurn(){return null}" + source)
+        cancel_source = CHAT_JS[CHAT_JS.index('function cancelTaskFollowup('):
+                                CHAT_JS.index('function cancelDialogueRequest(')]
+        script = r"""
+const assert=require('node:assert/strict');
+const state={task:{task_id:'a',task_version:1,confirmed_revision:1}};
+const fields={'feedback-text':{value:'为什么选这些词'},'llm-model':{value:'llm'},'vlm-model':{value:'vlm'},status:{textContent:''}};
+const messages=[];let resolve,reject,removed=0;
+const api=()=>new Promise((ok,no)=>{resolve=ok;reject=no});
+const run=new Function('state','$','api','message','setFollowupBusy','showPostTaskExpansion','const key=()=>"fixture-command";'+process.env.SOURCE+';return prepareFeedback')(
+ state,id=>fields[id],api,(role,title,text)=>{messages.push([role,text]);return {remove(){removed++}}},v=>{state.followupBusy=v},()=>{throw Error('unexpected expansion')});
+const cancel=new Function('state','setFollowupBusy',process.env.CANCEL_SOURCE+';return cancelTaskFollowup')(state,v=>{state.followupBusy=v});
+(async()=>{let pending=run();assert.deepEqual(messages.map(row=>row[0]),['user','assistant']);assert.equal(fields['feedback-text'].value,'');
+ fields['feedback-text'].value='接下来想问的';resolve({kind:'answer',reply:'覆盖了不同场景。'});await pending;
+ assert.equal(messages.filter(row=>row[0]==='user').length,1);assert.equal(fields['feedback-text'].value,'接下来想问的');assert.equal(messages.at(-1)[1],'覆盖了不同场景。');
+ fields['feedback-text'].value='失败后重试';pending=run();reject(Error('网络失败'));await pending;assert.equal(fields['feedback-text'].value,'失败后重试');
+ fields['feedback-text'].value='旧任务消息';pending=run();state.task={task_id:'b',task_version:1,confirmed_revision:1};fields['feedback-text'].value='';reject(Error('旧请求失败'));await pending;
+ assert.equal(fields['feedback-text'].value,'');assert.equal(state.followupBusy,false);assert(removed>=3);
+ fields['feedback-text'].value='离开前消息';pending=run();const oldReject=reject;cancel();state.historyOpenToken=1;
+ fields['feedback-text'].value='新页面消息';const latest=run(),latestResolve=resolve;
+ oldReject(Error('旧页面失败'));await pending;assert.equal(state.followupBusy,true);assert.equal(fields['feedback-text'].value,'');
+ latestResolve({kind:'answer',reply:'新页面回答'});await latest;assert.equal(state.followupBusy,false);assert.equal(messages.at(-1)[1],'新页面回答');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source, 'CANCEL_SOURCE': cancel_source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for timing summary test')
+    def test_chat_timing_summary_reports_p50_and_p95_without_message_text(self):
+        source = CHAT_JS[CHAT_JS.index('function recordChatTiming('):
+                         CHAT_JS.index('const headers=')]
+        script = r"""
+const assert=require('node:assert/strict');const saved=new Map();
+const sessionStorage={getItem:key=>saved.get(key)||null,setItem:(key,value)=>saved.set(key,value)};
+const window={};
+new Function('sessionStorage','window',process.env.SOURCE+';for(let n=1;n<=20;n++)recordChatTiming("understanding",n);return window.dshChatTimingSummary')(sessionStorage,window)();
+assert.deepEqual(window.dshChatTimingSummary().understanding,{n:20,p50_ms:10,p95_ms:19});
+assert.equal(JSON.stringify([...saved.values()]).includes('用户原话'),false);
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for count-only fast path test')
+    def test_image_count_edit_reuses_unallocated_terms_and_requires_group_targets(self):
+        source = CHAT_JS[CHAT_JS.index('async function prepareTask(){'):
+                         CHAT_JS.index('async function reviseGuidedExpansion(')]
+        start = source.index('function dialogueCommandScope(')
+        end = source.index('async function applyDialogueTurn(')
+        source = (source[:start] + "function pendingDialogueCommand(){return null}"
+                  "async function sendDialogueCommand(body,selection,signal){return api('/v1/retrieval/projects/demo/dialogue-command',{method:'POST',body,signal})}" + source[end:])
+        script = r"""
+const assert=require('node:assert/strict');
+const fields={'request-text':{value:'改成20张，其他不变'},'llm-model':{value:'llm'},
+ 'vlm-model':{value:'vlm'},'target-count':{value:''},'stop-request':{classList:{add(){},remove(){}}},
+ status:{textContent:''}};
+const $=id=>fields[id];let calls=0,review=null;
+const state={task:null,requestController:null,dialogueId:'dlg_x',dialogueVersion:1,dialogueStage:'terms',
+ targetCountTouched:false,proposedExpansion:{raw:'找10张猫图片',count:10,version:1,
+ lines:'猫 | 猫在草地',plan:{groups:[{primary_label:'猫',auxiliary_terms:['猫在草地'],delivery_target:null}]}}};
+const api=async()=>{calls++;return {session_id:'dlg_x',version:2,stage:'terms',action:'revise_terms',
+ request:{target_count:20,effective_request:'找 20 张猫图片'},count_edits:[],expansion_instruction:null}};
+const message=()=>({setAttribute(){},remove(){}});
+const prepare=new Function('state','$','api','message','setDialogueBusy','saveDialogueSession','groupInputBody','showTermReview',
+ process.env.SOURCE+';return prepareTask')(state,$,api,message,()=>{},()=>{},()=>({groups:[{primary_label:'猫',auxiliary_terms:['猫在草地']}]}),
+ (proposal)=>{review=proposal});
+(async()=>{await prepare();assert.equal(calls,1);assert.equal(review.count,20);
+ assert.equal(review.raw,'找 20 张猫图片');assert.equal(state.proposedExpansion.count,20);
+ state.proposedExpansion.plan.groups[0].delivery_target=10;fields['request-text'].value='改成30张，其他不变';
+ await prepare();assert.equal(calls,1);assert.match(fields.status.textContent,/每组的新目标/);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for restored follow-up context test')
+    def test_task_followup_context_survives_history_restore(self):
+        source = CHAT_JS[CHAT_JS.index('function restoreFollowupContext('):
+                         CHAT_JS.index('async function openConversation(')]
+        script = r"""
+const assert=require('node:assert/strict');
+const state={};
+const restore=new Function('state',process.env.SOURCE+';return restoreFollowupContext')(state);
+const task={task_id:'task-a',task_version:3};
+restore(task,[{role:'user',text:'猫少一半'},{role:'assistant',text:'本轮理解：expansion'},
+              {role:'user',text:'其他不变'},{role:'assistant',text:'已保留狗组'}]);
+assert.deepEqual(state.followupContext.messages,[{role:'user',text:'猫少一半'},
+              {role:'user',text:'其他不变'},{role:'assistant',text:'已保留狗组'}]);
+restore(task,[]);assert.equal(state.followupContext.messages.length,3);
+restore({...task,task_version:4},[]);assert.equal(state.followupContext.messages.length,0);
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_production_workbench_opens_without_chat(self):
         self.assertIn('href="/production"', CHAT_HTML)
         self.assertIn('id="line-rows"', BOARD_HTML)
@@ -75,12 +543,12 @@ class ChatUiTest(unittest.TestCase):
         self.assertIn("nodes.querySelectorAll('details.node-card[data-node]')", CHAT_JS)
 
     def test_explicit_term_replacement_has_distinct_confirmation_copy(self):
-        self.assertIn('明确词表修改已完成：逐字保留你指定的词', CHAT_JS)
+        self.assertIn("job.result.note?.includes('按用户逐字指定')?'指定词表待确认'", CHAT_JS)
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for saved group rendering test')
     def test_saved_groups_do_not_render_internal_model_binding_card(self):
         source = CHAT_JS[CHAT_JS.index('function showSavedGroups('):
-                         CHAT_JS.index('async function previewBranches(')]
+                         CHAT_JS.index('function setBusy(')]
         script = r"""
 const assert=require('node:assert/strict');
 const cards=[];
@@ -156,12 +624,20 @@ const assert=require('node:assert/strict');
 const saved=new Map(),localStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v)};
 const sessionStorage={getItem:()=>null};
 const fields={'llm-model':{value:'llm-a'},'vlm-model':{value:'vlm-a'}};
-const state={task:null,dialogueId:null};
+const state={task:null,dialogueId:null,serverModelDefaults:{llm:'llm-a',vlm:'vlm-a'}};
 const [scope,read,save]=new Function('state','localStorage','sessionStorage','$',process.env.SOURCE+';return [modelChoiceScope,readStoredModelChoice,saveCurrentModelChoice]')(state,localStorage,sessionStorage,id=>fields[id]);
+const defaults=state.serverModelDefaults;state.serverModelDefaults=null;assert.equal(read(),null);state.serverModelDefaults=defaults;
 assert.equal(scope(),'new');save();assert.deepEqual(read(),{llm:'llm-a',vlm:'vlm-a'});
 state.task={task_id:'task-one'};fields['llm-model'].value='llm-b';save();assert.deepEqual(read(),{llm:'llm-b',vlm:'vlm-a'});
 state.task={task_id:'task-two'};assert.equal(read(),null);
 state.task={task_id:'task-one'};assert.equal(read().llm,'llm-b');
+state.serverModelDefaults={llm:'fast-model',vlm:'vlm-a'};
+assert.equal(read(),null,'old cache cannot override new server defaults');
+fields['llm-model'].value='explicit-model';save();
+assert.equal(read().llm,'explicit-model','explicit choice survives with unchanged defaults');
+state.serverModelDefaults={llm:'next-default',vlm:'vlm-a'};
+assert.equal(read(),null,'changing defaults invalidates earlier cached selection');
+
 """
         result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
                                 capture_output=True, text=True)
@@ -265,6 +741,10 @@ state.modelChoiceTouched=false;data.defaults={llm:'',vlm:''};await load();assert
     def test_current_terms_reach_model_and_questions_do_not_trigger_expansion(self):
         source = CHAT_JS[CHAT_JS.index('async function prepareTask(){'):
                          CHAT_JS.index('async function reviseGuidedExpansion(')]
+        start = source.index('function dialogueCommandScope(')
+        end = source.index('async function applyDialogueTurn(')
+        source = (source[:start] + "function pendingDialogueCommand(){return null}"
+                  "async function sendDialogueCommand(body,selection,signal){return api('/v1/retrieval/projects/demo/dialogue-command',{method:'POST',body,signal})}" + source[end:])
         script = r"""
 const assert=require('node:assert/strict');
 const groups=[{primary_label:'猫',auxiliary_terms:['猫在树下','猫在窗边']}];
@@ -317,9 +797,9 @@ assert.match(status.textContent,/保留你的文字/);
         source = CHAT_JS[CHAT_JS.index('async function prepareTask(){'):
                          CHAT_JS.index('async function reviseGuidedExpansion(')]
         self.assertIn('正在理解需求……', source)
-        self.assertIn('正在生成检索词（当前模型可能需要 1–2 分钟）', source)
+        self.assertIn("onStage('正在生成检索词')", source)
         self.assertIn('正在理解检索词调整要求', source)
-        self.assertIn('正在扩词中（当前模型可能需要 1–2 分钟）', source)
+        self.assertIn('正在生成检索词', source)
         self.assertIn("if(typeof refreshHistory==='function')refreshHistory()", source)
         self.assertIn("error.code==='DSH_TIMEOUT'?'扩词 Agent 等待超时", CHAT_JS)
         self.assertIn('已等待 ${waitSeconds} 秒', source)
@@ -362,7 +842,7 @@ const sessionStorage={removeItem:key=>removed.push(key)};
 const location={reload:()=>reloads++};
 const $=()=>({focus:()=>focuses++});
 const [visible,start]=new Function('state','localStorage','sessionStorage','location','$','cancelDialogueRequest',
-  process.env.SOURCE+'\n'+process.env.START+';return [visibleDialogueChats,startNewChat]')(
+  'const key=()=>"new-chat";'+process.env.SOURCE+'\n'+process.env.START+';return [visibleDialogueChats,startNewChat]')(
   state,localStorage,sessionStorage,location,$,()=>{});
 assert.deepEqual(visible([{message_count:0},{message_count:1}]),[{message_count:1}]);
 start();start();
@@ -471,23 +951,22 @@ const manifest={...proposal,kind:'candidate_input_manifest',confirmed:true,manif
 const state={task:{task_id:'task-one',task_version:7},searchSnapshot:{results:{available:true}}};
 let calls=[],cards=[],messages=[],vlmOffers=0,refreshes=0;
 const api=async(path,options={})=>{calls.push({path,options});return options.method==='POST'?manifest:proposal};
-const card=(title,rows,actions=[])=>{const value={title,rows,actions};cards.push(value);return value};
-const review=new Function('state','api','setBusy','message','card','refreshTaskSidebar','offerVlmCleaning','$',
+const message=(role,title,text)=>{const line={textContent:text};messages.push(line);return {querySelector:()=>line}};
+const review=new Function('state','api','setBusy','message','refreshTaskSidebar','offerVlmCleaning','$',
  process.env.SOURCE+';return showCandidateManifestReview')(
- state,api,()=>{},(role,title,text)=>messages.push({role,title,text}),card,
+ state,api,()=>{},message,
  async()=>{refreshes++},()=>{vlmOffers++},()=>({textContent:''}));
+const originalResults=state.searchSnapshot.results;
 await review();
-const confirmation=cards.find(item=>item.title==='补数候选清单确认卡 · 尚未清洗');
-assert(confirmation);assert.equal(confirmation.rows[0][1],2);
-await confirmation.actions[0][1]();
 const request=calls.find(item=>item.options.method==='POST');
 assert.equal(request.options.keyValue,'candidate-manifest:'+proposal.proposal_digest);
 assert.deepEqual(request.options.body,{proposal_digest:proposal.proposal_digest,
   expected_task_version:7,action:'confirm'});
 assert.equal(state.candidateManifest.manifest_ref,'manifest-new');
-assert(cards.some(item=>item.title==='增量 VLM 将累计合并'));
+assert.equal(state.searchSnapshot.results,originalResults);
+assert.equal(calls.filter(item=>item.options.method==='POST').length,1);
 assert.equal(vlmOffers,1);assert.equal(refreshes,1);
-assert.equal(messages.at(-1).title,'本轮新增候选已固定');
+assert.match(messages.at(-1).textContent,/已确认本轮新增 2 张/);
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(['node', '-e', script],
@@ -497,34 +976,22 @@ assert.equal(messages.at(-1).title,'本轮新增候选已固定');
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for downstream search status test')
     def test_published_results_hide_expected_stale_first_search_error(self):
-        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(){'):
+        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(workspaceSeed=null){'):
                          CHAT_JS.index('function showResults(')]
         script = r"""
 (async()=>{
 const assert=require('node:assert/strict');
-const state={task:{task_id:'task-one',confirmed_revision:1,run_generation:1,task_version:7},
-  confirmedRevision:{taskId:'task-one',revision:1},sidebarReadToken:0};
-const progress={task_id:'task-one',revision:1,run_generation:1,task_version:7,
-  nodes:[{node:'retrieval',node_status:'succeeded'}]};
-const results={available:true,counts:{accepted:1}};
-const manifest={kind:'candidate_manifest_proposal',confirmed:false,candidate_count:0,
-  expected_task_version:7};
-const api=async path=>{
-  if(path.endsWith('/summary'))return {progress};
-  if(path.includes('/results?'))return results;
-  if(path.endsWith('/first-search/manifest'))return manifest;
-  if(path.endsWith('/first-search/progress'))throw Error('REVISION_CONFLICT: Retrieval task scope is stale');
-  throw Error('unexpected '+path);
-};
-const fields={'task-sidebar-summary':{textContent:''},'retrieval-live-status':{textContent:''}};
-const $=id=>fields[id];let shown;
-const refresh=new Function('state','api','$','showProgress','searchStatusLabel','searchSummary','message',
-  process.env.SOURCE+';return refreshTaskSidebar')(
-  state,api,$,(...args)=>{shown=args},()=>'',()=>'',()=>{});
-await refresh();
-assert(shown);assert.equal(state.searchSnapshot.error,null);
-assert.doesNotMatch(fields['retrieval-live-status'].textContent,/REVISION_CONFLICT|读取失败/);
-assert.equal(fields['retrieval-live-status'].textContent,'检索已结束');
+const task={task_id:'task-one',confirmed_revision:1,run_generation:1,task_version:7};
+const state={task,sidebarReadToken:0};
+const workflow={binding:{task_version:7},summary:'清洗已完成，当前入选 1 张。',nodes:[],available_actions:[]};
+const progress={task_id:task.task_id,revision:1,run_generation:1,task_version:7,counts:{target:10,accepted:1,returned:5},workflow,nodes:[]};
+const results={task_id:task.task_id,revision:1,run_generation:1,task_version:7,available:true,counts:{accepted:1}};
+const calls=[];const api=async path=>{calls.push(path);if(path.endsWith('/workspace'))return {...task,progress,workflow,manifest:null,search:null};if(path.includes('/results?'))return results;throw Error('unexpected '+path)};
+const fields={'task-sidebar-summary':{textContent:''},'retrieval-live-status':{textContent:''}};let shown;
+const refresh=new Function('state','api','$','showProgress',process.env.SOURCE+';return refreshTaskSidebar')(state,api,id=>fields[id],(...args)=>shown=args);
+await refresh();assert(shown);assert.equal(shown[1],results);assert(!state.searchSnapshot.error);
+assert.equal(calls.length,2);assert(!calls.some(path=>path.includes('/first-search/')));
+assert.equal(fields['retrieval-live-status'].textContent,workflow.summary);
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(['node', '-e', script],
@@ -534,31 +1001,26 @@ assert.equal(fields['retrieval-live-status'].textContent,'检索已结束');
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for stale polling test')
     def test_frozen_task_stops_polling_stale_search_until_version_moves(self):
-        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(){'):
+        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(workspaceSeed=null){'):
                          CHAT_JS.index('function showResults(')]
         script = r"""
 (async()=>{
-const assert=require('node:assert/strict');
-const state={task:{task_id:'t',confirmed_revision:1,run_generation:1,task_version:7},
-  confirmedRevision:{taskId:'t',revision:1},sidebarReadToken:0};
+const assert=require('node:assert/strict');const state={task:{task_id:'t',confirmed_revision:1,run_generation:1,task_version:7}};
 let version=7;const calls={search:0,manifest:0};
-const stale=()=>{const e=Error('REVISION_CONFLICT: Retrieval task scope is stale');e.code='REVISION_CONFLICT';throw e};
 const api=async path=>{
-  if(path.endsWith('/first-search/progress')){calls.search++;stale()}
-  if(path.endsWith('/first-search/manifest')){calls.manifest++;stale()}
-  if(path.endsWith('/summary'))return {progress:{task_version:version,nodes:[{node:'retrieval',node_status:'succeeded'}]}};
-  if(path.includes('/results?'))return {available:true,counts:{accepted:1}};
-  throw Error('unexpected '+path);
+ if(path.includes('/first-search/progress')){calls.search++;throw Error('stale')}
+ if(path.includes('/first-search/manifest')){calls.manifest++;throw Error('stale')}
+ if(path.endsWith('/workspace')){const workflow={binding:{task_version:version},summary:'清洗已完成',nodes:[],available_actions:[]};return {...state.task,task_version:version,workflow,progress:{task_id:'t',revision:1,run_generation:1,task_version:version,counts:{target:10,accepted:2},nodes:[],workflow},manifest:null,search:null}}
+ if(path.includes('/results?'))return {task_id:'t',revision:1,run_generation:1,task_version:7,available:true,counts:{accepted:1}};
+ throw Error('unexpected '+path);
 };
 const fields={'task-sidebar-summary':{textContent:''},'retrieval-live-status':{textContent:''}};
-const refresh=new Function('state','api','$','showProgress','searchStatusLabel','searchSummary','message',
-  process.env.SOURCE+';return refreshTaskSidebar')(state,api,id=>fields[id],()=>{},()=>'',()=>'',()=>{});
-await refresh();await refresh();await refresh();
-assert.deepEqual(calls,{search:1,manifest:1},'the first 409 is learned; later polls at version 7 skip both');
+const refresh=new Function('state','api','$','showProgress',process.env.SOURCE+';return refreshTaskSidebar')(state,api,id=>fields[id],()=>{});
+await refresh();await refresh();await refresh();assert.deepEqual(calls,{search:0,manifest:0});
+assert.equal(state.searchSnapshot.results.counts.accepted,1);
+version=8;await refresh();await refresh();await refresh();assert.deepEqual(calls,{search:0,manifest:0});
+assert.equal(state.task.task_version,8);assert.equal(state.searchSnapshot.results,undefined,'old result pages cannot cross a version');
 assert.doesNotMatch(fields['retrieval-live-status'].textContent,/读取失败/);
-const before={...calls};version=8;await refresh();await refresh();await refresh();
-assert.equal(calls.search-before.search,1,'a new version is read once more, then skipped');
-assert.equal(calls.manifest-before.manifest,1);
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(['node', '-e', script],
@@ -568,33 +1030,25 @@ assert.equal(calls.manifest-before.manifest,1);
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for manifest prompt test')
     def test_ready_auto_window_prompts_candidate_confirmation_once(self):
-        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(){'):
+        source = CHAT_JS[CHAT_JS.index('async function refreshTaskSidebar(workspaceSeed=null){'):
                          CHAT_JS.index('function showResults(')]
         script = r"""
 (async()=>{
-const assert=require('node:assert/strict');
-const state={task:{task_id:'t',confirmed_revision:1,run_generation:1,task_version:2},
-  confirmedRevision:{taskId:'t',revision:1},sidebarReadToken:0};
-let confirmed=false;
-const api=async path=>{
-  if(path.endsWith('/first-search/progress'))return {status:'approved',revision:1,generation:1,task_version:2,
-    pagination_stopped:false,initial_window_complete:true,members:[]};
-  if(path.endsWith('/first-search/manifest'))return {confirmed,candidate_count:60,expected_task_version:2};
-  if(path.includes('/first-search/candidates'))return {verified_count:1};
-  if(path.endsWith('/summary'))return {progress:{task_version:2,nodes:[]}};
-  if(path.includes('/results?'))return {available:false};
-  throw Error('unexpected '+path);
+const assert=require('node:assert/strict');const state={task:{task_id:'t',confirmed_revision:1,run_generation:1,task_version:2}};
+let confirmed=false;const api=async path=>{
+ if(path.endsWith('/workspace')){const detail=confirmed?'检索已结束，候选清单已确认。':'首轮检索已返回，候选尚未确认。';const workflow={binding:{task_version:2},summary:detail,nodes:[{node:'retrieval',detail}],available_actions:confirmed?[]:[{id:'confirm_candidates'}]};
+ return {...state.task,workflow,progress:{task_id:'t',revision:1,run_generation:1,task_version:2,counts:{target:10,returned:60},nodes:workflow.nodes,workflow},search:null,manifest:confirmed?{confirmed:true,candidate_count:60,expected_task_version:2}:null}}
+ if(path.includes('/results?'))return {task_id:'t',revision:1,run_generation:1,task_version:2,available:false};
+ throw Error('unexpected '+path);
 };
-const prompts=[];
-const fields={'task-sidebar-summary':{textContent:''},'retrieval-live-status':{textContent:''}};
-const refresh=new Function('state','api','$','showProgress','searchStatusLabel','searchSummary','message','guidedAction','showCandidateManifestReview',
-  process.env.SOURCE+';return refreshTaskSidebar')(state,api,id=>fields[id],()=>{},()=>'检索中',()=>'',
-  (kind,title,text)=>({title,text}),(bubble,label)=>prompts.push([bubble.title,label,bubble.text]),()=>{});
-await refresh();await refresh();
-assert.deepEqual(prompts.map(row=>row.slice(0,2)),[['检索候选已就绪','确认候选清单']]);
-assert.match(prompts[0][2],/已校验 60 张/,'the count is the whole proposal, not the limit=1 page');
-confirmed=true;state.task.task_version=2;state.manifestPrompted.clear();await refresh();
-assert.equal(prompts.length,1,'a frozen list is not offered again');
+const prompts=[],messages=[],fields={'task-sidebar-summary':{textContent:''},'retrieval-live-status':{textContent:''}};
+const refresh=new Function('state','api','$','showProgress','message','guidedAction','showCandidateManifestReview',process.env.SOURCE+';return refreshTaskSidebar')(
+ state,api,id=>fields[id],()=>{},(kind,title,text)=>{messages.push(title);return {title,text}},(bubble,label)=>prompts.push([bubble.title,label,bubble.text]),()=>{});
+await refresh();await refresh();assert.deepEqual(prompts.map(row=>row.slice(0,2)),[['检索结果已返回','确认候选清单']]);
+assert.doesNotMatch(prompts[0][2],/已校验/,'raw hits cannot be called verified candidates');
+confirmed=true;state.manifestPrompted.clear();await refresh();assert.equal(prompts.length,1);
+state.searchSnapshot=null;state.manifestPrompted.clear();await refresh();assert(!messages.includes('检索已启动'));
+assert.equal(state.candidateManifest.candidate_count,60);assert.match(fields['retrieval-live-status'].textContent,/检索已结束/);
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(['node', '-e', script],
@@ -603,7 +1057,7 @@ assert.equal(prompts.length,1,'a frozen list is not offered again');
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_empty_incremental_manifest_does_not_override_completed_retrieval(self):
-        self.assertIn("const pendingManifest=currentManifest&&manifest.candidate_count>0", CHAT_JS)
+        self.assertIn("authority?available.some(action=>action.id==='confirm_candidates')", CHAT_JS)
         self.assertIn("emptyManifest&&node.node_status==='succeeded'?'检索已完成", CHAT_JS)
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for history Chat navigation test')
@@ -706,10 +1160,10 @@ assert.equal(button.disabled,false);
                          CHAT_JS.index('async function prepareTask()')]
         script = r"""
 const assert=require('node:assert/strict');
-const state={historyOpenToken:0,proposedExpansion:null};
+const state={historyOpenToken:0,proposedExpansion:null,serverModelDefaults:{llm:'fast',vlm:'vision'}};
 const seen=[],actions=[];
 let workflow=null;
-const sessionStorage={getItem:()=>JSON.stringify({id:'dlg-one',proposal:null})};
+const sessionStorage={getItem:()=>JSON.stringify({id:'dlg-one',proposal:null,models:{llm:'old-glm',vlm:'vision'}})};
 const current={session_id:'dlg-one',version:2,stage:'terms',request:{raw_request:'找5张狗图片',target_count:5},
   messages:[{role:'user',text:'找5张狗图片'},{role:'assistant',text:'请确认数量'}]};
 const api=async()=>current;
@@ -720,7 +1174,7 @@ const restore=new Function('state','sessionStorage','resetTimeline','api','resto
   'readStoredModelChoice','timeline','message','showTermReview','guidedAction','setBusy',
   'prepareGuidedExpansion','$','refreshHistory','renderPlanningWorkflow',
   process.env.SOURCE+';return restoreDialogueSession')(
-  state,sessionStorage,()=>{},api,()=>{},()=>null,timeline,message,()=>{},guidedAction,
+  state,sessionStorage,()=>{},api,models=>{assert.equal(models.llm,'fast');state.restoredModels=models},()=>null,timeline,message,()=>{},guidedAction,
   ()=>{},()=>{throw Error('model must not run while opening history')},()=>({focus(){}}),async()=>{},
   stage=>{workflow=stage});
 (async()=>{
@@ -729,7 +1183,7 @@ const restore=new Function('state','sessionStorage','resetTimeline','api','resto
     {role:'assistant',text:'请确认数量'}]);
   assert(actions.includes('重新生成检索词'));
   assert.equal(state.dialogueId,'dlg-one');
-  assert.equal(workflow,'expansion');
+  assert.equal(workflow,'expansion');assert.equal(state.restoredModels.llm,'fast');
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(['node', '-e', script],
@@ -880,18 +1334,18 @@ assert.deepEqual(manual.node_modes,{expansion:'manual',retrieval:'manual',cleani
         script = r"""
 const assert=require('node:assert/strict');
 const calls=[];
-const proposal={lines:'狗 | 柴犬，牧羊犬',version:1};
+const proposal={lines:'狗 | 柴犬，牧羊犬',count:20,version:1,plan:{groups:[{primary_label:'狗',delivery_target:20}]}};
 const state={proposedExpansion:proposal,task:null};
 const status={textContent:''};
 let click;
 const refillFormValue=()=>({enabled:false,libraries:[],limits:{max_rounds:null,max_vlm_calls:null,no_progress_rounds:2}});
 const refillSummary=()=> '数量不足时接受减少，不自动检索补数。';
-const review=new Function('state','$','message','guidedAction','confirmGuidedExpansion','refillFormValue','refillSummary',
+const review=new Function('state','$','message','guidedAction','confirmGuidedExpansion','refillFormValue','refillSummary','reviewDetails',
   process.env.REVIEW_SOURCE+';return showTermReview')(
-      state,()=>status,(_kind,_title,body)=>{assert.match(body,/确认后按以上完整方案开始检索/);return {}},
+      state,()=>status,(_kind,_title,body)=>{assert.match(body,/合计需要 20 张/);assert.doesNotMatch(body,/各组目标/);assert.match(body,/不自动补数/);return {}},
   (_bubble,label,handler)=>{if(label==='确认检索词并开始检索')click=handler;
     else assert.equal(label,'重新生成检索词')},
-  async()=>calls.push('search'),refillFormValue,refillSummary);
+  async()=>calls.push('search'),refillFormValue,refillSummary,(_bubble,_label,body)=>assert.match(body,/不自动检索补数/));
 (async()=>{
   review(proposal);assert.deepEqual(calls,[]);
   proposal.version=2;await click();assert.deepEqual(calls,[]);assert.match(status.textContent,/最新词表/);
@@ -920,8 +1374,8 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertIn("'检查检索计划',guidedStartSearch", CHAT_JS)
         self.assertIn('/first-search/manifest', CHAT_JS)
         self.assertIn('确认候选清单', CHAT_JS)
-        self.assertIn("proposal.kind==='candidate_input_manifest'", CHAT_JS)
-        self.assertIn('尚未启动清洗', CHAT_JS)
+        self.assertIn("manifest.kind!=='candidate_input_manifest'", CHAT_JS)
+        self.assertIn('可以继续准备清洗', CHAT_JS)
         self.assertNotIn('当前版本尚未形成可执行计划', CHAT_JS)
         self.assertIn("message('assistant','检索未启动',reason)", CHAT_JS)
         self.assertIn('id="task-sidebar-id"', CHAT_HTML)
@@ -930,16 +1384,16 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertIn('await startExpansionJob({raw_request:raw', CHAT_JS)
         self.assertIn('await restoreExpansionJob()', CHAT_JS)
         self.assertIn("if(turn.action==='confirm'", CHAT_JS)
-        self.assertIn('await prepareGuidedExpansion(turn.request.raw_request,turn.request.target_count,controller.signal,selection)', CHAT_JS)
-        self.assertIn('/followup-intent', CHAT_JS)
+        self.assertIn('await prepareGuidedExpansion(turn.request.effective_request||turn.request.raw_request,turn.request.target_count,signal,selection)', CHAT_JS)
+        self.assertIn('/conversation-turn', CHAT_JS)
         self.assertIn("job.error?.code==='EXPANSION_UNCHANGED'", CHAT_JS)
         self.assertIn('重新提交这条修改', CHAT_JS)
-        self.assertIn("message('assistant','这条消息未处理'", CHAT_JS)
+        self.assertIn("pending?'消息结果待核对':'这条消息未处理'", CHAT_JS)
         self.assertIn("message('assistant','重新扩词未完成'", CHAT_JS)
-        self.assertIn("if(intent.kind==='expansion'){await showPostTaskExpansion(text,intent,'user',selection);return}", CHAT_JS)
+        self.assertIn("if(intent.kind==='expansion'){await showPostTaskExpansion(text,intent,null,selection);return}", CHAT_JS)
         self.assertIn('requested_terms_per_group:requestedTerms', CHAT_JS)
-        self.assertIn('重新扩词结果', CHAT_JS)
-        self.assertIn('按原词表顺序保留指定数量，未调用扩词模型', CHAT_JS)
+        self.assertIn('待确认修改', CHAT_JS)
+        self.assertIn('新增 ${changes.added_terms} 个词 · 移除 ${changes.removed_terms} 个词', CHAT_JS)
         self.assertIn('确认新版词表', CHAT_JS)
         self.assertNotIn('当前需求没有可调整的已确认扩词分组', CHAT_JS)
         self.assertIn("source.length?source.map", CHAT_JS)
@@ -989,7 +1443,9 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertIn("openTask", CHAT_JS)
         self.assertIn("openConversation", CHAT_JS)
         self.assertIn('renderSavedTaskMessages(data.task_messages)', CHAT_JS)
-        self.assertIn('renderExecutionHistory(data.executions)', CHAT_JS)
+        self.assertNotIn('renderExecutionHistory(', CHAT_JS)
+        self.assertNotIn('执行历史 · ', CHAT_JS)
+        self.assertNotIn('已关联运行', CHAT_JS)
         self.assertIn('/events?after_sequence=${state.eventSequence}&limit=100', CHAT_JS)
         self.assertIn('/events/stream?after_sequence=${state.eventSequence}', CHAT_JS)
         self.assertIn("Accept:'text/event-stream'", CHAT_JS)
@@ -1054,6 +1510,28 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertNotIn('发送反馈', CHAT_HTML)
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for feedback routing test')
+    def test_cleaning_turn_uses_server_draft_and_preview_in_one_request(self):
+        source = CHAT_JS[CHAT_JS.index('async function prepareFeedback(){'):
+                         CHAT_JS.index('function taskExpansionPath(')]
+        script = r"""
+const assert=require('node:assert/strict');
+const draft={draft_id:'d',draft_version:1,proposal_digest:'digest'};
+const state={task:{task_id:'t',task_version:1,confirmed_revision:1},feedback:draft};
+const fields={'feedback-text':{value:'把第二条改成不要水印'},'llm-model':{value:'llm'},'vlm-model':{value:'vlm'},status:{textContent:''}};
+const next={...draft,draft_version:2,proposal_digest:'next'};const review={feedback_status:'ready'};
+let calls=0,shown;
+const api=async(path,options)=>{calls++;assert.equal(path,'/v1/retrieval/tasks/t/conversation-turn');
+ assert.deepEqual(options.body.feedback_ref,draft);assert.equal(options.keyValue,'command');
+ return {kind:'cleaning',feedback_draft:next,cleaning_review:review}};
+const run=new Function('state','$','api','key','message','setFollowupBusy','showFeedbackReview',process.env.SOURCE+';return prepareFeedback')(
+ state,id=>fields[id],api,()=> 'command',()=>({remove(){}}),()=>{},value=>shown=value);
+(async()=>{await run();assert.equal(calls,1);assert.equal(state.feedback,next);assert.equal(shown,review)})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for feedback routing test')
     def test_expansion_followup_is_not_saved_as_cleaning_feedback(self):
         prepare = CHAT_JS[CHAT_JS.index('async function prepareFeedback(){'):
                           CHAT_JS.index('async function showPostTaskExpansion(')]
@@ -1064,13 +1542,13 @@ let routed='',posts=0,kind='expansion';
 const fields={'feedback-text':{value:'别按情绪搜，多找狗在户外的画面'},'llm-model':{value:'llm'},'vlm-model':{value:'vlm'},'status':{textContent:''}};
 const $=id=>fields[id];
 const showPostTaskExpansion=async(text,intent,role,selection)=>{routed=text;assert.equal(selection.llm,'llm')};
-const api=async path=>{posts++;assert.match(path,/followup-intent/);fields['llm-model'].value='next';return {kind,target_count:null,requested_terms_per_group:null}};
+const api=async path=>{posts++;assert.match(path,/conversation-turn/);fields['llm-model'].value='next';return {kind,target_count:null,requested_terms_per_group:null}};
 const setFollowupBusy=v=>{state.followupBusy=v};
-const message=()=>{throw Error('no clarification or cleaning card expected')};
+const messages=[];const message=(role,title,text)=>{messages.push([role,text]);return {remove(){}}};
 const funcs=new Function('state','$','showPostTaskExpansion','api','setFollowupBusy','message',
-  process.env.PREPARE_SOURCE+';return {prepareFeedback,routeTaskFollowup};')(
+  'const key=()=>"fixture-command";'+process.env.PREPARE_SOURCE+';return {prepareFeedback,routeTaskFollowup};')(
     state,$,showPostTaskExpansion,api,setFollowupBusy,message);
-(async()=>{await funcs.prepareFeedback();assert.match(routed,/多找狗在户外/);assert.equal(posts,1)})().catch(e=>{console.error(e);process.exit(1)});
+(async()=>{await funcs.prepareFeedback();assert.match(routed,/多找狗在户外/);assert.equal(posts,1);assert.deepEqual(messages.map(row=>row[0]),['user','assistant']);assert.equal(fields['feedback-text'].value,'')})().catch(e=>{console.error(e);process.exit(1)});
 """
         subprocess.run(['node', '-e', script], check=True,
                        env={**os.environ, 'PREPARE_SOURCE': prepare})
@@ -1093,9 +1571,9 @@ const guidedAction=(bubble,label,action)=>{actions.push([label,action])};
 const showPostTaskExpansion=()=>{throw Error('must not revise the running task')};
 const startNewChat=()=>{newChat++};
 const funcs=new Function('state','$','api','setFollowupBusy','message','guidedAction','showPostTaskExpansion','sessionStorage','startNewChat',
-  process.env.SOURCE+';return {prepareFeedback};')(
+  'const key=()=>"fixture-command";'+process.env.SOURCE+';return {prepareFeedback};')(
   state,$,api,setFollowupBusy,message,guidedAction,showPostTaskExpansion,sessionStorage,startNewChat);
-(async()=>{await funcs.prepareFeedback();assert.deepEqual(requests,['/v1/retrieval/tasks/dog-task/followup-intent']);
+(async()=>{await funcs.prepareFeedback();assert.deepEqual(requests,['/v1/retrieval/tasks/dog-task/conversation-turn']);
   assert.equal(state.task.task_id,'dog-task');assert.equal(fields['feedback-text'].value,'');
   assert.match(messages.at(-1)[2],/新建需求单/);assert.equal(actions[0][0],'新建 Chat 处理');
   assert.equal(newChat,0);actions[0][1]();assert.equal(newChat,1);
@@ -1214,14 +1692,18 @@ const show=new Function('state','$','api','message','guidedAction','key','setBus
         subprocess.run(['node', '-e', script], check=True,
                        env={**os.environ, 'SHOW_SOURCE': source})
 
-    def test_local_first_search_requires_separate_choice_confirmation_and_tick(self):
-        self.assertIn('id="first-search"', CHAT_HTML)
-        self.assertIn('id="first-search-candidates"', CHAT_HTML)
-        self.assertIn('本地首次检索（需确认）', CHAT_HTML)
-        self.assertIn('type=\'checkbox\'', CHAT_JS)
-        self.assertIn('生成检索确认卡', CHAT_JS)
-        self.assertIn('确认整组检索方案', CHAT_JS)
-        self.assertIn('检索方案已确认 · 后台执行', CHAT_JS)
+    def test_confirmed_search_has_progress_link_without_manual_branch_cards(self):
+        self.assertIn('id="search-progress-link"', CHAT_HTML)
+        self.assertIn('查看检索进度', CHAT_HTML)
+        self.assertIn("progressLink.href='/production?task='+encodeURIComponent(taskId)+'&node=retrieval'", CHAT_JS)
+        self.assertNotIn('id="first-search"', CHAT_HTML)
+        self.assertNotIn('id="preview-branches"', CHAT_HTML)
+        self.assertNotIn('id="preview-routing"', CHAT_HTML)
+        self.assertNotIn("card('查询分支 · '", CHAT_JS)
+        self.assertNotIn('async function previewFirstSearch(', CHAT_JS)
+        self.assertIn("'/first-search/prepare'", CHAT_JS)
+        self.assertIn("'/first-search/confirm'", CHAT_JS)
+        self.assertIn("action:'confirm'", CHAT_JS)
         self.assertIn("await guidedTick()", CHAT_JS)
         self.assertIn('未清洗', CHAT_JS)
         self.assertIn('无可预览图片', CHAT_JS)
@@ -1302,12 +1784,16 @@ const tick=new Function('state','document','refreshTaskSidebar','setTimeout','cl
         self.assertIn('class="skip-link"', CHAT_HTML)
         self.assertIn('role="log"', CHAT_HTML)
         self.assertIn('aria-relevant="additions"', CHAT_HTML)
-        self.assertIn('DSH 需求理解 / 扩词模型', CHAT_HTML)
+        self.assertIn('当前 Chat · 扩词模型', CHAT_HTML)
+        self.assertIn('dialogue-llm-model-input', CHAT_HTML)
         self.assertIn('清洗语义判定模型', CHAT_HTML)
         self.assertIn('使用 API 与密钥配置', CHAT_HTML)
         self.assertIn('id="api-key" type="password"', CHAT_HTML)
         self.assertIn('密钥不写入浏览器存储', CHAT_HTML)
         self.assertIn('id="new-task"', CHAT_HTML)
+        self.assertEqual(CHAT_HTML.count('id="new-task"'), 1)
+        self.assertLess(CHAT_HTML.index('id="history-panel"'), CHAT_HTML.index('id="new-task"'))
+        self.assertLess(CHAT_HTML.index('id="new-task"'), CHAT_HTML.index('id="history-list"'))
         self.assertNotIn('id="new-chat"', CHAT_HTML)
         self.assertIn('新建 Chat', CHAT_HTML)
         self.assertIn('class="right-rail"', CHAT_HTML)
@@ -1315,7 +1801,11 @@ const tick=new Function('state','document','refreshTaskSidebar','setTimeout','cl
         self.assertNotIn('LOCAL WORKSPACE · PREVIEW', CHAT_HTML)
         self.assertNotIn('把检索需求整理成', CHAT_HTML)
         self.assertNotIn('先梳理目标、分组和推进方式', CHAT_HTML)
-        self.assertIn('class="context-bar"', CHAT_HTML)
+        self.assertNotIn('class="context-bar"', CHAT_HTML)
+        self.assertIn('固定体验范围：demo / default', CHAT_HTML)
+        self.assertIn('id="open-catalog-settings" href="/catalog"', CHAT_HTML)
+        self.assertNotIn('href="/catalog"', CHAT_HTML[:CHAT_HTML.index('id="history-panel"')])
+        self.assertNotIn('href="/catalog"', BOARD_HTML)
         self.assertIn("$('new-task').addEventListener('click',startNewChat)", CHAT_JS)
         self.assertIn("function renameChat", CHAT_JS)
         self.assertIn("expected_draft_version=state.resumeDraft.draft_version", CHAT_JS)
@@ -1329,9 +1819,9 @@ const tick=new Function('state','document','refreshTaskSidebar','setTimeout','cl
         self.assertIn('@media(prefers-reduced-motion:reduce)', CHAT_CSS)
 
     def test_chat_analyzes_each_submitted_utterance_before_draft_write(self):
-        self.assertIn('/v1/retrieval/projects/demo/dialogue-turn', CHAT_JS)
+        self.assertIn('/v1/retrieval/projects/demo/dialogue-command', CHAT_JS)
         self.assertNotIn('DSH 助手 · 正在分析', CHAT_JS)
-        self.assertIn('const turn=await api(', CHAT_JS)
+        self.assertIn('const turn=await sendDialogueCommand(', CHAT_JS)
         self.assertIn('if(turn.action===\'confirm\'', CHAT_JS)
         self.assertIn('async function guidedStartSearch', CHAT_JS)
         self.assertIn('async function guidedTick', CHAT_JS)
@@ -1344,7 +1834,7 @@ const tick=new Function('state','document','refreshTaskSidebar','setTimeout','cl
         self.assertIn('.search-tag{', CHAT_CSS)
         self.assertIn("event.key==='Enter'&&!event.shiftKey&&!event.isComposing", CHAT_JS)
         self.assertIn("$('feedback-text').addEventListener('keydown'", CHAT_JS)
-        self.assertIn("await showCleaningSuggestion(selection)", CHAT_JS)
+        self.assertIn("showFeedbackReview(intent.cleaning_review)", CHAT_JS)
         self.assertIn("suggestion.feedback_status==='ready'", CHAT_JS)
         self.assertNotIn('模型的理解建议，不代表已执行', CHAT_JS)
         self.assertNotIn('查看逐条引文与能力边界', CHAT_JS)
@@ -1354,7 +1844,7 @@ const tick=new Function('state','document','refreshTaskSidebar','setTimeout','cl
         self.assertIn("vlms.length===1)$('vlm-model').value", CHAT_JS)
         self.assertNotIn('DSH 助手 · 分析未完成', CHAT_JS)
         self.assertIn("$('chat-model-badge').textContent", CHAT_JS)
-        self.assertIn("querySelectorAll('button,#llm-model,#vlm-model,#llm-model-input,#vlm-model-input,#target-count,#auto-refill", CHAT_JS)
+        self.assertIn("querySelectorAll('button,#llm-model,#vlm-model,#llm-model-input,#vlm-model-input,#dialogue-llm-model,#dialogue-llm-model-input,#target-count,#auto-refill", CHAT_JS)
         self.assertIn('密钥不写入浏览器存储', CHAT_HTML)
         self.assertNotIn('innerHTML', CHAT_JS)
 
@@ -1386,6 +1876,42 @@ assert.notEqual(groups[2].item.binding_id,groups[3].item.binding_id);
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node required for cleaning edit behavior test')
+    def test_cleaning_edit_opens_visible_feedback_composer(self):
+        source = CHAT_JS[CHAT_JS.index('function showCleaningApproval(taskId,proposal){'):
+                         CHAT_JS.index('async function confirmVlmCleaning(')]
+        script = r"""
+const assert=require('node:assert/strict');
+let actions,opened=false,focused=false;
+const input={value:'',focus(){focused=true}};
+const $=id=>{if(id==='feedback-text')return input;if(id==='feedback-box')return {classList:{remove(name){assert.equal(name,'hidden');opened=true}}};throw Error('Unexpected hidden input '+id)};
+const state={};const proposal={rules:[],steps:[]};state.cleaningProposal=proposal;
+const show=new Function('state','$','key','card','message','confirmVlmCleaning',process.env.EDIT_SOURCE+';return showCleaningApproval;')(state,$,()=> 'key',(_title,_fields,items)=>actions=items,()=>{},()=>{});
+show('task',proposal);
+actions.find(item=>item[0]==='修改清洗条件')[1]();
+assert.equal(opened,true);assert.equal(focused,true);assert.equal(input.value,'增加清洗检测：');
+assert.equal(state.cleaningProposal,null);
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'EDIT_SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for structured draft restore test')
+    def test_structured_feedback_restore_does_not_require_model_selection(self):
+        source = CHAT_JS[CHAT_JS.index('async function showCleaningSuggestion(selection){'):
+                         CHAT_JS.index('function startNewChat(){')]
+        script = r"""
+const assert=require('node:assert/strict');
+const state={task:{task_id:'task'},feedback:{draft_id:'draft',draft_version:2,proposal_digest:'digest',proposal:{query_spec:{cleaning_conditions:[{}]}}}};
+let calls=0,shown;const suggestion={feedback_status:'ready'};
+const show=new Function('state','$','api','showFeedbackReview',process.env.SOURCE+';return showCleaningSuggestion')(
+ state,()=>({value:''}),async()=>{calls++;return suggestion},value=>shown=value);
+(async()=>{await show();assert.equal(calls,1);assert.equal(shown,suggestion)})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(shutil.which('node'), 'Node required for feedback behavior test')
     def test_irrelevant_feedback_has_no_confirmation_action(self):
         source = CHAT_JS[CHAT_JS.index('function showFeedbackReview(suggestion){'):
@@ -1398,7 +1924,7 @@ const guidedAction=(bubble,label)=>bubble.actions.push(label);
 const card=()=>({});
 const decideFeedback=()=>{};
 const editFeedback=()=>{};
-const $=()=>({classList:{add(){}}});
+const $=()=>({classList:{add(){},remove(){}}});
 const show=new Function('state','message','guidedAction','card','decideFeedback','editFeedback','$',process.env.REVIEW_SOURCE+';return showFeedbackReview;')(state,message,guidedAction,card,decideFeedback,editFeedback,$);
 show({feedback_status:'unrelated',requirement:'',rationale:'请用户重新描述想保留或排除的画面特征。'});
 assert.equal(state.feedbackReviewBubble.title,'这条反馈还不能用于清洗');
@@ -1409,8 +1935,11 @@ assert.match(state.feedbackReviewBubble.text,/请你重新描述/);
 show({feedback_status:'needs_clarification',requirement:'',rationale:'请说明要排除什么'});
 assert.deepEqual(state.feedbackReviewBubble.actions,['重新描述','不采用']);
 show({feedback_status:'ready',requirement:'狗且没有文字',rationale:'增加排除文字条件'});
-assert.deepEqual(state.feedbackReviewBubble.actions,['仅保存反馈文本','重新描述','不采用']);
-assert.match(state.feedbackReviewBubble.text,/模型建议尚未写入清洗规则/);
+assert.deepEqual(state.feedbackReviewBubble.actions,['确认更新清洗条件','重新描述','不采用']);
+assert.match(state.feedbackReviewBubble.text,/新增条件/);
+show({feedback_status:'ready',requirement:'无水印',rationale:'',cleaning_plan_preview:{before_count:1,after_count:2,nodes:[{source:'大象和老虎合影'},{source:'不要水印'}]}});
+assert.match(state.feedbackReviewBubble.text,/检测节点 1 → 2/);
+assert.match(state.feedbackReviewBubble.text,/大象和老虎合影/);assert.match(state.feedbackReviewBubble.text,/不要水印/);
 """
         result = subprocess.run(['node', '-e', script], env={**os.environ, 'REVIEW_SOURCE': source},
                                 capture_output=True, text=True)

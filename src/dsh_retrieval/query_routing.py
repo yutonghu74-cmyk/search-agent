@@ -88,9 +88,12 @@ class QueryRoutingService:
         if not isinstance(authorization_version, str) or not authorization_version.strip():
             raise ServiceError('INVALID_RETRIEVAL_PLAN', 'Authorization version required', 422)
         query = json.loads(task.confirmed_proposal_json)['query_spec']
+        if query.get('media_type') == 'video':
+            from .video_query import normalize_video_fields
+            normalize_video_fields(query)
+        elif query.get('media_type') != 'image':
+            raise ServiceError('QUERY_UNSUPPORTED', 'Only registered image/video queries supported', 422)
         logical = compile_query_branches(query)
-        if query['media_type'] != 'image':
-            raise ServiceError('QUERY_UNSUPPORTED', 'Only registered image text queries supported', 422)
         if query.get('source_constraints'):
             raise ServiceError('SOURCE_CONSTRAINT_UNSUPPORTED', 'Verified source filter compiler required', 422)
         all_branches = {row['branch_id']: row for row in logical['branches']}

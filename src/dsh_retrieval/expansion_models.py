@@ -203,7 +203,7 @@ def explicit_group_targets(raw_request, labels, target_count):
     找狗"). All-or-nothing: an unmatched, ambiguous or non-summing request yields
     None, so the owner sees an unallocated plan instead of an invented split.
     """
-    if not isinstance(raw_request, str) or not labels:
+    if not isinstance(raw_request, str) or not labels or len(set(labels)) < 2:
         return None
     unit = r"(?:张|只)"
     noun = r"(?:的)?(?:图片|照片|图像|图)?"

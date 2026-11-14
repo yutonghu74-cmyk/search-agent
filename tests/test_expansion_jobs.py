@@ -65,6 +65,49 @@ class Runtime:
 
 
 class ExpansionJobsTest(unittest.TestCase):
+    def test_small_initial_request_uses_three_terms_unless_count_is_explicit(self):
+        for raw, expected in [('找10张猫图片', 3), ('每组生成8个检索词，找10张猫图片', 8)]:
+            with self.subTest(raw=raw):
+                runtime = Runtime()
+                jobs = ExpansionJobs(None, runtime, Dialogue(), Projects())
+                jobs.start(Actor('tenant', 'owner'), 'demo', {
+                    'dialogue_session_id': 'dlg_one', 'dialogue_version': 3,
+                    'raw_request': raw, 'dimension_id': 'default', 'target_count': 10,
+                    'model_selection': {'llm': 'llm', 'vlm': 'vlm'}})
+                done = self.wait_for(jobs, 'completed')
+                self.assertEqual(done['target_count'], 10)
+                self.assertEqual(done['target_terms'], expected)
+                self.assertEqual(len(done['result']['plan']['groups'][0]['auxiliary_terms']), expected)
+                self.assertEqual(len(runtime.calls), 1)
+                jobs.pool.shutdown(wait=True)
+
+    def test_one_group_count_reduction_preserves_other_groups_without_generation(self):
+        runtime = Runtime()
+        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
+        actor = Actor('tenant', 'owner')
+        task_id = 'rt_' + 'a' * 32
+        current = [{'primary_label': '猫', 'auxiliary_terms': ['猫在草地', '猫在窗边', '猫在树下']},
+                   {'primary_label': '狗', 'auxiliary_terms': ['狗在草地', '狗在室内']}]
+        first = jobs.start_task(actor, task_id, {
+            'expected_task_version': 7, 'expected_revision': 2,
+            'raw_request': '找20张猫狗图片', 'dimension_id': 'default', 'target_count': 20,
+            'current_target_count': 20, 'model_selection': {'llm': 'llm', 'vlm': 'vlm'},
+            'current_groups': current, 'feedback_text': '把猫组检索词改成2个，其他不变',
+            'count_edits': [{'target': 'terms', 'labels': ['猫'], 'operation': 'set', 'value': 2}],
+            'term_count_only': True})
+        for _ in range(100):
+            done = jobs.get(actor, 'demo', 'task:' + task_id, first['job_id'])
+            if done['status'] == 'completed':
+                break
+            time.sleep(.01)
+        self.assertEqual(done['status'], 'completed')
+        self.assertEqual(done['result']['plan']['groups'][0]['auxiliary_terms'], current[0]['auxiliary_terms'][:2])
+        self.assertEqual(done['result']['plan']['groups'][1]['auxiliary_terms'], current[1]['auxiliary_terms'])
+        self.assertEqual(done['changes'], {'target_before': 20, 'target_after': 20,
+                                          'added_terms': 0, 'removed_terms': 1,
+                                          'added_groups': 0, 'removed_groups': 0})
+        self.assertEqual(runtime.calls, [])
+
     def wait_for(self, jobs, status):
         for _ in range(100):
             value = jobs.get(Actor('tenant', 'owner'), 'demo', 'dlg_one')
@@ -111,11 +154,18 @@ class ExpansionJobsTest(unittest.TestCase):
             self.assertEqual(jobs.start(actor, 'demo', body)['job_id'], first['job_id'])
             failed = self.wait_for(jobs, 'failed')
             self.assertEqual(failed['completed_terms'], 18)
+            self.assertEqual(failed['preview_groups'][0]['generated_terms'], 18)
+            self.assertEqual(len(failed['preview_groups'][0]['auxiliary_terms']), 8)
+            self.assertIsNotNone(failed['timing_ms']['first_batch'])
+            self.assertEqual(failed['model_selection'], body['model_selection'])
+            self.assertGreaterEqual(failed['elapsed_ms'], 0)
+            self.assertIsNone(failed['timing_ms']['complete'])
             self.assertEqual(failed['failed_batch']['offset'], 18)
             self.assertEqual(failed['error']['code'], 'DSH_TIMEOUT')
             jobs.retry(actor, 'demo', 'dlg_one', first['job_id'])
             done = self.wait_for(jobs, 'completed')
             self.assertEqual(done['completed_terms'], 25)
+            self.assertIsNotNone(done['timing_ms']['complete'])
             self.assertEqual(len(done['result']['plan']['groups'][0]['auxiliary_terms']), 25)
             self.assertEqual(runtime.calls, [(None, 0, 8), ('猫', 8, 10), ('猫', 18, 7), ('猫', 18, 7)])
             reopened = ExpansionJobs(path, runtime, Dialogue(), Projects())

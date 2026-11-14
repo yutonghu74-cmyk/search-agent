@@ -9,6 +9,86 @@ from dsh_retrieval.production_outputs_ui import OUTPUT_JS
 
 class ProductionOutputsTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'requires Node')
+    def test_request_number_is_stable_and_searchable_without_changing_task_id(self):
+        source = BOARD_JS[BOARD_JS.index('function requestNumber('):BOARD_JS.index('function updateRow(')]
+        script = r'''
+const assert=require('node:assert/strict');
+const values={'line-search':'','line-filter':'','line-node-filter':'','line-target-min':'','line-gap-filter':''};
+const $=id=>({value:values[id]});
+const ui=new Function('$',process.env.SOURCE+';return {requestNumber,visible};')($);
+const item={task_id:'rt_4218d6897a8644499d87357b4c33989c',created_at:'2026-11-02T15:32:59Z',title:'狗10张，兔子5张'};
+assert.equal(ui.requestNumber(item),'20261102-2332-4C33989C');
+assert.equal(ui.requestNumber({...item,created_at:'2026-11-02T23:32:59+08:00'}),ui.requestNumber(item));
+assert.equal(ui.requestNumber({...item,created_at:'2026-11-02T16:00:00Z'}),'20261103-0000-4C33989C');
+assert.equal(ui.requestNumber({...item,created_at:null}),'时间未知-4C33989C');
+assert.equal(ui.requestNumber({...item,created_at:'invalid'}),'时间未知-4C33989C');
+values['line-search']='20261102-2332-4c33989c';assert(ui.visible(item));
+values['line-search']=item.task_id;assert(ui.visible(item));values['line-search']='兔子';assert(ui.visible(item));
+values['line-search']='not-found';assert(!ui.visible(item));
+assert.equal(item.task_id,'rt_4218d6897a8644499d87357b4c33989c');
+'''
+        for timezone in ('UTC', 'America/New_York'):
+            result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source, 'TZ': timezone},
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'requires Node')
+    def test_task_pagination_replaces_pages_and_preserves_failed_page(self):
+        source = BOARD_JS[BOARD_JS.index('async function loadTaskPage('):BOARD_JS.index("$('line-search').oninput")]
+        script = r'''
+const assert=require('node:assert/strict');
+let fail=false,hold,requests=[];
+const api=async path=>{requests.push(path);if(fail)throw Error('offline');if(hold)await hold;const page=Number(new URL(path,'http://test').searchParams.get('cursor')||0);return {items:Array.from({length:page===2?3:20},(_,i)=>({task_id:`t${page}-${i}`,task_version:1,progress:{task_version:1}})),next_cursor:page<2?String(page+1):null}};
+const elements=new Map(),$=id=>{if(!elements.has(id))elements.set(id,{textContent:'',closest:()=>({scrollTo(){}})});return elements.get(id)};
+const ui=new Function('api','$',`
+let rows=[],listEpoch=0,nextTaskCursor=null,selected=null;
+const taskPaging={index:0,cursors:[null],busy:false};
+const updateTaskPager=()=>{},render=()=>{},updateRow=()=>{};
+${process.env.SOURCE}
+return {load,moveTaskPage,taskPaging,rows:()=>rows,next:()=>nextTaskCursor};`)(api,$);
+(async()=>{
+await ui.load();assert.equal(ui.rows().length,20);assert.equal(ui.taskPaging.index,0);
+await ui.moveTaskPage(1);assert.equal(ui.rows().length,20);assert.equal(ui.rows()[0].task_id,'t1-0');assert.equal(ui.taskPaging.index,1);
+fail=true;await ui.moveTaskPage(1);assert.equal(ui.rows()[0].task_id,'t1-0');assert.equal(ui.taskPaging.index,1);assert.match($('line-status').textContent,/保留当前页/);assert.equal(ui.taskPaging.busy,false);
+fail=false;await ui.moveTaskPage(1);assert.equal(ui.rows().length,3);assert.equal(ui.next(),null);const count=requests.length;await ui.moveTaskPage(1);assert.equal(requests.length,count);
+await ui.moveTaskPage(-1);assert.equal(ui.rows()[0].task_id,'t1-0');await ui.moveTaskPage(-1);assert.equal(ui.rows()[0].task_id,'t0-0');const firstCount=requests.length;await ui.moveTaskPage(-1);assert.equal(requests.length,firstCount);
+let resolve;hold=new Promise(r=>resolve=r);const pending=ui.moveTaskPage(1);const running=requests.length;await ui.moveTaskPage(1);assert.equal(requests.length,running);resolve();await pending;hold=null;
+await ui.load();assert.equal(ui.taskPaging.index,0);assert.deepEqual(ui.taskPaging.cursors,[null]);assert.equal(ui.rows().length,20);
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'requires Node')
+    def test_delivery_publication_download_and_refill_summary(self):
+        source = OUTPUT_JS[OUTPUT_JS.index('function outputDisclosure('):OUTPUT_JS.index('async function showNodeOutput')]
+        script = r'''
+const assert=require('node:assert/strict');
+class El{constructor(tag){this.tag=tag;this.children=[];this.textContent=''}append(...xs){this.children.push(...xs)}replaceChildren(...xs){this.children=xs;this.textContent=''}setAttribute(k,v){this[k]=v}click(){this.clicked=true}}
+const document={createElement:tag=>new El(tag),createTextNode:text=>Object.assign(new El('text'),{textContent:text})};
+const outputText=(parent,tag,text)=>{const el=new El(tag);el.textContent=text;parent.append(el);return el};
+const walk=el=>[el,...el.children.flatMap(walk)],text=el=>walk(el).map(x=>x.textContent).join('\n');
+let images=0,request,reply={ok:true,blob:async()=>({size:100})};
+const outputPage={epoch:1,abort:new AbortController(),urls:new Set()};
+const ui=new Function('document','outputText','mountNodeItems','outputImage','refillStopText','nodeURL','headers','fetch','URL','outputPage',process.env.SOURCE+';return {renderPackaging,renderRefill,downloadOutputPackage}')(
+ document,outputText,(parent,base,node,data,token,render)=>{const list=new El('div');parent.append(list);for(const item of data.items||[])render(list,item)},()=>images++,reason=>reason==='NO_PROGRESS'?'连续补数没有新增有效结果':reason,(task,node)=>task+'/'+node,{'X-User-Id':'user'},async(url,options)=>{request={url,options};return reply},{createObjectURL:()=> 'blob:zip'},outputPage);
+const data={available:true,status:'published',package_id:'package_test',byte_count:1926599,manifest:{completion:'partial',accepted_count:10,target_count:15,gap:5,stop_reason:'NO_PROGRESS',groups:[{group_id:'dog',label:'狗',accepted_count:10,target_count:10,gap:0},{group_id:'rabbit',label:'兔子',accepted_count:0,target_count:5,gap:5}]},items:[{candidate_id:'candidate_test',file:'images/dog/0001.jpg',group_id:'dog',content_digest:'sha256:test',retrieval_sources:[]}]};
+const item={task_id:'task',run_status:'PARTIAL',progress:{run_status:'PARTIAL',counts:{accepted:10}}};
+(async()=>{
+ const parent=new El('div');ui.renderPackaging(parent,'/base',item,data,1);assert.match(text(parent),/已部分交付/);assert.match(text(parent),/缺 5 张/);assert.match(text(parent),/连续补数没有新增有效结果/);assert.equal(images,1);
+ const audit=walk(parent).find(x=>x.tag==='details');assert(!audit.open);assert.match(text(audit),/package_test/);
+ const draft=new El('div');ui.renderPackaging(draft,'/base',item,{...data,status:'prepared'},1);assert(!walk(draft).some(x=>x.tag==='button'&&x.textContent.startsWith('下载')));assert.equal(images,1);
+ const button=walk(parent).find(x=>x.tag==='button'&&x.textContent.startsWith('下载')),status=new El('p');await ui.downloadOutputPackage('/base',data,button,status,1);assert.equal(request.url,'/base/delivery/package_test/download');assert.equal(request.options.headers['X-User-Id'],'user');assert(status.children[0].clicked);assert.equal(button.disabled,false);
+ reply={ok:false};await ui.downloadOutputPackage('/base',data,button,status,1);assert.match(status.textContent,/下载失败/);
+ const refill=new El('div');ui.renderRefill(refill,'/base',item,{proposal:{query_spec:{refill_policy:{mode:'maintain_target',progression:'auto',approved_library_ids:['lib']}}}},{counts:{gap:5}},{stop_reason:'NO_PROGRESS',execution:{completed_rounds:2},item_count:0},1);assert.match(text(refill),/补数已结束/);assert.match(text(refill),/已完成 2 轮/);assert(!walk(refill).find(x=>x.tag==='details').open);
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source},
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'requires Node')
     def test_detail_uses_summary_and_rejects_mixed_versions(self):
         source = OUTPUT_JS[OUTPUT_JS.index('async function loadDetailPage()'):
                            OUTPUT_JS.index('function startProduction()')]

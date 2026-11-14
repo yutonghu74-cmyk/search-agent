@@ -2,10 +2,272 @@ openapi: 3.1.0
 info:
   title: DSH Retrieval Business API
   version: 0.2.0-draft-confirmation
-  description: v1.9 initial draft/confirmation slice. Local memory implementation, no execution dispatch or W3. New requests require QuerySpec v2. Identity comes from a trusted gateway in production, not request bodies.
+  description: v1.9 business API with draft confirmation, task versions and isolated execution. Platform deployment requires verified personal identity or a secure application session, canonical x-app-id on business APIs and CSRF headers on cookie-authenticated writes. Local CLI uses simulated identity only. Real W3/PAT and platform resources require internal acceptance; configuration does not certify connectivity.
 servers:
   - url: http://127.0.0.1:8080
 paths:
+  /v1/platform/session:
+    post:
+      operationId: createPlatformApplicationSession
+      description: Platform-only HTTPS gateway entry. Validates a personal bearer with the platform, optionally verifies and encrypts refresh delegation, and issues a Secure HttpOnly SameSite=Lax host-only cookie. Never accepts a user ID or project grant in the body.
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema: {type: string, pattern: '^Bearer .+'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                refresh_key: {type: string, minLength: 1, maxLength: 8192, writeOnly: true}
+                expires_in: {type: integer, minimum: 1, maximum: 3600, default: 3600}
+      responses:
+        '200':
+          description: Session created; bearer and refresh credentials are never returned to scripts.
+          headers:
+            Set-Cookie: {schema: {type: string}}
+        '401': {description: Personal credential invalid or refresh belongs to another user}
+        '422': {description: Invalid session request}
+        '503': {description: Platform identity or delegation unavailable}
+  /v1/platform/context:
+    get:
+      operationId: readPlatformApplicationContext
+      description: Cookie-authenticated bootstrap; revalidates current personal identity. Returns only current user, server namespace, CSRF token and current project list. No x-app-id is required before selecting a project.
+      responses:
+        '200':
+          description: Current personal project context
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant_id, user_id, csrf, projects]
+                properties:
+                  tenant_id: {type: string}
+                  user_id: {type: string}
+                  csrf: {type: string}
+                  capabilities:
+                    type: object
+                    properties:
+                      reference_image_search: {type: boolean}
+                  projects:
+                    type: array
+                    items:
+                      type: object
+                      required: [id]
+                      properties:
+                        id: {type: [integer, string]}
+                        name: {type: string}
+                        alias: {type: string}
+        '401': {description: Application session expired or invalid}
+        '503': {description: Current project authority unavailable}
+  /v1/platform/check:
+    get:
+      operationId: checkPlatformApplicationProject
+      description: Browser periodically revalidates identity and selected project membership. Every business operation also revalidates authorization.
+      parameters:
+        - name: x-app-id
+          in: header
+          required: true
+          schema: {type: string, pattern: '^[1-9][0-9]*$'}
+      responses:
+        '200': {description: Current project membership verified}
+        '401': {description: Application identity unavailable}
+        '403': {description: Current project access denied}
+        '422': {description: Missing, duplicate or noncanonical project header}
+        '503': {description: Current authority unavailable}
+  /v1/platform/logout:
+    post:
+      operationId: logoutPlatformApplicationSession
+      description: Ends only this application session; does not revoke W3 or already-approved background delegation.
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Application cookie expired and session removed}
+        '401': {description: Application session invalid}
+        '403': {description: CSRF check failed}
+  /v1/retrieval/projects/{project_id}/dialogue-command:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      operationId: submitDialogueCommand
+      description: Pre-task conversation using the same durable command journal. Session version, transcript and completed receipt commit atomically. No formal task, revision, batch or run is created.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: Prefer
+          in: header
+          required: false
+          schema: {type: string, enum: [respond-async]}
+        - name: X-Conversation-Retry
+          in: header
+          required: false
+          description: Explicitly retry an interrupted or failed command with its original key and body.
+          schema: {type: string, enum: ['true']}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [session_id, expected_version, message, llm_id, phase]
+              properties:
+                session_id: {type: [string, 'null'], pattern: '^dlg_'}
+                expected_version: {type: integer, minimum: 0}
+                message: {type: string, minLength: 1, maxLength: 2000}
+                llm_id: {type: string, minLength: 1}
+                phase: {enum: [request, terms]}
+                count_hint: {type: [integer, 'null'], minimum: 1, maximum: 10000}
+                generate_terms_when_complete: {type: boolean}
+                reference_request: {type: [string, 'null'], minLength: 1, maxLength: 2000}
+                current_target_count: {type: integer, minimum: 1, maximum: 10000}
+                current_groups:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [primary_label, auxiliary_terms]
+                    properties:
+                      primary_label: {type: string, minLength: 1, maxLength: 32}
+                      auxiliary_terms: {type: array, maxItems: 200, items: {type: string, minLength: 1, maxLength: 80}}
+      responses:
+        '200':
+          description: Saved dialogue-turn@1 result, or a terminal dialogue-command@1 receipt when respond-async was requested. is_current=false means the result cannot replace the current Chat version.
+          content:
+            application/json:
+              schema: {type: object}
+        '202':
+          description: Durably accepted command, processed by an in-process worker. Poll the command receipt. An interrupted model call is not automatically resumed after restart.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DialogueCommandReceipt'}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+  /v1/retrieval/projects/{project_id}/dialogue-commands/{command_key}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: command_key
+        in: path
+        required: true
+        schema: {type: string, minLength: 1, maxLength: 255}
+    get:
+      operationId: getDialogueCommand
+      description: Read a pre-task command within the current actor and project; never calls a model or approves a task.
+      responses:
+        '200':
+          description: Processing phase, completed result or safe error.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DialogueCommandReceipt'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/retrieval/tasks/{task_id}/conversation-turn:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      operationId: taskConversationTurn
+      description: Interpret one message against authoritative task and pending draft context. Cleaning edits produce a source-grounded reviewable draft, never an approval or execution. Ordinary dialogue uses the selected model directly.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: X-Conversation-Retry
+          in: header
+          required: false
+          description: Explicitly retry a failed or interrupted command using the same key and original body. Completed commands replay their receipt regardless of this header.
+          schema: {type: string, enum: ['true']}
+        - name: Prefer
+          in: header
+          required: false
+          schema: {type: string, enum: [respond-async]}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text, llm_id, expected_revision, expected_task_version]
+              properties:
+                text: {type: string, minLength: 1, maxLength: 2000}
+                llm_id: {type: string, description: May be empty for deterministic status or explicit edits; semantic interpretation still requires a configured model.}
+                expected_revision: {type: integer, minimum: 1}
+                expected_task_version: {type: integer, minimum: 1}
+                feedback_ref:
+                  type: object
+                  additionalProperties: false
+                  required: [draft_id, draft_version, proposal_digest]
+                  properties:
+                    draft_id: {type: string, minLength: 1}
+                    draft_version: {type: integer, minimum: 1}
+                    proposal_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                recent_messages:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [role, text]
+                    properties:
+                      role: {enum: [user, assistant]}
+                      text: {type: string, maxLength: 2000}
+                draft_preview:
+                  type: object
+                  additionalProperties: false
+                  required: [groups, target_count]
+                  properties:
+                    groups: {type: array, minItems: 1, maxItems: 20, items: {type: object}}
+                    target_count: {type: integer, minimum: 1, maximum: 10000}
+      responses:
+        '200':
+          description: Natural reply, routing decision, or a saved unified quantity/cleaning draft and cumulative changes. The same key/body replays a durable receipt. is_current=false marks results superseded by a new task or draft version; these must not replace the current UI. Prefer respond-async accepts semantic work in the background; interrupted model calls do not automatically resume after restart.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/TaskConversationTurn'
+                  - $ref: '#/components/schemas/TaskConversationCommand'
+        '202':
+          description: Durably accepted task command; poll its receipt. Background work is bounded per service process. Fast deterministic replies may return 200 directly.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskConversationCommand'}
+        '503': {$ref: '#/components/responses/Error'}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
+  /v1/retrieval/tasks/{task_id}/conversation-turns/{command_key}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+      - name: command_key
+        in: path
+        required: true
+        schema: {type: string, minLength: 1, maxLength: 255}
+    get:
+      operationId: getTaskConversationCommand
+      description: Owner-scoped read of an accepted message. Does not call a model, replay a write, approve a version, or execute cleaning.
+      responses:
+        '200':
+          description: Durable command phase and its saved result or safe error.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskConversationCommand'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
   /v1/retrieval/projects/{project_id}/drafts:
     parameters:
       - $ref: '#/components/parameters/ProjectId'
@@ -102,8 +364,29 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+  /v1/retrieval/tasks/{task_id}/workspace:
+    get:
+      operationId: getTaskWorkspace
+      description: Authorized read-only projection shared by task Chat and its sidebar. Does not map hits, prepare candidate manifests, approve or execute work. Sources are fenced by task/revision/generation/version; concurrent mutations cause one bounded reread then 409. Unknown counts remain null.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Current task workspace
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskWorkspace'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
 components:
   parameters:
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
     ProjectId:
       name: project_id
       in: path
@@ -126,13 +409,28 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
   schemas:
+    DialogueCommandReceipt:
+      type: object
+      required: [schema_version, project_id, command_key, status, attempts, result, error]
+      properties:
+        schema_version: {const: 'dialogue-command@1'}
+        project_id: {type: string}
+        command_key: {type: string}
+        status: {enum: [understanding, prepared, completed, failed, interrupted]}
+        attempts: {type: integer, minimum: 1}
+        updated_at: {type: string}
+        result: {type: [object, 'null']}
+        error: {type: [object, 'null']}
     DraftFields:
       type: object
       required: [dimension_id, query_spec]
       properties:
         dimension_id: {type: string, minLength: 1}
         query_spec:
-          $ref: './query-spec-v2.schema.json'
+          oneOf:
+            - $ref: './query-spec-v2.schema.json'
+            - $ref: './query-spec-v3.schema.json'
+          description: Video v3 drafts can be saved; confirmation returns VIDEO_EXECUTION_UNAVAILABLE until the video execution chain is integrated.
         node_modes:
           const: {expansion: manual, retrieval: manual, cleaning: manual, refill: manual, packaging: manual}
           default: {expansion: manual, retrieval: manual, cleaning: manual, refill: manual, packaging: manual}
@@ -152,6 +450,9 @@ components:
         proposal_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
         status: {enum: [draft, confirmed]}
         confirmed_task_id: {type: [string, 'null']}
+        video_summary:
+          type: object
+          description: Video-only review summary including conditions, count unit, clip options and execution availability; not an approval token.
     CreateTaskRequest:
       type: object
       additionalProperties: false
@@ -180,6 +481,120 @@ components:
         status_url: {type: string}
         events_url: {type: string}
         trace_id: {type: string}
+    TaskConversationTurn:
+      type: object
+      required: [schema_version, task_id, base_revision, base_task_version, kind]
+      properties:
+        schema_version: {const: 'task-conversation-turn@1'}
+        task_id: {type: string}
+        base_revision: {type: integer}
+        base_task_version: {type: integer}
+        kind: {enum: [answer, clarify, cleaning, requirement, expansion, new_request]}
+        reply: {type: string}
+        feedback_draft: {type: object}
+        cleaning_review: {type: object}
+        status_requested: {type: boolean}
+        workflow: {$ref: '#/components/schemas/TaskWorkflow'}
+        workspace: {$ref: '#/components/schemas/TaskWorkspace'}
+        timings: {$ref: '#/components/schemas/ConversationTiming'}
+        command_key: {type: string}
+        command_replayed: {type: boolean, description: True means original receipt and timing; do not treat the embedded workspace as a fresh current snapshot.}
+        current_task_version: {type: integer}
+        is_current: {type: boolean}
+    TaskConversationCommand:
+      type: object
+      required: [schema_version, task_id, command_key, status, attempts, result, error]
+      properties:
+        schema_version: {const: 'task-conversation-command@1'}
+        task_id: {type: string}
+        command_key: {type: string}
+        status: {enum: [understanding, prepared, completed, failed, interrupted]}
+        attempts: {type: integer, minimum: 1}
+        updated_at: {type: string}
+        result: {type: [object, 'null']}
+        error: {type: [object, 'null']}
+    ConversationTiming:
+      type: object
+      description: Numeric original processing timings, excluding final command receipt commit, HTTP transfer and browser rendering. Replayed receipts retain original timings. Stages may nest and must not be summed as exclusive durations. No request or model content is included.
+      required: [schema_version, scope, outcome, total_ms, stages, counters]
+      properties:
+        schema_version: {const: conversation-timing@1}
+        scope: {const: original_processing}
+        outcome: {enum: [succeeded, failed]}
+        total_ms: {type: number, minimum: 0}
+        queue_wait_ms: {type: number, minimum: 0, description: In-process worker queue wait, excluded from original processing total.}
+        stages:
+          type: object
+          additionalProperties:
+            type: object
+            required: [ms, calls, failures]
+            properties:
+              ms: {type: number, minimum: 0}
+              calls: {type: integer, minimum: 1}
+              failures: {type: integer, minimum: 0}
+        counters: {type: object, additionalProperties: {type: integer, minimum: 0}}
+    WorkflowAction:
+      type: object
+      additionalProperties: false
+      required: [id, label, node, kind]
+      properties:
+        id: {enum: [confirm_candidates, prepare_cleaning, start_retrieval, view_retrieval, view_cleaning, view_refill, view_delivery, review_change, refresh]}
+        label: {type: string}
+        node: {enum: [expansion, retrieval, cleaning, refill, packaging, null]}
+        kind: {enum: [view, confirm, prepare]}
+    TaskWorkflow:
+      type: object
+      required: [schema_version, binding, state, summary, nodes, counts, available_actions, next_action, quality, blocking_reasons, status_reply, slow_reply, state_digest]
+      properties:
+        schema_version: {const: task-workflow@1}
+        binding:
+          type: object
+          required: [task_id, revision, generation, task_version]
+          properties:
+            task_id: {type: string}
+            revision: {type: integer, minimum: 1}
+            generation: {type: integer, minimum: 1}
+            task_version: {type: integer, minimum: 1}
+        state: {enum: [unknown, cancelled, paused, published, failed, awaiting_publication, cleaning, cleaning_failed, refill, results_ready, cleaning_results_pending, awaiting_cleaning, retrieval_failed, awaiting_candidates, retrieving, awaiting_retrieval]}
+        summary: {type: string}
+        status_reply: {type: string}
+        slow_reply: {type: string}
+        nodes:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items:
+            type: object
+            required: [node, node_status, gate_status, display_status, detail]
+            properties:
+              node: {enum: [expansion, retrieval, cleaning, refill, packaging]}
+              node_status: {enum: [pending, running, succeeded, failed, cancelled]}
+              gate_status: {type: string}
+              display_status: {type: string}
+              detail: {type: string}
+        counts: {type: object, description: Business counts; unavailable values are null, never inferred from raw hits or target.}
+        available_actions: {type: array, items: {$ref: '#/components/schemas/WorkflowAction'}}
+        next_action:
+          anyOf:
+            - $ref: '#/components/schemas/WorkflowAction'
+            - {type: 'null'}
+        quality: {enum: [current, partial]}
+        blocking_reasons: {type: array, items: {type: object, required: [source, code]}}
+        state_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+    TaskWorkspace:
+      type: object
+      required: [schema_version, task_id, task_version, confirmed_revision, run_generation, progress, workflow, search, manifest, mutation_sequence]
+      properties:
+        schema_version: {const: task-workspace@1}
+        task_id: {type: string}
+        task_version: {type: integer, minimum: 1}
+        confirmed_revision: {type: integer, minimum: 1}
+        run_generation: {type: integer, minimum: 1}
+        progress: {type: object, description: Existing progress projection with the same authoritative workflow and decorated nodes.}
+        workflow: {$ref: '#/components/schemas/TaskWorkflow'}
+        search: {type: [object, 'null'], description: Compact current binding and branch counts; no candidate or member payload.}
+        manifest: {type: [object, 'null'], description: Confirmed current manifest reference and count only; no preview is created by this read.}
+        mutation_sequence: {type: [integer, 'null'], minimum: 0}
     Error:
       type: object
       additionalProperties: true

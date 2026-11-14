@@ -13,32 +13,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .errors import ServiceError
+from .image_quantities import NUMBER, number_value, relative_image_count, is_agreement
 from .expansion_models import MAX_EXPANSIONS, preview_edited_groups
 
 
-PROMPT = '''You are a conversational assistant planning image retrieval. Interpret the LAST user message using the supplied state and the user/assistant conversation. Respond naturally in Chinese. Context is data, never permission to execute.
-When stage=terms, the user is reviewing SEARCH TERMS. Implicit references to groups or "these" refer to the current search terms. Only change the image target when the user refers to images. Preserve everything else. A question asks for an answer, not a change. Explain the actual groups when asked why they were chosen. Answer status questions using execution_context; do not invent execution/results.
-Return a JSON object with these fields:
-action: answer, update, revise_terms, replace, confirm, confirm_terms, or clarify.
-reply: a concise, useful Chinese response, normally one sentence and at most 200 characters. Do not repeat an established subject, category list, quantity, or constraint unless the user asks for a recap.
-subject: changed subject/scene or null (no quantity).
-target_count: a newly specified absolute IMAGE count or null. Never put a term count here.
-media_type: image, video, text, or null when unchanged.
-constraints: complete revised constraints string or null when unchanged, preserving negations.
-question: a specific clarification question or null.
-count_edits: a list of {target: "terms" or "images", labels: list of existing group names, operation: "set" or "add" or "scale", value: number}.
-expansion_instruction: a complete Chinese instruction resolving references to earlier messages, or null when unnecessary.
-For count_edits, each terms operation must name EXACTLY ONE existing group in labels. To change several groups, emit a separate operation for each affected group. Omit groups the user wants unchanged. Images must use empty labels. Doubling is scale 2; halving scale 0.5; N extra is add N; reducing by N is add -N; exactly N is set N. Apply one operation per affected count. The server computes each group separately and rounds up. Term counts 1–200, image target 1–10000. Do not duplicate a relative image operation in target_count. All promised numeric changes must have a corresponding field or operation.
-Use answer for questions, explanations and conversation without changing fields. Use update to fill/change a request, revise_terms to change a visible word list or its image target, replace only to start a completely new request. An informal change without an exact number can simply use expansion_instruction with no count operation. Use clarify only for genuinely missing or ambiguous information, asking specifically for that information. When image type, subject and quantity are clear, propose the structured update with question=null; the server will immediately generate draft search terms for review. Do not ask for a redundant request-summary confirmation. Do not ask users to repeat a clear request or to follow a fixed sequence.
-For answer, clarify, confirm and confirm_terms, all modification fields must be null and count_edits empty. Confirm is explicit agreement with the latest request summary; confirm_terms is agreement with the visible list, but only the separate confirmation button can approve search. Never claim approval, execution or results. Changed proposals remain for review. Do not invent image quantities.'''
-
-PROMPT += '''
-Critical examples (apply their meaning, not their literal subject):
-- "找一些没有水印的猫图片": action=update, subject="猫", media_type="image", constraints="没有水印", target_count=null, count_edits=[]. "一些" does NOT specify 1 or 5; the backend will ask the quantity.
-- After the assistant asks "需要多少张图片？", "需要20张" fills missing information: action=update, target_count=20, subject=null, media_type=null, constraints=null, question=null, count_edits=[], expansion_instruction=null. This is NEVER confirm or clarify.
-- A complete new request needs no separate summary question: return action=update, and the server moves to draft search terms. For older conversations that already presented a summary, "是的" means action=confirm with ALL modification fields null and count_edits=[].
-- Never say "请稍等" or promise to start searching now; this is planning only.
-If context contains repair, the previous proposal was rejected. Follow its validation_error/reason; do not resubmit it unchanged.'''
+PROMPT = '''你是图片检索对话助手。结合最新需求、当前词表、执行事实和近期双方对话，自然地用中文回应。
+普通交流、解释、询问原因或状态：直接回答文字，不输出 JSON，不调用工具；默认最多两个短句，用户明确要详细说明时再展开。不要写提单说明书，不重复主体、数量、格式范围、流程或内部标识。问题本身不构成修改。
+用户提供新需求事实、补充缺项或明确要求修改时，调用 update_request_draft 保存提案。部分信息也应先保存，不要求用户重说整段。reply 只说明本次变化，需要时只问一个真正缺失的问题。不要通过普通文字声称已修改。
+例如“想找树下的小猫，不要水印”已有主体和约束：先用工具保存 subject、media_type=image、constraints，再在 reply 问张数；不要只发一条追问却不保存已有信息。“为什么要张数？”则直接文字解释。
+current_request/effective_request 是当前草稿；raw_request 仅为原话资料，可能包含已撤销的旧要求。指代和“其他不变”结合当前草稿及对话理解。reference_request 属于另一需求，只继承用户明确引用的条件；新主体替换旧主体，旧数量不自动继承。
+stage=terms 表示用户正在审阅检索词，未说明“图片”时有关组和词数的修改针对词表。解释为什么选词时结合 current_groups。current_term_counts 是现有词数。
+允许虚构或不常见画面，不推断图片是否存在。一只动物、两个人等是画面内容数量，不是目标图片数；“一些”没有指定图片数量。当前只支持图片。无执行事实不声称已检索、已找到、已批准或已交付。
+例如 execution_context.search_started=false 且 stage=terms 时，用户问“为什么还没开始检索？”：直接说明词表仍待用户点击确认，确认后才会检索；不要重新保存需求、修改词表或扩词。
+工具 proposal 字段（仅修改工具需要这些字段，未改变项省略或 null）：
+action: update 补充/修改需求；revise_terms 修改已有词表或其图片目标；replace 另起完全不同需求；clarify 记录修改歧义；confirm/confirm_terms 仅表达对已有摘要/词表的同意，实际批准仍须本人点击确认按钮。
+subject: 完整主体或场景，不混入图片张数。target_count: 新指定的图片总数 1–10000，不能用词数或画面物体数量。
+media_type: image/video/text。constraints: 完整的新约束文本，保留未删除条件及否定。null 表示不修改；撤销全部约束必须传空字符串 ""，不能传 null。例如原约束“不要有人”，用户说“算了有人也行，无所谓”，提交 action=update、constraints=""。
+已有猫图100张时，用户说“不要有人”：提交 action=update、constraints="不要有人"，不改主体数量；随后说“算了有人也行，无所谓”：提交 action=update、constraints=""。这两轮都不是 confirm 或普通 answer；只有成功保存后才能说已更新。
+reply: 对用户的自然回应，最多 600 字。question: 确实缺失/歧义时的具体问题，否则 null。类型、主体、图片数量已明确时不再问摘要对不对。
+count_edits: 数量操作列表，每项 {target:images|terms, labels:[], operation:set|add|scale, value:数字}。图片 labels 为空；词数每项只选一个已有组，多组分开写。翻倍 scale 2，减半 scale 0.5，加减用 add，明确总数用 set。后端计算并向上取整。每组最终词数 1–200。不要同时在 target_count 重复同一相对操作。
+expansion_instruction: 需要改词义/范围时的完整指令，消解指代并保留其他组。只改数量时可省略。不要承诺未在字段/操作中表达的改动。
+例如：主体已知、正在问张数时，“需要20张”只补 target_count=20，不再要求重复主体或确认摘要。缺项时保存已知字段并在 reply 中自然追问。已有修复反馈 repair 时按其原因修正，不重复被拒绝提案。'''
 
 
 _CATEGORY_COUNT = re.compile(r'(?P<count>[1-9][0-9]{0,4})\s*(?:只|张)\s*'
@@ -54,6 +49,18 @@ _LABEL_FIRST_COUNT = re.compile(r'(?:^|(?<=[，,、；;\s和及与]))'
 
 def explicit_category_targets(message):
     """Read explicit animal-category quantities, not an inferred search result count."""
+    # A per-image scene or an explicit overall total is never a category list.
+    if re.search(r'每(?:张|幅|个)|一共|总共|总计|合计', message):
+        return []
+    each = re.fullmatch(rf'\s*(.+?)各\s*({NUMBER})\s*张[。.!！]?\s*', message)
+    if each:
+        labels = re.split(r'和|与|及|、', each[1])
+        labels = [re.sub(r'的?(?:图片|照片|图像|图)$', '', label.strip()) for label in labels]
+        count = number_value(each[2])
+        if (2 <= len(labels) <= 20 and all(re.fullmatch(r'[一-鿿A-Za-z]{1,12}', label) for label in labels)
+                and len(set(labels)) == len(labels) and 1 <= count and count * len(labels) <= 10000):
+            return [{'label': label, 'count': count} for label in labels]
+        return []
     targets = []
     for match in _CATEGORY_COUNT.finditer(message):
         label = match.group('label')
@@ -83,6 +90,50 @@ _TERM_COUNT_PATTERNS = (
     re.compile(r'(?:扩词|检索词|召回词|词数)(?:数量)?(?:改成|调整到|到|为|要)?\s*([1-9][0-9]{0,3})\s*(?:个|条)?'),
     re.compile(r'([1-9][0-9]{0,3})\s*(?:个|条)\s*(?:扩词|检索词|召回词)'),
 )
+
+_IMAGE_COUNT_ONLY = re.compile(
+    r'^\s*(?:(?:把|将)?(?:图片|照片|目标|数量|张数)?\s*)?'
+    r'(?:改成|调整为|设为|换成)\s*([1-9][0-9]{0,4})\s*张(?:图片|照片)?'
+    r'(?:[，,、；;\s]*其他不变)?[。.]?\s*$')
+
+
+def explicit_image_count_update(message, current_count):
+    """A complete, absolute image-count edit with no other request change."""
+    match = _IMAGE_COUNT_ONLY.fullmatch(message)
+    if match is None or current_count is None:
+        return None
+    count = int(match.group(1))
+    return count if 1 <= count <= 10000 and count != current_count else None
+
+
+def explicit_simple_image_request(message):
+    """Read only a fully explicit, unqualified first request; keep subjects literal."""
+    subject = r'(?P<subject>[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9、· &+\-]{0,79}?)'
+    opening = r'\s*(?:我)?(?:想要|需要|帮我找|请找|找)\s*'
+    count = r'(?P<count>[1-9][0-9]{0,4})\s*张'
+    for pattern in (opening + subject + r'(?:的)?(?:照片|图片)[，,\s]+' + count + r'[。！!.]?\s*',
+                    opening + count + r'\s*' + subject + r'(?:的)?(?:照片|图片)[。！!.]?\s*'):
+        match = re.fullmatch(pattern, message)
+        if not match:
+            continue
+        value = match['subject'].strip()
+        if (not value or value in {'素材', '这些', '那些', '它们', '图片', '照片'}
+                or re.search(r'不|无|没|别|非|除|仅|只|的|每|各|分别|条件|同样|一样|相同|之前|刚才|上述|至少|最多|最少|至多', value)):
+            return None
+        quantity = int(match['count'])
+        if quantity <= 10000:
+            return {'subject': value, 'target_count': quantity}
+    return None
+
+
+def explicit_scene_request(message):
+    """A literal scene's object count is never the requested image count."""
+    value = message.strip().rstrip('。.!！')
+    if (re.fullmatch(r'[一二两三四五六七八九十百0-9]+(?:只|头|条|匹|位|个|辆|棵|朵|座)'
+                     r'[\u4e00-\u9fffA-Za-z0-9 、·&+\-]{1,100}', value)
+            and not re.search(r'多少|什么|怎么|为何|为什么|吗|呢|是否|能否|不|无|没|别|非|除|至少|最多|最少|至多|图片|照片|张', value)):
+        return {'subject': value, 'target_count': None}
+    return None
 
 
 def explicit_group_term_target(message, groups):
@@ -183,6 +234,8 @@ def _new_dialogue_state():
     return {'subject': None, 'target_count': None, 'media_type': None,
             'constraints': [], 'stage': 'request', 'question': None,
             'messages': [], 'context_start': 0, 'raw_request': '',
+            'message_count': 0,
+            'effective_request': None, 'reference_request': None,
             # Distinguish real Chat containers from legacy rows that older UI
             # versions created for individual requests.  Legacy rows remain
             # addressable, but the history UI can stop presenting each one as
@@ -225,6 +278,11 @@ class DialogueStore:
         self.connection.execute('''CREATE TABLE IF NOT EXISTS task_dialogue_origins (
             task_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
             project_id TEXT NOT NULL, session_id TEXT NOT NULL, messages TEXT NOT NULL)''')
+        self.connection.execute('''CREATE TABLE IF NOT EXISTS dialogue_transcript (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+            role TEXT NOT NULL, text TEXT NOT NULL)''')
+        self.connection.execute('CREATE INDEX IF NOT EXISTS dialogue_transcript_session '
+                                'ON dialogue_transcript(session_id,seq)')
         self.connection.commit()
 
     def close(self):
@@ -235,13 +293,28 @@ class DialogueStore:
         if connection is not None:
             connection.close()
 
-    def read(self, actor, project_id, session_id):
+    def read(self, actor, project_id, session_id, *, include_transcript=False):
         with self.lock:
             row = self.connection.execute('SELECT tenant_id,user_id,project_id,version,state FROM dialogue_sessions WHERE session_id=?',
                                           (session_id,)).fetchone()
-        if row is None or row[:3] != (actor.tenant_id, actor.user_id, project_id):
-            raise ServiceError('DIALOGUE_NOT_FOUND', 'Conversation not found', 404)
-        return {'session_id': session_id, 'version': row[3], **json.loads(row[4])}
+            if row is None or row[:3] != (actor.tenant_id, actor.user_id, project_id):
+                raise ServiceError('DIALOGUE_NOT_FOUND', 'Conversation not found', 404)
+            state = {'session_id': session_id, 'version': row[3], **json.loads(row[4])}
+            if include_transcript:
+                rows = self.connection.execute('SELECT role,text FROM dialogue_transcript '
+                    'WHERE session_id=? ORDER BY seq', (session_id,)).fetchall()
+                state['_transcript'] = ([{'role': role, 'text': text} for role, text in rows]
+                                        if rows else state.get('messages', []))
+            return state
+
+    def messages(self, actor, project_id, session_id):
+        return self.read(actor, project_id, session_id, include_transcript=True)['_transcript']
+
+    def _append_messages(self, session_id, messages):
+        self.connection.executemany('INSERT INTO dialogue_transcript(session_id,role,text) VALUES (?,?,?)',
+                                   [(session_id, item['role'], item['text']) for item in messages
+                                    if item.get('role') in ('user', 'assistant')
+                                    and isinstance(item.get('text'), str) and item['text'].strip()])
 
     def task_history(self, actor, project_id, task_id, *, limit=10):
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -270,7 +343,7 @@ class DialogueStore:
             title = next((m.get('text', '').strip() for m in messages
                           if m.get('role') == 'user' and m.get('text', '').strip()), '新 Chat')
             result.append({'id': sid, 'kind': 'dialogue', 'title': title[:80],
-                           'message_count': len(messages), 'created_at': created,
+                           'message_count': state.get('message_count', len(messages)), 'created_at': created,
                            'updated_at': updated, 'version': version})
         return result
 
@@ -289,7 +362,7 @@ class DialogueStore:
             result.append({'session_id': session_id, 'version': version,
                            'stage': state.get('stage', 'request'),
                            'title': first[:80] or '新 Chat',
-                           'message_count': len(messages),
+                           'message_count': state.get('message_count', len(messages)),
                            'created_at': created_at, 'updated_at': updated_at,
                            'deletable': True,
                            'history_visible': state.get('chat_container_version') == 1})
@@ -300,6 +373,8 @@ class DialogueStore:
             cursor = self.connection.execute('''DELETE FROM dialogue_sessions
                 WHERE session_id=? AND tenant_id=? AND user_id=? AND project_id=?''',
                 (session_id, actor.tenant_id, actor.user_id, project_id))
+            if cursor.rowcount == 1:
+                self.connection.execute('DELETE FROM dialogue_transcript WHERE session_id=?', (session_id,))
             self.connection.commit()
         if cursor.rowcount != 1:
             raise ServiceError('DIALOGUE_NOT_FOUND', 'Conversation not found', 404)
@@ -323,13 +398,18 @@ class DialogueStore:
                 FROM dialogue_sessions WHERE session_id=?''', (session_id,)).fetchone()
             if row is None or row[:3] != owner:
                 raise ServiceError('DIALOGUE_NOT_FOUND', 'Conversation not found', 404)
+            transcript = self.connection.execute('SELECT role,text FROM dialogue_transcript '
+                                                 'WHERE session_id=? ORDER BY seq', (session_id,)).fetchall()
+            source = ([{'role': role, 'text': text} for role, text in transcript] if transcript
+                      else json.loads(row[3]).get('messages') or [])
             messages = [{'role': item['role'], 'text': item['text']}
-                        for item in json.loads(row[3]).get('messages') or []
+                        for item in source
                         if item.get('role') in {'user', 'assistant'}
                         and isinstance(item.get('text'), str) and item['text'].strip()]
             self.connection.execute('INSERT INTO task_dialogue_origins VALUES (?,?,?,?,?,?)',
                 (task_id, *owner, session_id, json.dumps(messages, ensure_ascii=False)))
             self.connection.execute('DELETE FROM dialogue_sessions WHERE session_id=?', (session_id,))
+            self.connection.execute('DELETE FROM dialogue_transcript WHERE session_id=?', (session_id,))
             self.connection.commit()
         return {'session_id': session_id, 'task_id': task_id, 'archived': True,
                 'message_count': len(messages)}
@@ -348,23 +428,39 @@ class DialogueStore:
                 (actor.tenant_id, actor.user_id, project_id, task_id, task_version, user, assistant))
             self.connection.commit()
 
-    def save(self, actor, project_id, session_id, version, state):
-        with self.lock:
-            if session_id is None:
-                session_id = 'dlg_' + uuid.uuid4().hex
-                now = datetime.now(UTC).isoformat()
-                self.connection.execute('INSERT INTO dialogue_sessions VALUES (?,?,?,?,?,?,?,?)',
-                    (session_id, actor.tenant_id, actor.user_id, project_id, 1,
-                     json.dumps(state, ensure_ascii=False), now, now))
-                self.connection.commit()
-                return session_id, 1
-            cursor = self.connection.execute('UPDATE dialogue_sessions SET version=?,state=?,updated_at=? WHERE session_id=? AND version=? AND tenant_id=? AND user_id=? AND project_id=?',
-                (version + 1, json.dumps(state, ensure_ascii=False), datetime.now(UTC).isoformat(), session_id, version,
-                 actor.tenant_id, actor.user_id, project_id))
-            self.connection.commit()
-            if cursor.rowcount != 1:
-                raise ServiceError('DIALOGUE_CONFLICT', 'Conversation changed; reload it', 409)
-            return session_id, version + 1
+    def save(self, actor, project_id, session_id, version, state, *, new_messages=None):
+        with self.lock, self.connection:
+            return self._save(actor, project_id, session_id, version, state, new_messages=new_messages)
+
+    def _save(self, actor, project_id, session_id, version, state, *, new_messages=None, new_session_id=None):
+        """Internal write; the caller owns the connection transaction and lock."""
+        if session_id is None:
+            session_id = new_session_id or 'dlg_' + uuid.uuid4().hex
+            now = datetime.now(UTC).isoformat()
+            self.connection.execute('INSERT INTO dialogue_sessions VALUES (?,?,?,?,?,?,?,?)',
+                (session_id, actor.tenant_id, actor.user_id, project_id, 1,
+                 json.dumps(state, ensure_ascii=False), now, now))
+            self._append_messages(session_id, state.get('messages', []))
+            return session_id, 1
+        previous = self.connection.execute('SELECT state FROM dialogue_sessions WHERE session_id=? '
+            'AND version=? AND tenant_id=? AND user_id=? AND project_id=?',
+            (session_id, version, actor.tenant_id, actor.user_id, project_id)).fetchone()
+        if previous is None:
+            raise ServiceError('DIALOGUE_CONFLICT', 'Conversation changed; reload it', 409)
+        cursor = self.connection.execute('UPDATE dialogue_sessions SET version=?,state=?,updated_at=? WHERE session_id=? AND version=? AND tenant_id=? AND user_id=? AND project_id=?',
+            (version + 1, json.dumps(state, ensure_ascii=False), datetime.now(UTC).isoformat(), session_id, version,
+             actor.tenant_id, actor.user_id, project_id))
+        if cursor.rowcount != 1:
+            raise ServiceError('DIALOGUE_CONFLICT', 'Conversation changed; reload it', 409)
+        if new_messages is None:
+            self.connection.execute('DELETE FROM dialogue_transcript WHERE session_id=?', (session_id,))
+            self._append_messages(session_id, state.get('messages', []))
+        else:
+            if not self.connection.execute('SELECT 1 FROM dialogue_transcript WHERE session_id=? LIMIT 1',
+                                           (session_id,)).fetchone():
+                self._append_messages(session_id, json.loads(previous[0]).get('messages', []))
+            self._append_messages(session_id, new_messages)
+        return session_id, version + 1
 
 
 class DialogueCoordinator:
@@ -377,12 +473,17 @@ class DialogueCoordinator:
         session_id, version = self.store.save(actor, project_id, None, 0, _new_dialogue_state())
         return {'schema_version': 'dialogue-turn@1', 'session_id': session_id,
                 'version': version, 'stage': 'request', 'question': None,
-                'summary': '尚未填写需求', 'request': {'raw_request': '', 'target_count': None,
+                'summary': '尚未填写需求', 'request': {'raw_request': '', 'effective_request': '', 'target_count': None,
                                                      'media_type': None, 'subject': None},
                 'messages': []}
 
-    def turn(self, actor, project_id, body):
-        if set(body) - {'session_id', 'expected_version', 'message', 'llm_id', 'phase', 'count_hint', 'current_groups', 'current_target_count', 'generate_terms_when_complete'} or not {'session_id', 'expected_version', 'message', 'llm_id', 'phase'} <= set(body):
+    def turn(self, actor, project_id, body, *, receipt=None):
+        if receipt is not None and receipt.plan is not None:
+            self.projects.require_access(actor, project_id, 'default', 'create')
+            if receipt.plan.get('kind') != 'dialogue' or receipt.plan['project_id'] != project_id:
+                raise ServiceError('COMMAND_SCOPE_CONFLICT', 'Conversation checkpoint scope differs', 409)
+            return receipt.plan['result']
+        if set(body) - {'session_id', 'expected_version', 'message', 'llm_id', 'phase', 'count_hint', 'current_groups', 'current_target_count', 'generate_terms_when_complete', 'reference_request'} or not {'session_id', 'expected_version', 'message', 'llm_id', 'phase'} <= set(body):
             raise ServiceError('INVALID_SPEC', 'Invalid conversation turn', 422)
         session_id, version, message, llm_id, phase = (body[key] for key in
             ('session_id', 'expected_version', 'message', 'llm_id', 'phase'))
@@ -411,6 +512,12 @@ class DialogueCoordinator:
                 prior['raw_request'] = '\n'.join(item['text'] for item in
                     prior['messages'][prior.get('context_start', 0):] if item.get('role') == 'user')
             prior = _recover_explicit_category_count(prior)
+        reference = body.get('reference_request')
+        if reference is not None:
+            if (not isinstance(reference, str) or not 1 <= len(reference.strip()) <= 2000
+                    or prior['messages'] or phase != 'request'):
+                raise ServiceError('INVALID_SPEC', 'Reference request is only accepted on the first turn', 422)
+            prior['reference_request'] = reference.strip()
         if 'current_groups' in body:
             try:
                 if phase != 'terms':
@@ -426,8 +533,35 @@ class DialogueCoordinator:
             prior['target_count'] = count
         category_targets = explicit_category_targets(message) if phase == 'request' else []
         term_target = explicit_group_term_target(message, prior.get('current_groups')) if phase == 'terms' else None
+        image_target = (explicit_image_count_update(message, prior.get('target_count'))
+                        if prior.get('media_type') == 'image' else None)
+        if image_target is None and prior.get('media_type') == 'image':
+            image_target = relative_image_count(message, prior.get('target_count'))
+        if count_hint is not None and count_hint != image_target:
+            image_target = None
+        simple_request = (explicit_simple_image_request(message)
+                          if body.get('generate_terms_when_complete', False) and phase == 'request'
+                          and not prior['messages'] and not prior.get('subject')
+                          and not prior.get('reference_request') else None)
+        if (simple_request is None and body.get('generate_terms_when_complete', False)
+                and phase == 'request' and not prior['messages'] and not prior.get('subject')
+                and not prior.get('reference_request')):
+            simple_request = explicit_scene_request(message)
+            if simple_request is not None and count_hint is not None:
+                simple_request['target_count'] = count_hint
+        if (body.get('generate_terms_when_complete', False) and phase == 'request'
+                and prior.get('question') == 'target_count' and prior.get('subject')
+                and prior.get('media_type') == 'image'):
+            answer = re.fullmatch(r'\s*(?:要|需要|共|总共)?\s*([1-9][0-9]{0,4})\s*(?:张(?:图片|照片)?)?[。.!！]?\s*', message)
+            if answer and int(answer[1]) <= 10000:
+                image_target = int(answer[1])
+                if count_hint is not None and count_hint != image_target:
+                    image_target = None
+        if simple_request and count_hint is not None and simple_request['target_count'] != count_hint:
+            simple_request = None
         agreement = (phase == 'request' and prior.get('question') == 'confirm_summary'
-                     and message.strip() in {'是', '是的', '对', '对的', '没错', '正确', '可以', '确认'})
+                     and is_agreement(message))
+        model_interpreted = False
         if term_target and term_target['count'] > MAX_EXPANSIONS:
             proposal = {'action': 'clarify', 'subject': None, 'target_count': None,
                         'media_type': None, 'constraints': None,
@@ -442,9 +576,19 @@ class DialogueCoordinator:
                             'value': term_target['count']}],
                         'expansion_instruction': (f"把{term_target['label']}组调整为"
                                                   f"{term_target['count']}个检索词，其他组不变。")}
+        elif image_target is not None:
+            proposal = {'action': 'revise_terms' if phase == 'terms' else 'update',
+                        'subject': None, 'target_count': image_target,
+                        'media_type': None, 'constraints': None, 'question': None,
+                        'reply': f'已改为 {image_target} 张。', 'count_edits': [],
+                        'expansion_instruction': None}
         elif agreement:
             proposal = {'action': 'confirm', 'subject': None, 'target_count': None,
                         'media_type': None, 'constraints': None, 'question': None,
+                        'reply': None, 'count_edits': [], 'expansion_instruction': None}
+        elif simple_request:
+            proposal = {'action': 'update', **simple_request,
+                        'media_type': 'image', 'constraints': None, 'question': None,
                         'reply': None, 'count_edits': [], 'expansion_instruction': None}
         elif category_targets and count_hint is None:
             # A bounded list of explicit per-category image quantities is already
@@ -461,6 +605,7 @@ class DialogueCoordinator:
                 with (scope(project_id=project_id, dialogue_session_id=session_id, expected_version=version)
                       if scope else nullcontext()):
                     proposal = self.runtime.interpret_dialogue_turn(prior, message, llm_id, count_hint=count_hint)
+                    model_interpreted = True
             except ServiceError as error:
                 if error.code != 'MODEL_OUTPUT_INVALID':
                     raise
@@ -470,7 +615,7 @@ class DialogueCoordinator:
         action = proposal['action']
         model_action = action
         if (phase == 'request' and prior.get('question') == 'confirm_summary'
-                and message.strip() in {'是', '是的', '对', '对的', '没错', '正确', '可以', '确认'}):
+                and is_agreement(message)):
             action = 'confirm'
         if category_targets and count_hint is None:
             if action in ('clarify', 'confirm'):
@@ -496,7 +641,8 @@ class DialogueCoordinator:
         if action == 'replace':
             next_state.update(subject=None, target_count=None, media_type=None, constraints=[],
                               question=None, stage='request', context_start=len(prior['messages']),
-                              raw_request='', category_targets=[], current_groups=[])
+                              raw_request='', effective_request=None, reference_request=None,
+                              category_targets=[], current_groups=[])
         if action in ('replace', 'update'):
             for field in ('subject', 'target_count', 'media_type'):
                 if proposal[field] is not None:
@@ -516,10 +662,25 @@ class DialogueCoordinator:
                 next_state['constraints'] = [proposal['constraints']] if proposal['constraints'] else []
             if next_state['target_count'] != prior['target_count'] or next_state['subject'] != prior['subject']:
                 next_state['category_targets'] = []
+        if action == 'clarify':
+            # Rejected edits remain auditable, but cannot become effective via
+            # the legacy raw-text fallback. Freeze the previous accepted draft.
+            next_state['effective_request'] = self._effective_request(prior)
         if phase == 'request' and (action in ('replace', 'update', 'clarify')) and (model_action != 'confirm' or category_targets):
-            next_state['raw_request'] = ((next_state.get('raw_request', '') + '\n') if next_state.get('raw_request') else '') + message
-            if len(next_state['raw_request']) > 2000:
-                raise ServiceError('REQUEST_TOO_LONG', 'Request history exceeds 2000 characters; start a new Chat with a concise request', 422)
+            source = ((next_state.get('raw_request', '') + '\n') if next_state.get('raw_request') else '') + message
+            # The full transcript is stored separately. Keep this bounded source
+            # for compatibility; effective_request carries the latest facts.
+            if len(source) <= 2000:
+                next_state['raw_request'] = source
+        if action in ('replace', 'update') or (action == 'revise_terms' and any(
+                next_state.get(field) != prior.get(field)
+                for field in ('subject', 'target_count', 'constraints'))):
+            # The raw transcript remains auditable. Downstream generation uses
+            # the latest resolved fields once a turn changes the request.
+            if (action in ('update', 'revise_terms') and (prior.get('raw_request') or prior['messages'])) or reference is not None:
+                next_state['effective_request'] = self._summary(next_state)
+            else:
+                next_state['effective_request'] = None
         if action == 'confirm' and (phase != 'request' or prior.get('question') != 'confirm_summary'):
             action = 'clarify'
         if action == 'confirm_terms' and (phase != 'terms' or prior.get('question') not in (None, 'review_terms')):
@@ -572,7 +733,7 @@ class DialogueCoordinator:
             concise_confirmation = '已改为图片，对吗？'
         elif question == 'confirm_summary' and changed_fields == ['constraints']:
             concise_confirmation = '已更新要求，对吗？'
-        reply = ({'media_type': '你要找的是图片吗？', 'unsupported_media': '目前只能检索图片。你要改为找图片吗？',
+        reply = ({'media_type': '你要找的是图片吗？', 'unsupported_media': ('视频可通过“视频草稿”入口保存整段视频需求，检索与交付尚未开放。' if next_state['media_type'] == 'video' else '文字资料检索暂不开放。'),
                   'subject': '想找什么内容或场景的图片？', 'target_count': '需要多少张图片？',
                   'confirm_summary': concise_confirmation or summary + '，对吗？',
                   'review_terms': ('需求信息已齐，正在生成检索词供你确认。' if direct_terms
@@ -582,57 +743,74 @@ class DialogueCoordinator:
             reply = proposal['question']
         natural = _safe_natural_reply(proposal.get('reply'))
         if natural:
-            if action == 'answer':
-                reply = ('当前检索服务暂不支持视频；可以改为图片继续。'
+            if action == 'answer' and not body.get('generate_terms_when_complete', False):
+                reply = ('视频草稿可以保存；内网视频检索、验证和交付链路接通前暂不能执行。'
                          if prior.get('question') == 'unsupported_media'
                          and re.search(r'为什么|为何|支持.*视频|视频.*支持', message)
                          else natural)
-            elif question == 'confirm_summary':
+            elif question == 'confirm_summary' and not body.get('generate_terms_when_complete', False):
                 # The verified summary above is the single confirmation
                 # sentence.  Do not concatenate a model paraphrase with it;
                 # that repeats the user's request and can still disagree in
                 # wording even when the structured fields are correct.
                 pass
-            elif question == 'target_count' and re.search(r'多少|几张|数量', natural) and re.search(r'[？?]', natural):
+            else:
                 reply = natural
-            elif question == 'subject' and re.search(r'什么|哪类|主体|场景|内容', natural) and re.search(r'[？?]', natural):
-                reply = natural
-            elif question == 'media_type' and re.search(r'图片|照片|图像', natural) and re.search(r'[？?]', natural):
-                reply = natural
-            elif question == 'review_terms' and not direct_terms:
-                reply = natural
+        if question == 'unsupported_media' and action != 'answer':
+            reply = ('视频可通过“视频草稿”入口保存整段视频需求，检索与交付尚未开放。'
+                     if next_state['media_type'] == 'video' else '文字资料检索暂不开放。')
         next_state['messages'].append({'role': 'assistant', 'text': reply})
+        next_state['message_count'] = prior.get('message_count', len(prior['messages'])) + 2
         self.projects.require_access(actor, project_id, 'default', 'create')
-        session_id, new_version = self.store.save(actor, project_id, session_id, version, next_state)
-        return {'schema_version': 'dialogue-turn@1', 'session_id': session_id, 'version': new_version,
+        original_session_id = session_id
+        if receipt is None:
+            session_id, new_version = self.store.save(actor, project_id, session_id, version, next_state,
+                                                     new_messages=next_state['messages'][-2:])
+        else:
+            session_id, new_version = session_id or 'dlg_' + uuid.uuid4().hex, version + 1
+        result = {'schema_version': 'dialogue-turn@1', 'session_id': session_id, 'version': new_version,
                 'action': action, 'stage': next_state['stage'], 'question': question,
                 'count_edits': proposal.get('count_edits', []),
                 'expansion_instruction': proposal.get('expansion_instruction'),
-                'reply': reply, 'summary': summary, 'request': {
-                    'raw_request': self._request(next_state), 'target_count': next_state['target_count'],
+                'reply': reply, 'reply_source': 'model' if model_interpreted and reply == natural else 'system',
+                'summary': summary, 'request': {
+                    'raw_request': self._request(next_state),
+                    'effective_request': self._effective_request(next_state),
+                    'target_count': next_state['target_count'],
                     'media_type': next_state['media_type'], 'subject': next_state['subject']}}
+        if receipt is not None:
+            receipt.checkpoint({'kind': 'dialogue', 'project_id': project_id,
+                'session_id': original_session_id, 'expected_version': version,
+                'state': next_state, 'new_messages': next_state['messages'][-2:], 'result': result})
+        return result
 
     def snapshot(self, actor, project_id, session_id):
         self.projects.require_access(actor, project_id, 'default', 'create')
-        state = _recover_explicit_category_count(self.store.read(actor, project_id, session_id))
+        state = _recover_explicit_category_count(self.store.read(actor, project_id, session_id, include_transcript=True))
         return {'schema_version': 'dialogue-turn@1', 'session_id': session_id,
                 'version': state['version'], 'stage': state['stage'],
                 'question': state['question'], 'summary': self._summary(state),
-                'request': {'raw_request': self._request(state), 'target_count': state['target_count'],
+                'request': {'raw_request': self._request(state),
+                            'effective_request': self._effective_request(state),
+                            'target_count': state['target_count'],
                             'media_type': state['media_type'], 'subject': state['subject']},
-                'messages': state['messages']}
+                'messages': state['_transcript']}
 
     @staticmethod
     def _summary(state):
+        suffix = '；' + '；'.join(state['constraints']) if state['constraints'] else ''
         targets = state.get('category_targets') or []
         if targets and sum(item['count'] for item in targets) == state['target_count']:
-            return '找' + '、'.join(f"{item['count']} 张{item['label']}图片" for item in targets) + f"（共 {state['target_count']} 张）"
+            return '找' + '、'.join(f"{item['count']} 张{item['label']}图片" for item in targets) + f"（共 {state['target_count']} 张）" + suffix
         content = state['subject'] or '图片'
         count = state['target_count']
-        suffix = '；' + '；'.join(state['constraints']) if state['constraints'] else ''
         noun = '' if content.endswith(('图片', '照片', '图像')) else '图片'
         return f'找 {count} 张{content}{noun}{suffix}' if count else f'找{content}{noun}{suffix}'
 
     @staticmethod
     def _request(state):
         return state.get('raw_request') or DialogueCoordinator._summary(state)
+
+    @staticmethod
+    def _effective_request(state):
+        return state.get('effective_request') or DialogueCoordinator._request(state)

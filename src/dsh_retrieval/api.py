@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from .errors import ServiceError
+from .conversation_timing import ConversationTiming, timed_call, increment
 from .models import Actor
 from .service import InMemoryTaskRepository, TaskService
 from .adapters.projects import LocalProjectAccess
@@ -24,6 +25,7 @@ from .adapters.task_storage.sqlite import SQLiteTaskRepository
 from .chat_ui import CHAT_CSS, CHAT_HTML, CHAT_JS
 from .production_board_ui import BOARD_CSS, BOARD_HTML, BOARD_JS
 from .progress_models import build_task_progress
+from .vlm_instruction_plan import confirmed_instruction_plan
 from .task_events import TaskEventFeed
 from .cleaning_step_outputs import StepOutputCursorError, build_step_output_page
 from .result_views import ResultCursorError, build_result_page
@@ -47,10 +49,12 @@ TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
 DRAFT_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/drafts(?:/([^/]+))?$")
 FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$")
 FEEDBACK_SUGGESTION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback-suggestions$")
-FOLLOWUP_INTENT_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/followup-intent$")
+FOLLOWUP_INTENT_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/(?:followup-intent|conversation-turn)$")
+TASK_COMMAND_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/conversation-turns/([^/]+)$")
 CONFIRMATION_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/confirmations$")
 REVISIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/revisions$")
 TASK_SUMMARY_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/summary$")
+TASK_WORKSPACE_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/workspace$")
 READ_BINDING_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/read-binding$")
 PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/progress$")
 RESULTS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/results$")
@@ -63,7 +67,8 @@ EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
 EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)/expansion-jobs(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
 TASK_EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/tasks/(rt_[a-f0-9]{32})/expansion-jobs(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
 INTENT_PREVIEW_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/intent-preview$")
-DIALOGUE_TURN_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-turn$")
+DIALOGUE_TURN_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/(?:dialogue-turn|dialogue-command)$")
+DIALOGUE_COMMAND_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-commands/([^/]+)$")
 PROJECT_DIALOGUE_SESSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions$")
 DIALOGUE_SESSION_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)$")
 DIALOGUE_ARCHIVE_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)/archive$")
@@ -89,7 +94,39 @@ QUERY_IMAGES_PATH = re.compile(
     r"^/v1/retrieval/projects/([^/]+)/query-images(?:/(qimg_[a-f0-9]{32})(?:/(preview))?)?$")
 
 
+def platform_request(method):
+    """Bind identity/project for all API dispatch paths, including SSE and uploads."""
+    from functools import wraps
+
+    @wraps(method)
+    def dispatch(self):
+        if self.identity_provider is None or not urlsplit(self.path).path.startswith('/v1/') or urlsplit(self.path).path == '/v1/build':
+            return method(self)
+        original_headers = self.headers
+        try:
+            if self.platform_browser is not None:
+                if urlsplit(self.path).path.startswith('/v1/platform/'):
+                    return self.platform_browser.handle(self, urlsplit(self.path).path)
+                self.headers = self.platform_browser.request_headers(self.headers, self.command)
+            with self.service.projects.request_scope(self.headers) as actor:
+                path_project = re.match(r'^/v1/retrieval/projects/([^/]+)(?:/|$)', urlsplit(self.path).path)
+                if path_project and path_project.group(1) != self.headers.get('x-app-id'):
+                    raise ServiceError('PROJECT_ACCESS_DENIED', 'request project does not match route', 403)
+                self._platform_actor = actor
+                try:
+                    return method(self)
+                finally:
+                    self._platform_actor = None
+        except ServiceError as error:
+            self._json(error.status, error.as_dict(trace_id=self._trace_id()))
+        finally:
+            self.headers = original_headers
+    return dispatch
+
+
 class Handler(BaseHTTPRequestHandler):
+    identity_provider = None
+    platform_browser = None
     browse_only = False
     server_version = "dsh-retrieval-p0"
     service: TaskService
@@ -135,6 +172,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get("X-Request-Id") or "tr_" + uuid.uuid4().hex
 
     def _actor(self) -> Actor:
+        if self.identity_provider is not None:
+            return getattr(self, '_platform_actor', None) or self.identity_provider.authenticate(self.headers)
         tenant_id = self.headers.get("X-Tenant-Id", "").strip()
         user_id = self.headers.get("X-User-Id", "").strip()
         if not tenant_id or not user_id:
@@ -226,17 +265,119 @@ class Handler(BaseHTTPRequestHandler):
                 "cleaning_view": cleaning_view,
                 "as_of_sequence": sequence}
 
-    def _json(self, status: int, body: dict[str, Any], *, replayed: bool = False) -> None:
+    def _task_workspace(self, actor, task_id):
+        """Bounded read model shared by Chat and sidebar; never prepare a manifest."""
+        from copy import deepcopy
+        from .workflow_state import binding, current_source, branch_counts, project_workflow
+        mutation_reader = getattr(self.task_events, 'task_mutation_sequence', None)
+        for attempt in range(2):
+            before_mutation = mutation_reader(task_id) if callable(mutation_reader) else None
+            task = self.service.task_read_summary(actor, task_id)
+            progress = deepcopy(task.get('progress'))
+            if not progress:
+                progress = self._task_snapshot(actor, task_id)['progress']
+            if any(progress.get(key) != value for key, value in (
+                    ('task_id', task_id), ('revision', task['confirmed_revision']),
+                    ('task_version', task['task_version']), ('run_generation', task['run_generation']))):
+                raise ServiceError('STORAGE_CORRUPT', 'Workspace progress binding differs', 500)
+            if not callable(getattr(self.service.repository, 'get_task_read_summary', None)):
+                task['pending_draft'] = self.service.repository.get_pending_feedback(actor, task_id)
+            errors, search, manifest, cleaning = [], None, None, None
+            needs_search = (next(row for row in progress['nodes'] if row['node'] == 'retrieval')['node_status'] != 'succeeded'
+                            or str(task.get('stage', '')).upper() == 'REFILL' and task['run_status'] == 'RUNNING')
+            if self.first_search is not None and needs_search:
+                try:
+                    search = self.first_search.progress(actor, task_id)
+                except ServiceError as error:
+                    if error.status in (401, 403, 404):
+                        raise
+                    errors.append({'source': 'retrieval', 'code': error.code})
+                repository = getattr(self.first_search, 'repository', None)
+                manifest_reader = getattr(repository, 'get_current_candidate_manifest', None)
+                if callable(manifest_reader):
+                    try:
+                        saved = manifest_reader(actor, task_id)
+                        if saved is not None:
+                            source = saved.proposal.scope
+                            if ((source.tenant_id, source.owner_user_id, source.project_id)
+                                    != (actor.tenant_id, actor.user_id, task['project_id'])):
+                                raise ServiceError('ACCESS_DENIED', 'Candidate scope differs', 403)
+                            manifest = {'task_id': source.task_id, 'revision': source.revision,
+                                'generation': source.generation, 'task_version': source.task_version,
+                                'expected_task_version': source.task_version, 'confirmed': True,
+                                'candidate_count': len(saved.proposal.items), 'manifest_ref': saved.manifest_ref}
+                            # Old confirmed inputs remain historical evidence;
+                            # they are not an approval for a newer task version.
+                            if not current_source(manifest, task):
+                                manifest = None
+                    except ServiceError as error:
+                        if error.status in (401, 403, 404):
+                            raise
+                        errors.append({'source': 'manifest', 'code': error.code})
+            operation = task.get('active_cleaning_operation_id')
+            if operation and self.cleaning_dispatch is not None:
+                try:
+                    cleaning = self.cleaning_dispatch.status(actor, task_id, operation)
+                except ServiceError as error:
+                    if error.status in (401, 403, 404):
+                        raise
+                    errors.append({'source': 'cleaning', 'code': error.code})
+            latest = self.service.task_read_summary(actor, task_id)
+            after_mutation = mutation_reader(task_id) if callable(mutation_reader) else None
+            if (binding(latest) != binding(task) or before_mutation is not None
+                    and after_mutation is not None and after_mutation != before_mutation):
+                if attempt == 0:
+                    continue
+                raise ServiceError('REVISION_CONFLICT', '状态正在更新，请重新读取。', 409, True)
+            # A feedback draft can change without advancing the formal version.
+            task['pending_draft'] = (latest.get('pending_draft') if callable(
+                getattr(self.service.repository, 'get_task_read_summary', None)) else
+                self.service.repository.get_pending_feedback(actor, task_id))
+            capabilities = {'cleaning': self.cleaning_service is not None, 'delivery': self.delivery_service is not None}
+            for action, key in (('approve', 'can_approve'), ('create', 'can_create')):
+                try:
+                    self.service.projects.require_access(actor, task['project_id'], task['dimension_id'], action)
+                    capabilities[key] = True
+                except ServiceError as error:
+                    if error.status != 403:
+                        raise
+                    capabilities[key] = False
+            workflow = project_workflow(task, progress, search=search, manifest=manifest, cleaning=cleaning,
+                                        errors=errors, capabilities=capabilities)
+            if current_source(search, task, allow_unapproved=True):
+                search = {**{key: search[key] for key in ('task_id', 'revision', 'generation', 'task_version',
+                    'status', 'job_status', 'pagination_stopped', 'initial_window_complete') if key in search},
+                    'branch_counts': branch_counts(search)}
+                if search['status'] == 'unapproved':
+                    search.update(binding(task))
+            else:
+                search = None
+            progress.update(nodes=workflow['nodes'], workflow=workflow)
+            return {**task, 'schema_version': 'task-workspace@1', 'progress': progress,
+                    'workflow': workflow, 'search': search, 'manifest': manifest,
+                    'mutation_sequence': after_mutation}
+        raise AssertionError('unreachable workspace retry')
+
+    def _json(self, status: int, body: dict[str, Any], *, replayed: bool = False, extra_headers=None) -> None:
         encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self.send_header('Cache-Control', 'no-store')
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         if replayed:
             self.send_header("Idempotent-Replayed", "true")
+        timing = body.get('timings') if isinstance(body, dict) else None
+        if not replayed and isinstance(timing, dict) and type(timing.get('total_ms')) in (int, float):
+            self.send_header('Server-Timing', f'conversation;dur={timing["total_ms"]:.3f}')
         self.end_headers()
         self.wfile.write(encoded)
 
     def _asset(self, content_type: str, value: str) -> None:
+        if self.platform_browser is not None and content_type == 'text/html':
+            from .platform_ui import platform_html
+            value = platform_html(value)
         encoded = value.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type + "; charset=utf-8")
@@ -244,7 +385,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        frame_ancestors = " ".join(self.platform_browser.frame_origins) if self.platform_browser and self.platform_browser.frame_origins else "'none'"
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors " + frame_ancestors)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -280,8 +422,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             scope = getattr(self.model_runtime, 'request_scope', None)
             settings = getattr(self.model_runtime, 'settings', None)
-            with (settings.scope(self.headers.get('X-Tenant-Id', ''), self.headers.get('X-User-Id', ''))
-                  if settings else nullcontext()), (scope(self.headers.get('X-Tenant-Id', ''), self.headers.get('X-User-Id', ''),
+            actor = self._actor() if self.identity_provider is not None else None
+            tenant = actor.tenant_id if actor else self.headers.get('X-Tenant-Id', '')
+            user = actor.user_id if actor else self.headers.get('X-User-Id', '')
+            with (settings.scope(tenant, user)
+                  if settings else nullcontext()), (scope(tenant, user,
                         trace_id, urlsplit(self.path).path) if scope else nullcontext()):
                 status, body, replayed = action()
             body["trace_id"] = trace_id
@@ -427,6 +572,176 @@ class Handler(BaseHTTPRequestHandler):
             raise ServiceError('MODEL_SETTINGS_INVALID', '模型配置请求无效', 422)
         return HTTPStatus.OK, result, False
 
+    @staticmethod
+    def _turn_is_current(result, task):
+        if result['base_task_version'] != task['task_version']:
+            return False
+        draft = result.get('feedback_draft')
+        pending = task.get('pending_draft')
+        return not draft or bool(pending and all(pending[key] == draft[key]
+                                     for key in ('draft_id', 'draft_version', 'proposal_digest')))
+
+    @staticmethod
+    def _conversation_result(task, result, orchestrated):
+        return {'schema_version': 'task-conversation-turn@1' if orchestrated else 'followup-intent@1',
+                'task_id': task['task_id'], 'base_revision': task['confirmed_revision'],
+                'base_task_version': task['task_version'], **result}
+
+    def _dialogue_command_receipt(self, actor, project_id, key):
+        self.service.projects.require_access(actor, project_id, 'default', 'create')
+        result = self.task_commands.read(actor, self.task_commands.dialogue_scope(project_id), key)
+        result.pop('task_id')
+        result.update(schema_version='dialogue-command@1', project_id=project_id)
+        if result['result'] is not None:
+            current = self.dialogue.store.read(actor, project_id, result['result']['session_id'])
+            result['result']['is_current'] = result['result']['version'] == current['version']
+        return result
+
+    def _task_command_receipt(self, actor, task_id, key):
+        task = self.service.task_read_summary(actor, task_id)
+        if 'pending_draft' not in task:
+            task = self.service.get_task(actor, task_id)
+        receipt = self.task_commands.read(actor, task_id, key)
+        if receipt['result'] is not None:
+            receipt['result'].update(is_current=self._turn_is_current(receipt['result'], task),
+                                     current_task_version=task['task_version'])
+        return receipt
+
+    def _task_requires_worker(self, actor, task_id, body):
+        from .workflow_state import status_question_topic
+        from .followup_inputs import explicit_requirement
+        from .task_conversation import TaskConversationCoordinator
+        if status_question_topic(body['text']) is not None:
+            return False
+        if body.get('draft_preview') is not None:
+            return True
+        try:
+            task, proposal = self.service.current_read_binding(actor, task_id)
+            if (task['task_version'] != body['expected_task_version']
+                    or task['confirmed_revision'] != body['expected_revision']):
+                return True
+            context, _ = TaskConversationCoordinator(self.service).context(
+                actor, task, proposal['query_spec'], body.get('feedback_ref'))
+            groups = [{'primary_label': row['primary_label'], 'auxiliary_terms': row['auxiliary_terms']}
+                      for row in (context['requirement_spec'].get('grouped_expansion') or {}).get('groups', [])]
+            return explicit_requirement(body['text'], groups, context) is None
+        except ServiceError:
+            # The journal must get the first chance to replay a completed key;
+            # callbacks retain all stale-draft and permission checks.
+            return True
+
+    def _followup_response(self, actor, task_id, body, orchestrated, receipt=None):
+        trace = ConversationTiming()
+        try:
+            with trace.activate():
+                result = self._followup_response_impl(actor, task_id, body, orchestrated, receipt)
+        except BaseException:
+            self.log_message('task_conversation_timing %s', json.dumps(trace.snapshot('failed')))
+            raise
+        timings = trace.snapshot()
+        if receipt is not None and hasattr(receipt, 'queue_wait_ms'):
+            timings['queue_wait_ms'] = receipt.queue_wait_ms
+        self.log_message('task_conversation_timing %s', json.dumps(timings))
+        return {**result, 'timings': timings}
+
+    def _followup_response_impl(self, actor, task_id, body, orchestrated, receipt=None):
+        if receipt is not None and receipt.plan is not None:
+            from .task_conversation import TaskConversationCoordinator
+            result = timed_call('draft_save', TaskConversationCoordinator(self.service).commit, actor, receipt.plan)
+            task = receipt.plan['task']
+            return self._conversation_result(task, result, True)
+        task, proposal = timed_call('requirement_read', self.service.current_read_binding, actor, task_id)
+        if (task['confirmed_revision'] != body['expected_revision']
+                or task['task_version'] != body['expected_task_version']):
+            raise ServiceError('REVISION_CONFLICT', 'Task changed; reload before classifying', 409)
+        spec = proposal.get('query_spec')
+        if not spec:
+            raise ServiceError('STORAGE_CORRUPT', 'Confirmed request unavailable', 500)
+        conversation_context, cleaning_draft = {}, None
+        if orchestrated:
+            from .task_conversation import TaskConversationCoordinator
+            coordinator = TaskConversationCoordinator(self.service)
+            conversation_context, cleaning_draft = timed_call('draft_read', coordinator.context, actor, task, spec, body.get('feedback_ref'))
+        effective_spec = cleaning_draft['proposal']['query_spec'] if cleaning_draft else spec
+        groups = (effective_spec.get('grouped_expansion') or {}).get('groups', [])
+        current = [{'primary_label': group['primary_label'],
+                    'auxiliary_terms': group['auxiliary_terms']} for group in groups]
+        target_count = spec['target_count']
+        if cleaning_draft is not None:
+            target_count = cleaning_draft['proposal']['query_spec']['target_count']
+        preview = body.get('draft_preview')
+        if preview is not None:
+            try:
+                if (not isinstance(preview, dict) or set(preview) != {'groups', 'target_count'}
+                        or type(preview['target_count']) is not int or not 1 <= preview['target_count'] <= 10000):
+                    raise ValueError('invalid preview')
+                preview_edited_groups(None, preview['groups'])
+            except ValueError:
+                raise ServiceError('INVALID_SPEC', 'Invalid unconfirmed preview', 422) from None
+            current, target_count = preview['groups'], preview['target_count']
+        messages = body.get('recent_messages', [])
+        if (not isinstance(messages, list) or len(messages) > 20 or any(
+                not isinstance(item, dict) or set(item) != {'role', 'text'}
+                or item['role'] not in ('user', 'assistant') or not isinstance(item['text'], str)
+                or len(item['text']) > 2000 for item in messages)):
+            raise ServiceError('INVALID_SPEC', 'Invalid conversation context', 422)
+        from .followup_inputs import explicit_requirement
+        explicit_context = {**conversation_context, 'has_unconfirmed_preview': preview is not None}
+        direct = explicit_requirement(body['text'], current, explicit_context)
+        if direct is not None:
+            increment('explicit_requirement_hits')
+            result = timed_call('explicit_validation', ModelRuntime._validate_followup,
+                                direct, body['text'], current, explicit_context)
+            workspace = None
+        else:
+            if self.dialogue is not None:
+                messages = timed_call('history_read', self.dialogue.store.task_history, actor, task['project_id'], task_id)
+            workspace = timed_call('workspace_read', self._task_workspace, actor, task_id)
+            if workspace['task_version'] != task['task_version']:
+                raise ServiceError('REVISION_CONFLICT', 'Task changed while reading workflow', 409)
+            scope = getattr(self.model_runtime, 'business_scope', None)
+            with (scope(project_id=task['project_id'], task_id=task_id,
+                        task_version=task['task_version'], revision=task['confirmed_revision'],
+                        generation=task['run_generation']) if scope else nullcontext()):
+                runtime = self.model_runtime.conversation_runtime() if orchestrated else self.model_runtime
+                result = runtime.classify_followup(
+                    spec['raw_request'], current, body['text'], body['llm_id'],
+                    task_context={'task_id': task_id, 'stage': task['stage'], 'run_status': task['run_status'],
+                                  'target_count': target_count, 'has_unconfirmed_preview': preview is not None,
+                                  'workflow': workspace['workflow'],
+                                  'pending_cleaning_feedback': (workspace.get('pending_draft') or {}).get('feedback_text'),
+                                  'cleaning_plan': [{'node_id': node['node_id'], 'source': node['source']}
+                                                    for node in confirmed_instruction_plan(effective_spec)], **conversation_context},
+                    recent_messages=messages)
+        after = timed_call('version_check', self.service.task_read_summary, actor, task_id)
+        if (after['confirmed_revision'] != task['confirmed_revision']
+                or after['task_version'] != task['task_version']):
+            raise ServiceError('REVISION_CONFLICT', 'Task changed during classification', 409)
+        if result.get('status_requested'):
+            from .workflow_state import workflow_reply, status_question_topic
+            # A deterministic status reply made no external call or mutation.
+            # Model-routed status still refreshes after the model has waited.
+            reader = getattr(self.task_events, 'task_mutation_sequence', None)
+            sequence = workspace.get('mutation_sequence')
+            reusable = (status_question_topic(body['text']) is not None and sequence is not None
+                        and callable(reader) and reader(task_id) == sequence)
+            refreshed = (workspace if reusable else
+                         timed_call('workspace_refresh', self._task_workspace, actor, task_id))
+            if refreshed['task_version'] != task['task_version']:
+                raise ServiceError('REVISION_CONFLICT', 'Task changed while answering status', 409)
+            result.update(workspace=refreshed, workflow=refreshed['workflow'],
+                          reply=workflow_reply(refreshed['workflow'], result.get('status_topic', 'progress')))
+        if orchestrated:
+            plan = timed_call('draft_prepare', coordinator.prepare, actor, task, spec, cleaning_draft, body['text'],
+                                       self.headers.get('Idempotency-Key', ''), result)
+            receipt.checkpoint(plan)
+            result = timed_call('draft_save', coordinator.commit, actor, plan)
+        if self.dialogue is not None and not orchestrated:
+            self.dialogue.store.append_task_turn(actor, task['project_id'], task_id, task['task_version'],
+                                                 body['text'], result.get('reply') or '本轮理解：' + result['kind'])
+        return self._conversation_result(task, result, orchestrated)
+
+    @platform_request
     def do_POST(self) -> None:  # noqa: N802
         if self.browse_only:
             self._json(503, {'code':'BROWSE_ONLY', 'message':'This validation instance is browse-only',
@@ -589,7 +904,25 @@ class Handler(BaseHTTPRequestHandler):
             def dialogue_action():
                 if self.dialogue is None:
                     raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
-                return HTTPStatus.OK, self.dialogue.turn(self._actor(), dialogue_match.group(1), self._body()), False
+                actor, project_id, body = self._actor(), dialogue_match.group(1), self._body()
+                if self.path.endswith('/dialogue-turn'):
+                    return HTTPStatus.OK, self.dialogue.turn(actor, project_id, body), False
+                if getattr(self.dialogue, 'store', None) is None:
+                    raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Durable conversation storage unavailable', 503)
+                self.service.projects.require_access(actor, project_id, 'default', 'create')
+                key = self.headers.get('Idempotency-Key', '')
+                if self.headers.get('Prefer') == 'respond-async':
+                    _, replayed = self.task_commands.submit(actor, self.task_commands.dialogue_scope(project_id),
+                        key, body, lambda receipt: self.dialogue.turn(actor, project_id, body, receipt=receipt),
+                        retry_failed=self.headers.get('X-Conversation-Retry') == 'true')
+                    receipt = self._dialogue_command_receipt(actor, project_id, key)
+                    return (HTTPStatus.ACCEPTED if receipt['status'] in ('understanding', 'prepared') else HTTPStatus.OK), receipt, replayed
+                result, replayed = self.task_commands.execute(actor, self.task_commands.dialogue_scope(project_id),
+                    key, body, lambda receipt: self.dialogue.turn(actor, project_id, body, receipt=receipt),
+                    retry_failed=self.headers.get('X-Conversation-Retry') == 'true')
+                current = self.dialogue.store.read(actor, project_id, result['session_id'])
+                return HTTPStatus.OK, {**result, 'command_key': key,
+                                      'is_current': current['version'] == result['version']}, replayed
             self._run(dialogue_action)
             return
         cleaning_match = CLEANING_POST_PATH.fullmatch(self.path)
@@ -689,86 +1022,43 @@ class Handler(BaseHTTPRequestHandler):
             if followup_match:
                 actor = self._actor()
                 body = self._body()
+                orchestrated = self.path.endswith('/conversation-turn')
+                if orchestrated:
+                    from .service import require_key
+                    require_key(self.headers.get('Idempotency-Key', ''))
                 required = {'text', 'llm_id', 'expected_revision', 'expected_task_version'}
-                if (not required <= set(body) or set(body) - required - {'draft_preview', 'recent_messages'}
+                if (not required <= set(body) or set(body) - required - ({'draft_preview', 'recent_messages', 'feedback_ref'} if orchestrated else {'draft_preview', 'recent_messages'})
                         or not isinstance(body['text'], str) or not isinstance(body['llm_id'], str)
                         or type(body['expected_revision']) is not int
                         or type(body['expected_task_version']) is not int):
                     raise ServiceError('INVALID_SPEC', 'Bound follow-up classification request required', 422)
                 task_id = followup_match.group(1)
-                task = self.service.get_task(actor, task_id)
-                if (task['confirmed_revision'] != body['expected_revision']
-                        or task['task_version'] != body['expected_task_version']):
-                    raise ServiceError('REVISION_CONFLICT', 'Task changed; reload before classifying', 409)
-                revisions = self.service.list_revisions(actor, task_id)
-                revision = next((item for item in revisions
-                                 if item['revision'] == task['confirmed_revision']), None)
-                spec = revision['proposal']['query_spec'] if revision else None
-                if not spec:
-                    raise ServiceError('STORAGE_CORRUPT', 'Confirmed request unavailable', 500)
-                groups = (spec.get('grouped_expansion') or {}).get('groups', [])
-                current = [{'primary_label': group['primary_label'],
-                            'auxiliary_terms': group['auxiliary_terms']} for group in groups]
-                target_count = spec['target_count']
-                preview = body.get('draft_preview')
-                if preview is not None:
-                    try:
-                        if (not isinstance(preview, dict) or set(preview) != {'groups', 'target_count'}
-                                or type(preview['target_count']) is not int or not 1 <= preview['target_count'] <= 10000):
-                            raise ValueError('invalid preview')
-                        preview_edited_groups(None, preview['groups'])
-                    except ValueError:
-                        raise ServiceError('INVALID_SPEC', 'Invalid unconfirmed preview', 422) from None
-                    current, target_count = preview['groups'], preview['target_count']
-                messages = body.get('recent_messages', [])
-                if (not isinstance(messages, list) or len(messages) > 20 or any(
-                        not isinstance(item, dict) or set(item) != {'role', 'text'}
-                        or item['role'] not in ('user', 'assistant') or not isinstance(item['text'], str)
-                        or len(item['text']) > 2000 for item in messages)):
-                    raise ServiceError('INVALID_SPEC', 'Invalid conversation context', 422)
-                if self.dialogue is not None:
-                    messages = self.dialogue.store.task_history(actor, task['project_id'], task_id)
-                retrieval_context = {'status': 'unknown'}
-                if self.first_search is not None:
-                    try:
-                        progress = self.first_search.progress(actor, task_id)
-                        if progress['status'] == 'unapproved':
-                            routes = self.first_search.preview(actor, task_id)['routes']
-                            retrieval_context = {'status': 'unapproved', 'unavailable_queries': [
-                                {'query': row['query_text'], 'reason': row['availability']}
-                                for row in routes if not row['options']][:10]}
-                        elif (progress.get('revision') == task['confirmed_revision']
-                              and progress.get('generation') == task['run_generation']):
-                            members = progress['members']
-                            retrieval_context = {'status': progress['status'],
-                                'pagination_stopped': progress['pagination_stopped'],
-                                'committed_pages': sum(member['committed_pages'] for member in members),
-                                'stop_reasons': sorted({member['stop_reason'] for member in members if member['stop_reason']}),
-                                'mode': 'local_test', 'cleaning_completed': False}
-                    except ServiceError as error:
-                        if error.status in (401, 403, 404):
-                            raise
-                        retrieval_context = {'status': 'unavailable', 'reason': error.code}
-                scope = getattr(self.model_runtime, 'business_scope', None)
-                with (scope(project_id=task['project_id'], task_id=task_id,
-                            task_version=task['task_version'], revision=task['confirmed_revision'],
-                            generation=task['run_generation']) if scope else nullcontext()):
-                    result = self.model_runtime.classify_followup(
-                        spec['raw_request'], current, body['text'], body['llm_id'],
-                        task_context={'task_id': task_id, 'stage': task['stage'], 'run_status': task['run_status'],
-                                      'target_count': target_count, 'has_unconfirmed_preview': preview is not None,
-                                      'retrieval_progress': retrieval_context},
-                        recent_messages=messages)
-                after = self.service.get_task(actor, task_id)
-                if (after['confirmed_revision'] != task['confirmed_revision']
-                        or after['task_version'] != task['task_version']):
-                    raise ServiceError('REVISION_CONFLICT', 'Task changed during classification', 409)
-                if self.dialogue is not None:
-                    self.dialogue.store.append_task_turn(actor, task['project_id'], task_id, task['task_version'],
-                                                         body['text'], result.get('reply') or '本轮理解：' + result['kind'])
-                return HTTPStatus.OK, {'schema_version': 'followup-intent@1',
-                                       'task_id': task_id, 'base_revision': task['confirmed_revision'],
-                                       'base_task_version': task['task_version'], **result}, False
+                if not orchestrated:
+                    return HTTPStatus.OK, self._followup_response(actor, task_id, body, False), False
+                self.service.task_read_summary(actor, task_id)
+                if (self.headers.get('Prefer') == 'respond-async'
+                        and self._task_requires_worker(actor, task_id, body)):
+                    from copy import copy, deepcopy
+                    worker = copy(self)
+                    worker.headers = deepcopy(self.headers)
+                    key = self.headers.get('Idempotency-Key', '')
+                    _, replayed = self.task_commands.submit(actor, task_id, key, body,
+                        lambda receipt: worker._followup_response(actor, task_id, body, True, receipt),
+                        retry_failed=self.headers.get('X-Conversation-Retry') == 'true')
+                    receipt = self._task_command_receipt(actor, task_id, key)
+                    receipt['command_replayed'] = replayed
+                    return (HTTPStatus.ACCEPTED if receipt['status'] in ('understanding', 'prepared') else HTTPStatus.OK), receipt, replayed
+                result, replayed = self.task_commands.execute(actor, task_id,
+                    self.headers.get('Idempotency-Key', ''), body,
+                    lambda receipt: self._followup_response(actor, task_id, body, True, receipt),
+                    retry_failed=self.headers.get('X-Conversation-Retry') == 'true')
+                current = self.service.task_read_summary(actor, task_id)
+                if 'pending_draft' not in current:
+                    current = self.service.get_task(actor, task_id)
+                return HTTPStatus.OK, {**result, 'command_key': self.headers.get('Idempotency-Key', ''),
+                    'command_replayed': replayed,
+                    'current_task_version': current['task_version'],
+                    'is_current': self._turn_is_current(result, current)}, replayed
             if suggestion_match:
                 actor = self._actor()
                 body = self._body()
@@ -792,6 +1082,19 @@ class Handler(BaseHTTPRequestHandler):
                              if item['revision'] == draft['base_revision']), None)
                 if not isinstance(base, str):
                     raise ServiceError('STORAGE_CORRUPT', 'Confirmed request unavailable', 500)
+                if 'cleaning_conditions' in draft['proposal']['query_spec']:
+                    from .requirement_changes import preview_changes
+                    base_spec = next(row['proposal']['query_spec'] for row in revisions
+                                     if row['revision'] == draft['base_revision'])
+                    result = {'schema_version': 'feedback-cleaning-suggestion@1',
+                              'task_id': task_id, 'draft_id': draft['draft_id'],
+                              'draft_version': draft['draft_version'], 'proposal_digest': draft['proposal_digest'],
+                              'base_revision': draft['base_revision'], 'base_task_version': draft['base_task_version'],
+                              'feedback_status': 'ready', 'needs_clarification': False,
+                              'requirement': '', 'rationale': '', 'status': 'reviewable',
+                              'cleaning_plan_preview': preview_changes(base_spec, draft['proposal']['query_spec'])}
+                    result['suggestion_digest'] = digest(result)
+                    return HTTPStatus.OK, result, False
                 selection = body['model_selection']
                 scope = getattr(self.model_runtime, 'business_scope', None)
                 with (scope(project_id=task['project_id'], task_id=task_id,
@@ -811,6 +1114,14 @@ class Handler(BaseHTTPRequestHandler):
                           'proposal_digest': draft['proposal_digest'], **suggestion,
                           'status': 'advisory_only',
                           'note': '仅供审阅；不在反馈确认摘要内，不能创建或运行清洗管线。'}
+                if suggestion.get('feedback_status') == 'ready':
+                    old_nodes = confirmed_instruction_plan(next(row['proposal']['query_spec'] for row in revisions
+                        if row['revision'] == draft['base_revision']))
+                    new_nodes = confirmed_instruction_plan(draft['proposal']['query_spec'])
+                    result['cleaning_plan_preview'] = {'before_count': len(old_nodes),
+                        'after_count': len(new_nodes),
+                        'nodes': [{'node_id': node['node_id'], 'source': node['source'],
+                                   'instruction': node['instruction']} for node in new_nodes]}
                 result['suggestion_digest'] = digest(result)
                 return HTTPStatus.OK, result, False
             if intent_match:
@@ -905,6 +1216,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self._run(action)
 
+    @platform_request
     def do_DELETE(self) -> None:  # noqa: N802
         if self.browse_only:
             self._json(503, {'code':'BROWSE_ONLY', 'message':'This validation instance is browse-only',
@@ -952,8 +1264,43 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {'code': 'NOT_FOUND', 'message': 'route was not found',
                          'retryable': False, 'trace_id': self._trace_id()})
 
+    @platform_request
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        if parsed.path == '/platform.js' and self.platform_browser is not None:
+            from .platform_ui import PLATFORM_JS
+            self._asset('text/javascript', PLATFORM_JS)
+            return
+        workspace_match = TASK_WORKSPACE_PATH.fullmatch(parsed.path)
+        if workspace_match:
+            def workspace_action():
+                if parsed.query:
+                    raise ServiceError('INVALID_SPEC', 'Workspace URL has no query parameters', 422)
+                return HTTPStatus.OK, self._task_workspace(self._actor(), workspace_match.group(1)), False
+            self._run(workspace_action)
+            return
+        dialogue_command = DIALOGUE_COMMAND_PATH.fullmatch(parsed.path)
+        if dialogue_command:
+            def dialogue_command_action():
+                from urllib.parse import unquote
+                actor = self._actor()
+                project_id, key = dialogue_command.groups()
+                if self.dialogue is None or getattr(self.dialogue, 'store', None) is None:
+                    raise ServiceError('DIALOGUE_NOT_CONFIGURED', 'Conversation state is unavailable', 503)
+                result = self._dialogue_command_receipt(actor, project_id, unquote(key))
+                return HTTPStatus.OK, result, False
+            self._run(dialogue_command_action)
+            return
+        command_match = TASK_COMMAND_PATH.fullmatch(parsed.path)
+        if command_match:
+            def command_action():
+                from urllib.parse import unquote
+                actor = self._actor()
+                task_id, key = command_match.groups()
+                result = self._task_command_receipt(actor, task_id, unquote(key))
+                return HTTPStatus.OK, result, False
+            self._run(command_action)
+            return
         query_image_match = QUERY_IMAGES_PATH.fullmatch(parsed.path)
         if query_image_match and query_image_match.group(2):
             project_id, query_image_id, operation = query_image_match.groups()
@@ -1654,7 +2001,10 @@ class Handler(BaseHTTPRequestHandler):
         self._run(action)
 
     def log_message(self, format: str, *args: Any) -> None:
-        # Production logging will be structured and redacted; avoid request-body logging here.
+        # Platform deployment uses gateway access logs; never log raw URL/query,
+        # credentials, prompts or upstream errors from this handler.
+        if self.identity_provider is not None:
+            return
         super().log_message(format, *args)
 
 
@@ -1663,11 +2013,26 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
                    search_dispatch=None, build_info=None, cleaning_reader=None,
                    cleaning_service=None, cleaning_dispatch=None, delivery_service=None,
                    expansion_jobs=None, refill_service=None, task_events=None,
-                   query_images=None, browse_only=False) -> type[Handler]:
+                   query_images=None, browse_only=False, identity_provider=None,
+                   identity_mode="development", platform_browser=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
 
+    if identity_mode not in ('development', 'platform'):
+        raise ValueError('unknown identity mode')
+    if identity_mode == 'platform':
+        from .adapters.platform_access import PlatformProjectAccess
+        if identity_provider is None or not isinstance(service.projects, PlatformProjectAccess):
+            raise ValueError('platform mode requires verified identity and platform project authorization')
+        if identity_provider.tenant_id != service.projects.tenant_id:
+            raise ValueError('platform identity and project namespace must match')
+    elif identity_provider is not None:
+        raise ValueError('identity provider requires explicit platform mode')
+    if platform_browser is not None and identity_mode != 'platform':
+        raise ValueError('browser sessions require platform mode')
+    BoundHandler.platform_browser = platform_browser
+    BoundHandler.identity_provider = identity_provider
     BoundHandler.browse_only = browse_only
     BoundHandler.service = service
     BoundHandler.result_reader = result_reader if result_reader is not None else cleaning_reader
@@ -1683,6 +2048,8 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.search_dispatch = search_dispatch
     BoundHandler.refill_service = refill_service
     BoundHandler.dialogue = dialogue
+    from .task_commands import TaskCommandStore
+    BoundHandler.task_commands = TaskCommandStore(getattr(dialogue, 'store', None) or DialogueStore())
     BoundHandler.expansion_jobs = expansion_jobs
     BoundHandler.task_events = task_events or TaskEventFeed(
         getattr(getattr(service, 'repository', None), 'path', None))
@@ -1716,7 +2083,7 @@ def main() -> None:
     parser.add_argument('--model-allowed-url', action='append', default=[],
                         help='administrator-approved exact HTTPS Base URL; repeat for multiple gateways')
     parser.add_argument('--agent-runtime', choices=('dsh', 'direct'), default='dsh',
-                        help='DSH is the default; direct is an explicit legacy diagnostic mode')
+                        help='Planning runtime; ordinary dialogue uses direct model calls. Existing default remains dsh for binding compatibility.')
     parser.add_argument('--require-clean-source', action='store_true',
                         help='refuse to serve when source is not an unchanged Git commit')
     parser.add_argument('--dsh-python', help='Python executable with pinned requirements-dsh.lock installed')
@@ -1813,7 +2180,7 @@ def main() -> None:
     query_images = QueryImageService(projects, Path(args.ledger) if args.ledger else None)
     service = TaskService(repository, projects, query_images)
     dialogue = DialogueCoordinator(DialogueStore(Path(args.dialogue_ledger) if args.dialogue_ledger else None),
-                                   runtime, service.projects)
+                                   runtime.conversation_runtime(), service.projects)
     expansion_jobs = ExpansionJobs(Path(args.dialogue_ledger) if args.dialogue_ledger else None,
                                    runtime, dialogue, service.projects, service)
     routing = LocalRoutingPreview(service, catalog, args.catalog_source, args.query_capabilities) if args.query_capabilities else None
@@ -1850,6 +2217,7 @@ def main() -> None:
     build_info = {'commit': commit, 'source_clean': clean,
                   'started_at': datetime.now(timezone.utc).isoformat(),
                   'model_engine': runtime.status().get('engine'),
+                  'conversation_engine': dialogue.runtime.status().get('engine'),
                   'retrieval_mode': (getattr(first_search, 'mode', 'local_fixture')
                                      if first_search else 'unconfigured'),
                   'identity_mode': 'demo' if args.demo_project else 'external',
@@ -1904,6 +2272,7 @@ def main() -> None:
                              query_images=query_images, browse_only=args.browse_only)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     if not args.browse_only:
+        handler.task_commands.recover_interrupted()
         expansion_jobs.recover()
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
@@ -1913,6 +2282,7 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        handler.task_commands.close()
         if search_dispatch:
             search_dispatch.close()
         if refill_runtime:

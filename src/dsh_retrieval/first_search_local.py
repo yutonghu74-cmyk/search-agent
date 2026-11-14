@@ -265,7 +265,10 @@ class LocalFirstSearch:
                 if (context.purpose == 'refill'
                         and (not resource_ref.startswith('library:') or action != 'search')):
                     raise ServiceError('ACCESS_DENIED', 'Local refill search access denied', 403)
-                if context.purpose not in ('search', 'retrieval', 'refill'):
+                if (context.purpose == 'cleaning_input'
+                        and (not resource_ref.startswith('media:') or action != 'read')):
+                    raise ServiceError('ACCESS_DENIED', 'Cleaning access is read-only media access', 403)
+                if context.purpose not in ('search', 'retrieval', 'refill', 'cleaning_input'):
                     raise ServiceError('ACCESS_DENIED', 'Local search context required', 403)
                 scope = CatalogConfigScope(context.actor.tenant_id, context.actor.user_id, 'demo')
                 if resource_ref.startswith('library:'):
@@ -484,7 +487,8 @@ class LocalFirstSearch:
                 'note': '仅记录原始检索页；未清洗、未计算有效素材数。'}
 
     def progress(self, actor, task_id):
-        task = self.service.repository.get(actor, task_id)
+        reader = getattr(self.service.repository, 'get_task_read_binding', self.service.repository.get)
+        task = reader(actor, task_id)
         progress = read_retrieval_progress(self.repository, actor, task_id)
         progress['initial_window_complete'] = (
             progress['pagination_stopped'] or (

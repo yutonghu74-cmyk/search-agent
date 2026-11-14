@@ -147,19 +147,304 @@
       ],
       "properties": {
         "mode": {
-          "const": "input_only"
+          "enum": [
+            "input_only",
+            "maintain_target"
+          ]
         },
         "target_count": {
           "type": "integer",
           "minimum": 1
         },
         "approved_library_ids": {
-          "const": []
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "progression": {
-          "const": "manual"
+          "enum": [
+            "manual",
+            "auto"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "input_only"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "approved_library_ids": {
+                "const": []
+              },
+              "progression": {
+                "const": "manual"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "approved_library_ids": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cleaning_conditions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "condition_id",
+          "text",
+          "source_text",
+          "group_id"
+        ],
+        "properties": {
+          "condition_id": {
+            "type": "string",
+            "pattern": "^condition_[0-9a-f]{24}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 640
+          },
+          "source_text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          }
         }
       }
+    },
+    "refill_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_rounds",
+        "max_vlm_calls",
+        "no_progress_rounds"
+      ],
+      "properties": {
+        "max_rounds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_vlm_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "no_progress_rounds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "query_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "query_image_id",
+        "digest",
+        "exclude_exact_content"
+      ],
+      "properties": {
+        "type": {
+          "const": "reference_image"
+        },
+        "query_image_id": {
+          "type": "string",
+          "pattern": "^qimg_[0-9a-f]{32}$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "exclude_exact_content": {
+          "type": "boolean"
+        }
+      }
+    },
+    "grouped_expansion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "parent_label",
+        "groups",
+        "overlap_policy",
+        "aggregate_manifest",
+        "generator",
+        "requires_confirmation",
+        "plan_digest"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "grouped-expansion@1"
+        },
+        "parent_label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "group_id",
+              "primary_label",
+              "requested_expansion_count",
+              "auxiliary_terms",
+              "package_name",
+              "package_mode",
+              "delivery_target"
+            ],
+            "properties": {
+              "group_id": {
+                "type": "string",
+                "pattern": "^group_[0-9a-f]{16}$"
+              },
+              "primary_label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              },
+              "requested_expansion_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 200
+              },
+              "auxiliary_terms": {
+                "type": "array",
+                "maxItems": 200,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                }
+              },
+              "package_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              },
+              "package_mode": {
+                "const": "separate"
+              },
+              "delivery_target": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "overlap_policy": {
+          "const": "single_primary_per_aggregate"
+        },
+        "aggregate_manifest": {
+          "const": true
+        },
+        "generator": {
+          "enum": [
+            "local-template@1",
+            "user-edited@1",
+            "llm@1"
+          ]
+        },
+        "requires_confirmation": {
+          "const": true
+        },
+        "plan_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "model_binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "llm",
+            "vlm",
+            "config_digest",
+            "prompt_version"
+          ],
+          "properties": {
+            "llm": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "vlm": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "config_digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "prompt_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "generator": {
+                "const": "llm@1"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "model_binding"
+            ]
+          }
+        }
+      ]
     }
   }
 }

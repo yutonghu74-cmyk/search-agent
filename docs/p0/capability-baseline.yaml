@@ -33,12 +33,12 @@ task_storage:
   development_adapter: memory
   production_adapter: UNRESOLVED
   postgresql_ddl_status: optional_draft_not_applied
-  decision_ref: docs/p0/internal-integration.md
+  decision_ref: 检索Agent平台接入契约_v0.md
 security:
   identity_provider: W3
   identity_integration_status: NOT_CONNECTED
   identity_protocol: UNRESOLVED
-  identity_contract_ref: docs/p0/w3-integration.md
+  identity_contract_ref: 检索Agent平台接入契约_v0.md
   authorization_source: UNRESOLVED
   external_model_data_policy: UNRESOLVED
 note: UNRESOLVED values block the corresponding P0 exit gate.

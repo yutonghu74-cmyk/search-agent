@@ -96,7 +96,7 @@ class ConfirmedTaskVLMRegistry:
         artifact = DetectorArtifact("implementation", self._artifact_name, content_digest)
         node_artifact = None
         # A one-group quota still needs its group's own predicate identity.
-        if len(plan) > 1 or plan[0].get('group_id') is not None:
+        if 'cleaning_conditions' in spec or len(plan) > 1 or plan[0].get('group_id') is not None:
             node_path = self._artifact_root / 'vlm_node_detector.py'
             try:
                 node_artifact = DetectorArtifact('implementation', node_path.name,
