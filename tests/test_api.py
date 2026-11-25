@@ -64,6 +64,8 @@ class ApiTest(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join()
+        cls.server.RequestHandlerClass.task_commands.close()
+        cls.server.RequestHandlerClass.task_commands.store.connection.close()
 
     def test_task_summary_route_does_not_build_heavy_snapshot(self):
         handler = self.server.RequestHandlerClass
@@ -83,6 +85,7 @@ class ApiTest(unittest.TestCase):
 
     def test_browse_only_rejects_writes_and_keeps_page_readable(self):
         handler = create_handler(self.server.RequestHandlerClass.service, browse_only=True)
+        self.addCleanup(handler.task_commands.store.connection.close)
         with ThreadingHTTPServer(('127.0.0.1', 0), handler) as server:
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()

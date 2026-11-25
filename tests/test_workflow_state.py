@@ -33,6 +33,23 @@ class WorkflowStateTest(unittest.TestCase):
         self.progress = build_task_progress(self.task, proposal).to_view()
         self.search = {**binding(self.task), 'status': 'approved', 'pagination_stopped': True, 'members': []}
 
+    def test_automatic_intake_has_no_candidate_or_cleaning_confirmation_gate(self):
+        job={'workflow_ref':'confirmed-terms-retrieval@1', 'revision':1, 'generation':1, 'task_version':2,
+             'status':'running', 'execution_scope':{'schema_version':'confirmed-terms-execution@2','candidate_intake':'auto'}}
+        value=project_workflow(self.task,self.progress,search=self.search,execution_job=job)
+        self.assertEqual(value['state'],'preparing_cleaning')
+        self.assertNotIn('confirm_candidates',[a['id'] for a in value['available_actions']])
+        self.assertNotIn('prepare_cleaning',[a['id'] for a in value['available_actions']])
+        self.assertIsNone(value['counts']['accepted'])
+        blocked=project_workflow(self.task,self.progress,search=self.search,execution_job={**job,'status':'failed','code':'VLM_CALL_LIMIT_REACHED'})
+        self.assertEqual(blocked['state'],'intake_blocked')
+        self.assertIsNone(blocked['counts']['accepted'])
+        review={**job,'execution_scope':{**job['execution_scope'],'candidate_intake':'manual'}}
+        manual=project_workflow(self.task,self.progress,search=self.search,execution_job=review)
+        self.assertEqual(manual['state'],'awaiting_candidates')
+        stale=project_workflow(self.task,self.progress,search=self.search,execution_job={**job,'generation':2})
+        self.assertEqual(stale['state'],'awaiting_candidates')
+
     def test_finished_search_is_pending_confirmation_not_cleaning_or_delivery_success(self):
         value = project_workflow(self.task, self.progress, search=self.search)
         self.assertEqual(value['state'], 'awaiting_candidates')
@@ -43,6 +60,27 @@ class WorkflowStateTest(unittest.TestCase):
         self.assertNotIn('交付已发布', value['status_reply'])
         self.assertNotIn('网络', value['slow_reply'])
         self.assertNotIn('数据量', value['slow_reply'])
+
+    def test_confirmed_terms_agent_queue_does_not_ask_for_another_start_confirmation(self):
+        search={**binding(self.task),'status':'unapproved','members':[]}
+        job={'workflow_ref':'confirmed-terms-retrieval@1','revision':1,'generation':1,'task_version':2,'status':'queued'}
+        value=project_workflow(self.task,self.progress,search=search,execution_job=job)
+        self.assertIn('检索 Agent 已接收',value['status_reply'])
+        self.assertNotIn('start_retrieval',[a['id'] for a in value['available_actions']])
+        self.assertIsNone(value['counts']['accepted'])
+        stale={**job,'generation':2}
+        value=project_workflow(self.task,self.progress,search=search,execution_job=stale)
+        self.assertIn('start_retrieval',[a['id'] for a in value['available_actions']])
+
+    def test_agent_unknown_is_not_reported_as_complete_and_keeps_actual_candidate_gate(self):
+        job={'workflow_ref':'confirmed-terms-retrieval@1','revision':1,'generation':1,'task_version':2,
+             'status':'unknown','code':'AGENT_SEARCH_OUTCOME_UNKNOWN'}
+        searching={**self.search,'pagination_stopped':False}
+        value=project_workflow(self.task,self.progress,search=searching,execution_job=job)
+        self.assertEqual(value['state'],'unknown');self.assertIn('不会自动重发',value['status_reply'])
+        value=project_workflow(self.task,self.progress,search=self.search,execution_job=job)
+        self.assertEqual(value['state'],'awaiting_candidates')
+        self.assertEqual(value['next_action']['id'],'confirm_candidates')
 
     def test_initial_window_can_await_owner_without_stopping_future_refill(self):
         search = {**self.search, 'pagination_stopped': False, 'initial_window_complete': True}
@@ -141,7 +179,10 @@ class WorkspaceApiTest(unittest.TestCase):
         self.assertEqual(status, 200, replay)
         self.assertTrue(replay['command_replayed'])
         self.assertEqual(replay['timings'], answer['timings'])
-        self.assertNotIn('Server-Timing', self.last_headers)
+        # Replay preserves the original processing evidence in the body, but
+        # the header measures this fresh HTTP read, never the old model work.
+        self.assertIn('pipeline;dur=', self.last_headers['Server-Timing'])
+        self.assertNotIn('conversation;dur=', self.last_headers['Server-Timing'])
         with patch.object(self.handler.task_events, 'task_mutation_sequence', side_effect=[1, 1, 2, 2, 2]), \
              patch.object(f.local, 'progress', wraps=f.local.progress) as reads:
             status, answer = self.call('/conversation-turn', body, key='clock-moved')

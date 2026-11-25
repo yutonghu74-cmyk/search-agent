@@ -1,0 +1,19 @@
+{
+  "schema_version": "harness-routes@2",
+  "releases": {
+    "installed-retrieval@1": {
+      "provider": "registered",
+      "adapter_id": "installed-retrieval",
+      "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "installed-cleaning@1": {
+      "provider": "registered",
+      "adapter_id": "installed-cleaning",
+      "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "roles": {
+    "retrieval": "installed-retrieval@1",
+    "cleaning": "installed-cleaning@1"
+  }
+}

@@ -7,6 +7,19 @@
   "catalog_ledger": "/srv/agent-state/catalog.sqlite3",
   "credential_store": "/srv/agent-state/delegation.sqlite3",
   "credential_key": "/srv/agent-secrets/delegation.key",
-  "allowed_actions": ["read", "create", "approve"],
-  "frame_origins": ["https://platform.example.invalid"]
+  "allowed_actions": [
+    "read",
+    "create",
+    "approve"
+  ],
+  "frame_origins": [
+    "https://platform.example.invalid"
+  ],
+  "search_limits": {
+    "workers": 2,
+    "max_pending": 128,
+    "max_calls": 128,
+    "max_hit_slots": 1000,
+    "max_pending_per_user": 16
+  }
 }

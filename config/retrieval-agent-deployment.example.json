@@ -1,0 +1,30 @@
+{
+  "schema_version": "local-retrieval-agent@1",
+  "harness": {
+    "schema_version": "harness-routes@2",
+    "releases": {
+      "dsh-rc5": {
+        "provider": "dsh",
+        "adapter_id": "dsh-rc5",
+        "sdk_release": "dsh-runtime-022rc5",
+        "python": "/absolute/private/controller/bin/python",
+        "home": "/absolute/short/dsh-home",
+        "dsh_bin": "/absolute/private/native/node_modules/@deepseek-ai/dsh/lib/bin.js",
+        "node": "/absolute/private/node/bin/node",
+        "npm_lock": "/absolute/private/native/package-lock.json"
+      }
+    },
+    "roles": {"retrieval": "dsh-rc5"}
+  },
+  "projects": ["demo"],
+  "chat_entry": "conversation",
+  "coordinator": {
+    "enabled": false
+  },
+  "model_profile_ref": "REPLACE_WITH_AUTHORIZED_LLM_PROFILE",
+  "batch_size": 25,
+  "max_pages": 3,
+  "max_model_calls": 5,
+  "max_seconds": 120,
+  "workspace": "/absolute/private/materialized"
+}

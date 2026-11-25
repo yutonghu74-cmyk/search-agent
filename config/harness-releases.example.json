@@ -1,0 +1,18 @@
+{
+  "schema_version": "harness-routes@1",
+  "releases": {
+    "dsh-0.2.2-rc.5": {
+      "adapter_id": "dsh-rc5",
+      "sdk_release": "dsh-runtime-022rc5",
+      "python": "REPLACE_WITH_ISOLATED_CONTROLLER_PYTHON",
+      "home": "REPLACE_WITH_SHORT_ISOLATED_DSH_HOME",
+      "dsh_bin": "REPLACE_WITH_NPM_ROOT/node_modules/@deepseek-ai/dsh/lib/bin.js",
+      "node": "REPLACE_WITH_NODE_24_BIN/node",
+      "npm_lock": "REPLACE_WITH_NPM_ROOT/package-lock.json"
+    }
+  },
+  "roles": {
+    "retrieval": "dsh-0.2.2-rc.5",
+    "cleaning": "dsh-0.2.2-rc.5"
+  }
+}

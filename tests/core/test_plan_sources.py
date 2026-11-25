@@ -4,7 +4,7 @@ from dataclasses import replace
 from unittest.mock import patch
 import unittest
 
-from dsh_retrieval.adapters.task_storage import plan_sources
+from dsh_retrieval.adapters.task_storage import plan_sources, ledger_rows
 from dsh_retrieval.adapters.task_storage.plan_sets import restore
 from dsh_retrieval.adapters.task_storage.sqlite import dump
 from dsh_retrieval.errors import ServiceError
@@ -68,9 +68,9 @@ class PlanSourcesTest(unittest.TestCase):
             self.assertEqual(plan_sources.load_task(db, self.task_id)['current'][self.task_id], self.f.approved)
 
     def test_preparation_has_no_write_lock_and_concurrent_generation_change_is_fenced(self):
-        original = plan_sources.patch_shadow
-        def concurrent(payload, before, after):
-            value = original(payload, before, after)
+        original = ledger_rows.prepare_subset
+        def concurrent(*args):
+            value = original(*args)
             with closing(self.repo.tasks._connect()) as db, db:
                 db.execute('BEGIN IMMEDIATE')
                 memory = self.repo.tasks._load(db.execute('SELECT format,payload FROM local_ledger').fetchone())
@@ -78,7 +78,7 @@ class PlanSourcesTest(unittest.TestCase):
                 memory._tasks[self.task_id] = replace(task, run_generation=task.run_generation + 1)
                 db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (dump(memory),))
             return value
-        with patch.object(plan_sources, 'patch_shadow', side_effect=concurrent):
+        with patch.object(ledger_rows, 'prepare_subset', side_effect=concurrent):
             with self.assertRaises(ServiceError) as error:
                 self.f.reserve(self.f.first, 'racing-generation')
         self.assertEqual(error.exception.code, 'REVISION_CONFLICT')
@@ -87,15 +87,15 @@ class PlanSourcesTest(unittest.TestCase):
         self.assertFalse(state['reserve_keys'])
 
     def test_unrelated_commit_retries_without_duplicate_reservation(self):
-        original, changes = plan_sources.patch_shadow, []
-        def concurrent(payload, before, after):
-            value = original(payload, before, after)
+        original, changes = ledger_rows.prepare_subset, []
+        def concurrent(*args):
+            value = original(*args)
             if not changes:
                 changes.append(True)
                 with closing(self.repo.tasks._connect()) as db, db:
                     db.execute('UPDATE local_ledger SET payload=payload WHERE id=1')
             return value
-        with patch.object(plan_sources, 'patch_shadow', side_effect=concurrent) as prepare:
+        with patch.object(ledger_rows, 'prepare_subset', side_effect=concurrent) as prepare:
             operation = self.f.reserve(self.f.first, 'retry-race')
             self.assertEqual(prepare.call_count, 2)
         state = self.repo._transaction(False, lambda memory, state: state)
@@ -141,3 +141,77 @@ class PlanSourcesTest(unittest.TestCase):
         with closing(self.repo.tasks._connect()) as db:
             self.assertEqual(db.execute('SELECT summary_json FROM task_read_summaries WHERE task_id=?', (other['task_id'],)).fetchone()[0], before)
             self.assertEqual(db.execute('SELECT chat_id,summary_json FROM chat_read_summaries ORDER BY chat_id').fetchall(), chats)
+
+    def seed_unrelated_history(self):
+        operation = self.f.reserve(self.f.first, 'history-seed')
+        self.f.commit(operation, self.f.first)
+        def seed(memory, state):
+            record = state['operations'][operation]
+            historical = replace(record[0], scope=replace(record[0].scope, task_id='history-task'))
+            state['operations']['history-operation'] = (historical, *record[1:])
+        self.repo._transaction(True, seed)
+
+    def test_nonpage_confirm_prepares_only_its_task_and_reuses_validated_current(self):
+        self.seed_unrelated_history()
+        with closing(self.repo.tasks._connect()) as db:
+            before = db.execute("SELECT payload,checksum FROM plan_page_sources WHERE task_id='history-task'").fetchall()
+        proposal = self.f.fixture.make_proposal(2)
+        original = self.repo.tasks._sync_task_read_summaries
+        searches = []
+        def summaries(*args, **kwargs):
+            searches.append(kwargs.get('searches'))
+            return original(*args, **kwargs)
+        with patch.object(plan_sources, 'prepare', wraps=plan_sources.prepare) as prepare, \
+                patch.object(self.repo.tasks, '_sync_task_read_summaries', side_effect=summaries):
+            self.repo.put_proposal(self.actor, proposal)
+            approved, _ = self.f.fixture.confirm(proposal, key='new-approval')
+        self.assertEqual(prepare.call_count, 2)
+        self.assertTrue(all(record[0].scope.task_id == self.task_id
+                            for call in prepare.call_args_list
+                            for record in call.args[0]['operations'].values()))
+        self.assertTrue(all(isinstance(current, dict) for current in searches))
+        self.assertEqual(searches[-1][self.task_id], approved)
+        with closing(self.repo.tasks._connect()) as db:
+            self.assertEqual(db.execute("SELECT payload,checksum FROM plan_page_sources WHERE task_id='history-task'").fetchall(), before)
+            self.assertEqual(plan_sources.load_task(db, self.task_id)['current'][self.task_id], approved)
+
+    def test_nonpage_dirty_source_repairs_unrelated_partitions_before_marking_clean(self):
+        self.seed_unrelated_history()
+        with closing(self.repo.tasks._connect()) as db, db:
+            db.execute("UPDATE plan_task_sources SET payload='broken' WHERE task_id='history-task'")
+            db.execute('UPDATE plan_set_ledger SET payload=payload WHERE id=1')
+        proposal = self.f.fixture.make_proposal(2)
+        with patch.object(plan_sources, 'prepare', wraps=plan_sources.prepare) as prepare:
+            self.repo.put_proposal(self.actor, proposal)
+        self.assertEqual(prepare.call_count, 2)
+        with closing(self.repo.tasks._connect()) as db:
+            row = db.execute("SELECT payload,checksum FROM plan_task_sources WHERE task_id='history-task'").fetchone()
+            self.assertIsInstance(plan_sources._check(row), dict)
+            self.assertEqual(db.execute('SELECT dirty FROM plan_source_meta').fetchone(), (0,))
+
+    def test_targeted_rebuild_removes_only_obsolete_target_partitions(self):
+        self.seed_unrelated_history()
+        with closing(self.repo.tasks._connect()) as db, db:
+            state = restore(db.execute('SELECT format,payload FROM plan_set_ledger').fetchone())
+            before = db.execute("SELECT payload,checksum FROM plan_page_sources WHERE task_id='history-task'").fetchall()
+            db.execute('INSERT INTO plan_page_sources VALUES(?,?,?,?)', (self.task_id, 'obsolete', '{}', 'invalid'))
+            plan_sources.sync(db, state, task_ids={self.task_id})
+            self.assertIsNone(db.execute("SELECT 1 FROM plan_page_sources WHERE plan_digest='obsolete'").fetchone())
+            self.assertEqual(db.execute("SELECT payload,checksum FROM plan_page_sources WHERE task_id='history-task'").fetchall(), before)
+
+    def test_nonpage_source_failure_keeps_ledger_and_projections_unchanged(self):
+        def snapshot():
+            with closing(self.repo.tasks._connect()) as db:
+                return (db.execute('SELECT format,payload FROM plan_set_ledger').fetchall(),
+                        db.execute('SELECT * FROM plan_task_sources ORDER BY task_id').fetchall(),
+                        db.execute('SELECT * FROM plan_page_sources ORDER BY task_id,plan_digest').fetchall(),
+                        db.execute('SELECT * FROM plan_source_meta').fetchall())
+        before = snapshot()
+        original = plan_sources._put
+        def fail(*args):
+            original(*args)
+            raise RuntimeError('source write failed after mutation')
+        with patch.object(plan_sources, '_put', side_effect=fail):
+            with self.assertRaises(RuntimeError):
+                self.repo.put_proposal(self.actor, self.f.fixture.make_proposal(2))
+        self.assertEqual(snapshot(), before)

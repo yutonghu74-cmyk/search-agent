@@ -13,6 +13,7 @@ import urllib.request
 
 from .errors import ServiceError
 from .image_quantities import image_count_evidence, number_value as _number_value
+from .requirement_draft import apply_edits, project_draft, draft_from_state, check_clarification
 from .dialogue import PROMPT as DIALOGUE_PROMPT, explicit_category_targets, resolve_count_edits
 from .expansion_models import (MAX_EXPANSIONS, normalize_grouped_expansion,
                                preview_edited_groups, seal_explicit_targets)
@@ -20,6 +21,7 @@ from .intent_model import IntentModelClient, ModelConfig, NoRedirect
 from .query_spec import digest
 from .conversation import conversation_effort, natural_reply, proposal_tool, task_status_reply, compact_proposal_tool
 from .conversation_timing import timed_call, increment
+from .pipeline_timing import measured
 from . import model_budget
 
 
@@ -29,6 +31,7 @@ EXPANSION_PROMPT = '''你是检索词表编辑器。根据用户需求生成或�
 如果有扩词反馈和当前词表，请按用户反馈调整：保留仍有用的词，删除不合适的词，补充能覆盖新角度的词；不将反馈误作已批准的清洗条件。
 如果用户给的是检索词写法示例，例如“一只哈士奇在花园奔跑”，应理解为期望“具体主体 + 可见动作/姿态 + 场景”的完整画面短语。把这种写法迁移到每个已有类别，猫仍写猫、狗仍写狗、兔子仍写兔子；可以使用不同品种，但不要把示例里的哈士奇复制给猫或兔子。生成多样、能直接用于检索的场景句，不要只重复旧词或把示例原句机械复制多次。
 保留用户主体、否定和范围，不机械凑词，不添加无关主题。不把否定内容扩成正向检索词。
+在语义成立时覆盖主体的同义词、常用别名、规范全称和缩写，以及具体画面表达；专有名词和编号原样保留，不编造别名或缩写。词数少时优先选择互补表达，不能为覆盖类型而凑词。所有候选词仍只进入待确认词表，不能声称已经执行。
 只返回 JSON：{"parent_label":字符串或null,"groups":[{"primary_label":字符串,"auxiliary_terms":[字符串]}]}。
 1到20组；每组0到200个有用且不重复的辅助词。输入的建议词数不是硬配额，可按语义覆盖和用户反馈增减，不为凑数添加无关词。主标签不重复，辅助词不等于主标签。
 主标签最多32字符，辅助词最多80字符。禁止输出身份、批准、脚本、数量配额或其他字段。'''
@@ -200,6 +203,7 @@ class ModelRuntime:
         return IntentModelClient(profile.config, opener=self.opener).interpret(raw_request)
 
     @model_budget.inference
+    @measured('requirement_understanding')
     def interpret_dialogue_turn(self, state, message, llm_id, *, count_hint=None):
         recent = state['messages'][state.get('context_start', 0):][-20:]
         context = {'current_request': {key: state.get(key) for key in
@@ -209,6 +213,7 @@ class ModelRuntime:
                         'effective_request': state.get('effective_request'),
                         'reference_request': state.get('reference_request'),
                         'category_targets': state.get('category_targets', []),
+                        'requirement_draft': draft_from_state(state),
                         'current_groups': state.get('current_groups', []),
                         'active_focus': 'search_terms' if state['stage'] == 'terms' else 'image_request',
                         'current_term_counts': {group['primary_label']: len(group['auxiliary_terms'])
@@ -239,10 +244,10 @@ class ModelRuntime:
     @staticmethod
     def _validate_dialogue_proposal(value, state, message, count_hint):
         fields = {'action', 'subject', 'target_count', 'media_type', 'constraints', 'question', 'reply',
-                  'count_edits', 'expansion_instruction'}
+                  'count_edits', 'expansion_instruction', 'requirement_edits', 'clarification'}
         if set(value) - fields or 'action' not in value:
             raise ServiceError('MODEL_OUTPUT_INVALID', 'Conversation interpretation is invalid', 502)
-        for field in fields - {'action', 'count_edits', 'expansion_instruction'}:
+        for field in fields - {'action', 'count_edits', 'expansion_instruction', 'requirement_edits', 'clarification'}:
             value.setdefault(field, None)
         if (value['action'] not in ('replace', 'update', 'confirm', 'revise_terms', 'confirm_terms', 'clarify', 'answer')
                 or value['subject'] is not None and (not isinstance(value['subject'], str) or not 1 <= len(value['subject'].strip()) <= 160)
@@ -254,6 +259,44 @@ class ModelRuntime:
                 or value.get('expansion_instruction') is not None and (
                     not isinstance(value['expansion_instruction'], str) or len(value['expansion_instruction']) > 1000)):
             raise ServiceError('MODEL_OUTPUT_INVALID', 'Conversation interpretation is invalid', 502)
+        semantic_edits = value.get('requirement_edits', [])
+        projected = dict(state)
+        if not isinstance(semantic_edits, list):
+            raise ServiceError('MODEL_OUTPUT_INVALID', 'requirement_edits must be a list', 502)
+        if semantic_edits:
+            if value['action'] not in ('update', 'replace', 'revise_terms'):
+                raise ServiceError('MODEL_OUTPUT_INVALID', 'Category edits belong to the pre-task request stage', 502)
+            if value.get('count_edits'):
+                raise ServiceError('MODEL_OUTPUT_INVALID', 'Do not mix category edits and count_edits', 502)
+            constraints = value.get('constraints')
+            previous_constraints = '；'.join(state.get('constraints', []))
+            if constraints and constraints != previous_constraints and constraints not in message:
+                raise ServiceError('MODEL_OUTPUT_INVALID',
+                    'Only change common constraints explicitly stated in this turn; do not copy category conditions into common constraints', 502)
+            try:
+                base = {} if value['action'] == 'replace' else state
+                draft = apply_edits(base, semantic_edits, message)
+                projected = project_draft(base, draft, value.get('target_count'))
+            except ValueError as error:
+                raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None
+        elif state.get('requirement_draft') is not None and value['action'] in ('update', 'revise_terms'):
+            if value.get('subject') not in (None, state.get('subject')):
+                raise ServiceError('MODEL_OUTPUT_INVALID', 'Use requirement_edits to change categories; do not overwrite their subject', 502)
+            try:
+                projected = project_draft(state, draft_from_state(state), value.get('target_count'))
+            except ValueError as error:
+                raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None
+        elif not isinstance(semantic_edits, list):
+            raise ServiceError('MODEL_OUTPUT_INVALID', 'requirement_edits must be a list', 502)
+        for field in ('subject', 'target_count', 'media_type'):
+            if value.get(field) is not None and not semantic_edits:
+                projected[field] = value[field]
+        if semantic_edits and value.get('media_type') is not None:
+            projected['media_type'] = value['media_type']
+        try:
+            check_clarification(value, projected, message)
+        except ValueError as error:
+            raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None
         edits = value.get('count_edits', [])
         if value['action'] == 'answer' and (not value['reply'] or not value['reply'].strip()):
             raise ServiceError('MODEL_OUTPUT_INVALID', 'Answer requires a natural reply', 502)
@@ -263,7 +306,7 @@ class ModelRuntime:
                 previous = '；'.join(previous)
             return value.get(field) is not None and value[field] != previous
         if (value['action'] in ('update', 'revise_terms') and edits == []
-                and not value.get('expansion_instruction') and not any(changed(field)
+                and not semantic_edits and not value.get('expansion_instruction') and not any(changed(field)
                     for field in ('subject', 'target_count', 'media_type', 'constraints'))):
             if value.get('reply'):
                 return natural_reply(value['reply'], 'request')
@@ -307,8 +350,11 @@ class ModelRuntime:
                 edit['target'] == 'images' for edit in edits):
             if proposed_count not in explicit_counts and proposed_count != count_hint:
                 value['target_count'] = None
+        if semantic_edits and count_hint is not None and projected.get('target_count') != count_hint:
+            raise ServiceError('INVALID_SPEC', 'Category counts conflict with the count setting', 422)
         return value
 
+    @measured('model_request')
     def _request(self, profile, system, content, *, conversation=None):
         mode = conversation_mode(system)
         body = {'model': profile.config.model, **profile.config.sampling(3000),
@@ -337,7 +383,10 @@ class ModelRuntime:
         for attempt in range(3):
             try:
                 increment('model_http_attempts')
-                with self.opener.open(request, timeout=min(profile.config.request_timeout_seconds or 60, model_budget.remaining())) as response:
+                from .cleaning_usage import observed_http
+                with observed_http(self.opener, request,
+                        timeout=min(profile.config.request_timeout_seconds or 60, model_budget.remaining()),
+                        model_kind=profile.kind) as response:
                     raw = model_budget.read_response(response, 1_000_001, profile.config.request_timeout_seconds or 60)
                     model_budget.remaining()
                 break
@@ -783,8 +832,9 @@ class ModelRuntime:
         raise ServiceError(failure_code, explanation[failure_code] if current_groups is not None else
                            '这次未能生成格式正确的词表，已自动重试一次。请重试生成。', 422)
 
+    @measured('keyword_expansion')
     def expand_chunk(self, raw_request, llm_id, vlm_id, *, limit, label=None,
-                     existing_terms=None, feedback_text=None, current_groups=None):
+                     existing_terms=None, feedback_text=None, current_groups=None, recall_context=None):
         """Ask the model for one bounded batch, never for the growing full table."""
         if (type(limit) is not int or not 1 <= limit <= 10 or not isinstance(raw_request, str)
                 or not 1 <= len(raw_request.strip()) <= 2000):
@@ -801,7 +851,12 @@ class ModelRuntime:
             '若未指定 group_label，识别原始需求的类别，每类最多返回本批数量。')
         content = json.dumps({'raw_request': raw_request, 'group_label': label, 'batch_size': limit,
                               'existing_terms': existing_terms, 'feedback': feedback_text,
-                              'current_groups': current_groups}, ensure_ascii=False)
+                              'current_groups': current_groups,
+                              **({'recall_context': recall_context} if recall_context is not None else {})}, ensure_ascii=False)
+        if recall_context is not None:
+            prompt += ('\nrecall_context 是后端核验的当前候选覆盖统计，仅作为改词依据，不能当作清洗或语义质量判定。'
+                       '保持 current_groups 中的组标签及用户原始主体、否定与数量要求；'
+                       '结合零命中和重复覆盖提出不同可见场景的辅助词，不提交来源变更或自动执行。')
         failure = None
         for attempt in range(2):
             try:

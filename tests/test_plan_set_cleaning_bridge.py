@@ -4,6 +4,9 @@ from io import BytesIO
 import json
 import time
 import unittest
+import sqlite3
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from dsh_retrieval.adapters.cleaning.approved_input import ApprovedManifestAccess
 from dsh_retrieval.adapters.task_storage.multi_rule import SQLiteMultiRuleApprovalRepository
@@ -15,6 +18,8 @@ from dsh_retrieval.multi_rule_contracts import (
 )
 from dsh_retrieval.candidate_contracts import CandidateManifestProposal
 from dsh_retrieval.query_spec import digest
+from dsh_retrieval.recall_capture import capture_run
+from dsh_retrieval.recall_evaluation import summarize_run
 from draft_helpers import BODY, confirmation
 from test_first_search_local import FirstSearchLocalTest
 
@@ -141,6 +146,26 @@ class PlanSetCleaningBridgeTest(unittest.TestCase):
         first_approval, first_view = clean(first_manifest.manifest_ref,
                                            'cumulative-first-cleaning')
         self.assertEqual((first_view['accepted_count'], first_view['gap']), (1, 1))
+        before_capture = f.tasks.repository.get(f.actor, task_id)
+        captured = capture_run(f.ledger, f.actor, task_id, corpus_digest='test-corpus')
+        measured = summarize_run(captured)
+        self.assertEqual(measured['totals']['selected_unique'], first_view['accepted_count'])
+        self.assertEqual(f.tasks.repository.get(f.actor, task_id), before_capture)
+        self.assertIsNone(measured['vlm_calls'])
+        with self.assertRaises(ServiceError):
+            capture_run(f.ledger, Actor(f.actor.tenant_id, 'other'), task_id)
+        with TemporaryDirectory() as directory:
+            copy_path = Path(directory) / 'snapshot.sqlite3'
+            with sqlite3.connect(f.ledger) as original, sqlite3.connect(copy_path) as copied:
+                original.backup(copied)
+            self.assertEqual(capture_run(copy_path, f.actor, task_id,
+                                          corpus_digest='test-corpus'), captured)
+            approved = f.local.repository.get_browse_current(f.actor, task_id)
+            with sqlite3.connect(copy_path) as copied:
+                copied.execute('UPDATE candidate_browse_hits SET branch=? WHERE source=?',
+                               ('foreign-branch', approved.proposal_digest))
+            with self.assertRaises(ValueError):
+                capture_run(copy_path, f.actor, task_id)
         pending_auto = repo.pending_auto_refill_events()
         self.assertEqual(len(pending_auto), 1)
         self.assertEqual(pending_auto[0]['result_set_id'], first_view['result_set_id'])

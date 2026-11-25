@@ -47,7 +47,14 @@ def validate_plan_set(actor: Actor, task: Task, plan_set: RetrievalPlanSet, *, r
     if (type(plan_set.epoch) is not int or plan_set.epoch < 1
             or not isinstance(plan_set.members, tuple) or not 1 <= len(plan_set.members) <= 64):
         raise ServiceError('INVALID_PLAN_SET', 'Plan set must contain 1-64 members', 422)
-    preview = compile_query_branches(json.loads(task.confirmed_proposal_json)['query_spec'])
+    spec = json.loads(task.confirmed_proposal_json)['query_spec']
+    preview = compile_query_branches(spec)
+    member_digests = {m.logical_preview_digest for m in plan_set.members if isinstance(m, PreparedQuery)}
+    accepted_digests = {preview['preview_digest']}
+    if member_digests - accepted_digests:
+        accepted_digests.add(compile_query_branches(spec, include_provenance=False)['preview_digest'])
+    if len(member_digests) > 1:
+        raise ServiceError('PLAN_SET_BINDING_MISMATCH', 'Mixed logical preview versions', 409)
     branches = {branch['branch_id']: branch for branch in preview['branches']}
     seen_queries, seen_plans, seen_branches = set(), set(), set()
     bindings = {}
@@ -58,7 +65,7 @@ def validate_plan_set(actor: Actor, task: Task, plan_set: RetrievalPlanSet, *, r
         validate_plan(plan)
         branch = branches.get(member.branch_id)
         if (plan.scope != plan_set.scope or plan.epoch != plan_set.epoch
-                or branch is None or member.logical_preview_digest != preview['preview_digest']
+                or branch is None or member.logical_preview_digest not in accepted_digests
                 or member.query_fingerprint != branch['query_fingerprint']):
             raise ServiceError('PLAN_SET_BINDING_MISMATCH', 'Mixed scope or logical query', 409)
         binding = plan.request.binding

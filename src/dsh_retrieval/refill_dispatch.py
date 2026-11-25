@@ -44,20 +44,40 @@ class RefillDispatchCoordinator:
             for event in self.repository.pending_dispatches():
                 if reservation_id is not None and event["reservation_id"] != reservation_id:
                     continue
-                validated = self.repository.validate_dispatch(event)
-                if validated is None:
-                    self.repository.mark_dispatched(event["event_id"], {
-                        "status": "superseded",
-                        "reservation_id": event["reservation_id"],
-                        "task_id": event["task_id"],
-                        "revision": event["revision"],
-                        "generation": event["generation"],
-                    })
+                try:
+                    self._dispatch_event(event)
+                except ServiceError:
+                    if reservation_id is not None:
+                        raise
+                    # Preserve this pending event and allow other users to proceed.
                     continue
-                actor, reservation = validated
-                result = self.handler.dispatch_refill(
-                    actor, reservation, key=event["dispatch_key"])
-                self.repository.mark_dispatched(event["event_id"], result)
+
+    def _dispatch_event(self, event):
+        validated = self.repository.validate_dispatch(event)
+        if validated is None:
+            self.repository.mark_dispatched(event["event_id"], {
+                "status": "superseded",
+                "reservation_id": event["reservation_id"],
+                "task_id": event["task_id"],
+                "revision": event["revision"],
+                "generation": event["generation"],
+            })
+            return
+        actor, reservation = validated
+        try:
+            result = self.handler.dispatch_refill(
+                actor, reservation, key=event["dispatch_key"])
+        except ServiceError as error:
+            if error.code != 'SEARCH_BUDGET_EXHAUSTED':
+                raise
+            self.repository.record_execution_stop(actor, event['task_id'],
+                'EXECUTION_LIMIT_REACHED', expected_revision=reservation.revision,
+                expected_generation=reservation.generation)
+            result = {'status': 'budget_exhausted', 'task_id': event['task_id'],
+                      'reservation_id': reservation.reservation_id,
+                      'revision': reservation.revision, 'generation': reservation.generation,
+                      'code': error.code}
+        self.repository.mark_dispatched(event["event_id"], result)
 
     def _work(self):
         while not self._closed.is_set():

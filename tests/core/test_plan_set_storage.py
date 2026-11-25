@@ -23,6 +23,26 @@ from draft_helpers import make_service, confirmation
 
 
 class PlanSetStorageTest(unittest.TestCase):
+    def test_recovery_isolates_invalid_binding_without_rewriting_or_approving_it(self):
+        from contextlib import closing
+        from dsh_retrieval.adapters.task_storage.plan_sets import restore, serialize
+        self.repo.put_proposal(self.actor, self.proposal)
+        approved, _ = self.confirm()
+        with closing(self.repo.tasks._connect()) as db, db:
+            state = restore(db.execute('SELECT format,payload FROM plan_set_ledger').fetchone())
+            state['current'][self.task_id] = replace(approved, members=(
+                replace(approved.members[0], branch_id='missing-branch'), *approved.members[1:]))
+            db.execute('UPDATE plan_set_ledger SET payload=?', (serialize(state),))
+            before = db.execute('SELECT payload FROM plan_set_ledger').fetchone()[0]
+        with self.assertLogs('dsh_retrieval.adapters.task_storage.plan_sets', level='WARNING') as captured:
+            self.assertEqual(self.repo.recoverable(), ())
+        self.assertIn('PLAN_SET_BINDING_MISMATCH', captured.output[0])
+        with self.assertRaises(ServiceError) as caught:
+            self.repo.get_current(self.actor, self.task_id)
+        self.assertEqual(caught.exception.code, 'PLAN_SET_BINDING_MISMATCH')
+        with closing(self.repo.tasks._connect()) as db:
+            self.assertEqual(db.execute('SELECT payload FROM plan_set_ledger').fetchone()[0], before)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

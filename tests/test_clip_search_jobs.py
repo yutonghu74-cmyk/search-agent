@@ -68,6 +68,74 @@ class CLIPSearchJobsTest(unittest.TestCase):
         self.tasks = Tasks(self.actor, self.task)
         self.client = Client()
 
+    def test_shard_groups_persist_recover_and_reject_configuration_drift(self):
+        from types import SimpleNamespace
+        declared = tuple(f's{i}.db' for i in range(7))
+        second = replace(self.request, plan_id='plan-2',
+            binding=replace(self.binding, binding_id='clip-group-2'))
+        self.members = (CLIPJobMember('branch-1', self.request, declared[:4], declared),
+                        CLIPJobMember('branch-1', second, declared[4:], declared))
+        job_id, _ = self.create()
+        self.client.endpoints = {self.binding.binding_id: SimpleNamespace(
+            shard_paths=declared[:4], declared_shards=declared)}
+        executor = CLIPSearchExecutor(self.tasks, self.jobs, self.client)
+        executor.tick(job_id)
+        row = self.jobs.view(job_id)['coverage']['queries'][0]
+        self.assertEqual((row['total'], row['visited'], row['pending']), (7, 4, 3))
+        reopened = SQLiteCLIPSearchJobs(self.path)
+        self.assertEqual(reopened.job(job_id).members, self.members)
+        self.assertEqual(reopened.view(job_id)['coverage'], self.jobs.view(job_id)['coverage'])
+        # A group must be executed using its frozen shard list. No HTTP call on drift.
+        self.client.endpoints['clip-group-2'] = SimpleNamespace(
+            shard_paths=('changed.db',), declared_shards=declared)
+        calls = len(self.client.calls)
+        with self.assertRaises(ServiceError) as caught:
+            CLIPSearchExecutor(self.tasks, reopened, self.client).tick(job_id)
+        self.assertEqual(caught.exception.code, 'SHARD_CATALOG_CHANGED')
+        self.assertEqual(len(self.client.calls), calls)
+        self.assertFalse(reopened.view(job_id)['coverage']['queries'][0]['complete'])
+
+    def test_business_pause_does_not_reserve_or_call_network_and_can_resume(self):
+        job_id, _ = self.create()
+        gate = ['CLEANING_IN_PROGRESS']
+        executor = CLIPSearchExecutor(self.tasks, self.jobs, self.client,
+            continuation=lambda task, phase: gate[0])
+        before = self.jobs.view(job_id)
+        for reason in ('CLEANING_IN_PROGRESS', 'TARGET_MET', 'AWAIT_REFILL'):
+            gate[0] = reason
+            result = executor.tick(job_id)
+            self.assertEqual((result['status'], result['pause_reason']), ('paused', reason))
+            self.assertEqual(result['network_attempts'], 0)
+            self.assertEqual(self.jobs.view(job_id), before)
+            self.assertEqual(self.client.calls, [])
+        gate[0] = None
+        self.assertEqual(executor.tick(job_id)['network_attempts'], 1)
+        gate[0] = 'TARGET_MET'
+        pending = self.jobs.pending_requests(job_id)[0][1]
+        result = executor.tick_refill(job_id, plan_id=pending.plan_id, expected_cursor=pending.cursor)
+        self.assertEqual(result['status'], 'paused')
+        self.assertEqual(len(self.client.calls), 1)
+
+    def test_initial_window_skips_alternative_and_never_deepens_first_member(self):
+        second = replace(self.request, plan_id='alternative')
+        self.members = (CLIPJobMember('branch-1', self.request, windowed=True),
+                        CLIPJobMember('branch-1', second, windowed=True))
+        job_id, _ = self.create()
+        def gate(task, phase):
+            return 'CANDIDATE_WINDOW_READY' if self.jobs.view(job_id)['members'][0]['pages'] else None
+        executor = CLIPSearchExecutor(self.tasks, self.jobs, self.client, continuation=gate,
+            initial_selector=lambda task, job: frozenset({self.request.plan_id}))
+        result = executor.tick(job_id, max_requests=3)
+        self.assertEqual(result['pause_reason'], 'CANDIDATE_WINDOW_READY')
+        self.assertEqual(result['network_attempts'], 1)
+        self.assertEqual([r['pages'] for r in self.jobs.view(job_id)['members']], [1, 0])
+        reopened = SQLiteCLIPSearchJobs(self.path)
+        self.assertEqual(reopened.job(job_id).members, self.members)
+        with self.assertRaises(ServiceError) as caught:
+            CLIPSearchExecutor(self.tasks, reopened, self.client).tick(job_id)
+        self.assertEqual(caught.exception.code, 'SEARCH_GATE_NOT_CONFIGURED')
+        self.assertEqual(len(self.client.calls), 1)
+
     def create(self):
         return self.jobs.create(self.scope, "auth-v1", self.members)
 

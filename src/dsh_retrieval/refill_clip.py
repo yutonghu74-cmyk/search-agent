@@ -41,7 +41,11 @@ class LocalCLIPRefillAdapter:
         branches = {row["branch_id"]: row for row in compile_query_branches(
             json.loads(task.confirmed_proposal_json)["query_spec"])["branches"]}
         positions = []
-        for member, head in zip(approved.members, heads):
+        # Spread refill across approved queries/sources before deepening one.
+        # Stable ties retain the original-query-first plan order. Page counts
+        # come from durable checkpoints, so restart needs no scheduling state.
+        for member, head in sorted(zip(approved.members, heads),
+                                   key=lambda pair: pair[1].committed_pages):
             request = RetrievalCoordinator._next(head)
             if request is None:
                 continue
@@ -75,7 +79,8 @@ class LocalCLIPRefillAdapter:
         if approved is None or approved.proposal_digest != params["set_digest"]:
             raise ServiceError("PLAN_NOT_CURRENT", "LOCAL_CLIP refill plan changed", 409)
         gateway = self.search._adapter_for_plan(actor, reservation.task_id, approved)
-        result = RetrievalCoordinator(self.search.repository, gateway).tick_position(
+        result = RetrievalCoordinator(self.search.repository, gateway,
+            budget=getattr(self.search, 'search_budget', None)).tick_position(
             actor, approved, plan_id=params["plan_id"],
             expected_cursor=position["position"]["cursor"])
         if result["status"] == "retry_pending":
@@ -99,7 +104,8 @@ class CombinedCLIPRefillAdapter:
         if job_id is None:
             return ()
         positions = []
-        for branch_id, request, pages in self.search.jobs.pending_requests(job_id):
+        for branch_id, request, pages in sorted(
+                self.search.jobs.pending_requests(job_id), key=lambda row: row[2]):
             params = {"mode": "CLIP_COMBINED", "job_id": job_id,
                       "branch_id": branch_id, "plan_id": request.plan_id,
                       "binding_id": request.binding.binding_id,
@@ -124,6 +130,9 @@ class CombinedCLIPRefillAdapter:
         result = self.search.executor.tick_refill(
             params["job_id"], plan_id=params["plan_id"],
             expected_cursor=position["position"]["cursor"])
+        if result.get('status') == 'paused':
+            raise ServiceError('SEARCH_BUSY', 'Business cleaning or target gate paused retrieval',
+                               503, retryable=True)
         outcome = result["outcomes"][0] if result["outcomes"] else None
         if outcome and outcome["status"] in {"retry_pending", "failed"}:
             raise ServiceError("DEPENDENCY_UNAVAILABLE", "combined CLIP refill retry pending",

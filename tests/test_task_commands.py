@@ -77,14 +77,19 @@ class TaskCommandsTest(unittest.TestCase):
         body = {'text': '解释当前条件', 'llm_id': 'text', 'expected_revision': 1,
                 'expected_task_version': self.task['task_version']}
         base = f'http://127.0.0.1:{server.server_port}/v1/retrieval/tasks/{self.task["task_id"]}'
+        performance_headers = []
         def call(suffix, payload=None, owner='owner', command_key='async-task'):
             request = Request(base + suffix, data=json.dumps(payload).encode() if payload is not None else None,
                 headers={'Content-Type': 'application/json', 'X-Tenant-Id': 'tenant', 'X-User-Id': owner,
                          'Idempotency-Key': command_key, 'Prefer': 'respond-async'})
-            with urlopen(request, timeout=2) as response: return response.status, json.load(response)
+            with urlopen(request, timeout=2) as response:
+                performance_headers.append(response.headers.get('X-Performance-Trace-Id'))
+                return response.status, json.load(response)
         try:
             start = time.perf_counter(); status, receipt = call('/conversation-turn', body)
             self.assertEqual(status, 202, receipt)
+            accepted_trace = performance_headers[-1]
+            self.assertRegex(accepted_trace, r'^[a-f0-9]{32}$')
             self.assertFalse(release.is_set()); self.assertTrue(started.wait(2))
             self.assertLess(time.perf_counter()-start, 2)
             status, duplicate = call('/conversation-turn', body)
@@ -104,6 +109,7 @@ class TaskCommandsTest(unittest.TestCase):
             self.assertEqual(receipt['status'], 'completed', receipt)
             self.assertTrue(receipt['result']['is_current'])
             self.assertIn('queue_wait_ms', receipt['result']['timings'])
+            self.assertNotEqual(receipt['result']['timings']['trace_id'], accepted_trace)
             self.assertEqual(calls, [1])
             draft = fast['feedback_draft']
             self.service.confirm_feedback(self.actor, self.task['task_id'], 'advance-version', {

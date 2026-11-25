@@ -44,6 +44,16 @@ class PlatformAccessTest(unittest.TestCase):
         with self.assertRaises(ServiceError):
             self.identity.authenticate({'X-User-Id': 'admin'})
 
+    def test_duplicate_authorization_is_rejected_before_identity_lookup(self):
+        from email.message import Message
+        headers = Message()
+        headers['Authorization'] = 'Bearer personal-token'
+        headers['authorization'] = 'Bearer another-user'
+        with self.assertRaises(ServiceError) as caught:
+            self.identity.authenticate(headers)
+        self.assertEqual(caught.exception.status, 401)
+        self.assertEqual(self.requests, [])
+
     def test_rechecks_membership_and_passes_project(self):
         self.access.require_access(self.actor, '101', 'default', 'read')
         self.assertEqual(self.requests[-1].get_header('X-app-id'), '101')
@@ -103,6 +113,7 @@ class PlatformAccessTest(unittest.TestCase):
             create_handler(service, identity_mode='platform', identity_provider=self.identity)
         service.projects = self.access
         handler = create_handler(service, identity_mode='platform', identity_provider=self.identity)
+        self.addCleanup(handler.task_commands.store.connection.close)
         instance = object.__new__(handler)
         instance.headers = {'Authorization': 'Bearer personal-token', 'X-User-Id': 'fake'}
         self.assertEqual(instance._actor(), self.actor)
@@ -196,6 +207,7 @@ class PlatformAccessTest(unittest.TestCase):
         from urllib.request import Request, urlopen
         service = TaskService(InMemoryTaskRepository(), self.access)
         handler = create_handler(service, identity_mode='platform', identity_provider=self.identity)
+        self.addCleanup(handler.task_commands.store.connection.close)
         server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -247,6 +259,7 @@ class PlatformAccessTest(unittest.TestCase):
         service = TaskService(InMemoryTaskRepository(), self.access)
         handler = create_handler(service, identity_mode='platform', identity_provider=self.identity,
                                  model_runtime=runtime)
+        self.addCleanup(handler.task_commands.store.connection.close)
         instance = object.__new__(handler)
         instance._platform_actor = self.actor
         instance.headers = {'X-Tenant-Id': 'forged', 'X-User-Id': 'admin'}

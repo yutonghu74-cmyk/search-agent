@@ -3,6 +3,7 @@ import json
 import re
 
 from .errors import ServiceError
+from .requirement_draft import edit_schema
 
 
 def conversation_effort(model):
@@ -47,6 +48,12 @@ def proposal_tool(name):
                   'target_count': {'type': ['integer', 'null'], 'minimum': 1, 'maximum': 10000},
                   'expansion_instruction': nullable_text(1000)}
     if name == 'update_request_draft':
+        properties['requirement_edits'] = edit_schema()
+        properties['clarification'] = {'type': ['object', 'null'], 'properties': {
+            'field': {'enum': ['media_type', 'subject', 'target_count', 'scope', 'conflict']},
+            'source_text': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
+            'question': {'type': 'string', 'minLength': 1, 'maxLength': 200}},
+            'required': ['field', 'source_text', 'question'], 'additionalProperties': False}
         discriminator = 'action'
         properties.update(action={'enum': ['update', 'revise_terms', 'replace', 'clarify', 'confirm', 'confirm_terms', 'answer']},
                           subject=nullable_text(160), constraints=nullable_text(300), question=nullable_text(200),

@@ -78,6 +78,9 @@ def confirmed_rules_digest(task: Task) -> str:
     cannot supply or override it.
     """
 
+    if type(task) is Task and task.media_type == "video":
+        from .whole_video import video_conditions_digest
+        return video_conditions_digest(task)
     if (type(task) is not Task or type(task.confirmed_revision) is not int
             or task.confirmed_revision < 1 or not isinstance(task.confirmed_proposal_json, str)):
         raise ServiceError("RECIPE_RULE_MISMATCH", "Confirmed cleaning rules unavailable", 409)
@@ -115,6 +118,8 @@ def compile_confirmed_recipe(task: Task, registry) -> CleaningRecipe:
     if type(registry) is not ReleasedDetectorRegistry:
         raise ValueError("trusted released detector registry required")
     registry.preflight()
+    if type(task) is Task and task.media_type == "video":
+        return _compile_video_recipe(task, registry)
     review_digest = confirmed_rules_digest(task)
     try:
         proposal = json.loads(task.confirmed_proposal_json)
@@ -215,6 +220,9 @@ def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
             or type(task.confirmed_revision) is not int or task.confirmed_revision < 1
             or not isinstance(task.confirmed_proposal_json, str)):
         mismatch()
+    if task.media_type == "video":
+        _require_video_recipe(task, recipe)
+        return
     try:
         proposal = json.loads(task.confirmed_proposal_json)
         spec = proposal["query_spec"]
@@ -274,3 +282,36 @@ def require_confirmed_rules(task: Task, recipe: CleaningRecipe) -> None:
                     mismatch()
     except (TypeError, ValueError, KeyError, AttributeError, RecursionError):
         mismatch()
+
+
+def _compile_video_recipe(task, registry):
+    """One released aggregate predicate binds the entire confirmed video condition set.
+
+    The task-scoped detector must evaluate clauses with three-state all/any
+    semantics; no image detector or similarity score is a video verifier.
+    """
+    from .whole_video import VIDEO_PREDICATE, video_conditions_digest, video_detector_config_digest
+    review = video_conditions_digest(task)
+    matches = [b for b in registry.bindings if b.predicate_ref == VIDEO_PREDICATE and b.media_type == 'video']
+    if len(matches) != 1:
+        raise ServiceError('DETECTOR_NOT_RELEASED', 'No verified whole-video condition evaluator', 409)
+    binding = matches[0]
+    detector = registry.detectors.get(binding.backend_ref)
+    if (getattr(detector, 'source_review_digest', None) != review
+            or getattr(detector, 'release_config_digest', None) != video_detector_config_digest(task)):
+        raise ServiceError('DETECTOR_NOT_RELEASED', 'Video evaluator is not bound to confirmed conditions', 409)
+    recipe = CleaningRecipe('video', review, registry.registry_digest,
+        (DetectionStep('video-content', binding.backend_ref, binding.validator_ref, binding.evidence_ref),),
+        (CleaningRule('video-content', 'video-content', VIDEO_PREDICATE, 'eq', True),))
+    registry.require_recipe(recipe)
+    _require_video_recipe(task, recipe)
+    return recipe
+
+
+def _require_video_recipe(task, recipe):
+    from .whole_video import VIDEO_PREDICATE, video_conditions_digest
+    if (recipe.media_type != 'video' or recipe.source_review_digest != video_conditions_digest(task)
+            or len(recipe.steps) != 1 or recipe.steps[0].step_id != 'video-content'
+            or recipe.rules != (CleaningRule('video-content', 'video-content', VIDEO_PREDICATE, 'eq', True),)
+            or recipe.instructions):
+        raise ServiceError('RECIPE_RULE_MISMATCH', 'Video recipe differs from confirmed conditions', 409)

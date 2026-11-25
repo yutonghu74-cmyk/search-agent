@@ -445,6 +445,23 @@
           }
         }
       ]
+    },
+    "retrieval_execution": {
+      "$ref": "./confirmed-terms-execution.schema.json"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "retrieval_execution"
+        ]
+      },
+      "then": {
+        "required": [
+          "grouped_expansion"
+        ]
+      }
+    }
+  ]
 }

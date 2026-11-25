@@ -31,6 +31,9 @@ MAX_PAYLOAD = 16 * 1024 * 1024
 class CLIPJobMember:
     branch_id: str
     request: CLIPTextSearchRequest
+    shard_group: tuple[str, ...] = ()
+    declared_shards: tuple[str, ...] = ()
+    windowed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,13 +97,24 @@ class SQLiteCLIPSearchJobs:
                     or request.cursor is not None or request.plan_version != scope.generation
                     or request.binding.library_id == "" or not request.query_text.strip()):
                 raise ServiceError("INVALID_RETRIEVAL_PLAN", "Invalid combined CLIP member", 422)
+            if (bool(member.shard_group) != bool(member.declared_shards)
+                    or type(member.shard_group) is not tuple or type(member.declared_shards) is not tuple
+                    or len(member.shard_group) > 4
+                    or any(type(x) is not str or not x for x in member.declared_shards)
+                    or not set(member.shard_group) <= set(member.declared_shards)):
+                raise ServiceError('INVALID_RETRIEVAL_PLAN', 'Invalid shard coverage snapshot', 422)
+            if type(member.windowed) is not bool:
+                raise ServiceError('INVALID_RETRIEVAL_PLAN', 'Invalid window policy', 422)
             plans.add(request.plan_id)
 
     @staticmethod
     def _initial(scope, authorization_version, members, now):
         frozen = {"scope": asdict(scope), "authorization_version": authorization_version,
                   "members": [{"branch_id": member.branch_id,
-                               "request": _request_to_dict(member.request)} for member in members]}
+                               "request": _request_to_dict(member.request),
+                               **({"shard_group": member.shard_group, "declared_shards": member.declared_shards}
+                                  if member.shard_group else {}),
+                               **({'windowed': True} if member.windowed else {})} for member in members]}
         job_id = "clipjob_" + digest(frozen)[7:]
         return job_id, {
             "schema": "clip-search-job@1", "job_id": job_id, **frozen,
@@ -193,7 +207,9 @@ class SQLiteCLIPSearchJobs:
     def job(self, job_id):
         def read(payload):
             scope = RetrievalScope(**payload["scope"])
-            members = tuple(CLIPJobMember(row["branch_id"], _request_from_dict(row["request"]))
+            members = tuple(CLIPJobMember(row["branch_id"], _request_from_dict(row["request"]),
+                tuple(row.get("shard_group", ())), tuple(row.get("declared_shards", ())),
+                row.get("windowed", False))
                             for row in payload["members"])
             return CLIPSearchJob(payload["job_id"], scope, payload["authorization_version"], members,
                                  payload["status"], payload["created_at"], payload["updated_at"])
@@ -243,12 +259,14 @@ class SQLiteCLIPSearchJobs:
         except sqlite3.Error as error:
             raise ServiceError("STORAGE_UNAVAILABLE", "CLIP search lookup unavailable", 503) from error
 
-    def next_request(self, job_id):
+    def next_request(self, job_id, *, plan_ids=None):
         def reserve(payload):
             if payload["status"] in ("complete", "failed", "superseded"):
                 return None
             candidates = [(state["pages"], index, state) for index, state in enumerate(payload["state"])
-                          if not state["done"] and state["attempts"] < 3]
+                          if not state["done"] and state["attempts"] < 3
+                          and (plan_ids is None or (payload["members"][index]["request"]["plan_id"] in plan_ids
+                               and state["pages"] == 0))]
             if not candidates:
                 payload["status"] = "failed"
                 return None
@@ -316,6 +334,7 @@ class SQLiteCLIPSearchJobs:
             state["attempts"] = 0
             state["last_error"] = None
             state["done"] = batch.page.next_cursor is None
+            state["terminal_reason"] = batch.page.stop_reason
             payload["status"] = ("complete" if all(row["done"] for row in payload["state"])
                                  else "running")
             return state["pages"]
@@ -352,6 +371,7 @@ class SQLiteCLIPSearchJobs:
                                  "pages": state["pages"], "done": state["done"],
                                  "last_error": state["last_error"]}
                                 for member, state in zip(payload["members"], payload["state"])],
+                    "coverage": execution_coverage(payload["members"], payload["state"]),
                     "items": items}
         return self._transaction(job_id, False, read)
 
@@ -368,8 +388,24 @@ class SQLiteCLIPSearchJobs:
 
 
 class CLIPSearchExecutor:
-    def __init__(self, tasks, jobs, client):
-        self.tasks, self.jobs, self.client = tasks, jobs, client
+    def __init__(self, tasks, jobs, client, *, budget=None, continuation=None, initial_selector=None):
+        self.tasks, self.jobs, self.client, self.budget = tasks, jobs, client, budget
+        self.continuation = continuation
+        self.initial_selector = initial_selector
+
+    def _pause(self, task, job, phase):
+        if any(m.windowed for m in job.members) and (self.continuation is None
+                or phase == 'initial' and self.initial_selector is None):
+            raise ServiceError('SEARCH_GATE_NOT_CONFIGURED', 'Persisted window policy requires dispatch gate', 503)
+        if self.continuation is None or not self._refill_current(task, job):
+            return None
+        reason = self.continuation(task, phase)
+        if reason is None:
+            return None
+        if reason not in {'CLEANING_IN_PROGRESS', 'TARGET_MET', 'AWAIT_REFILL', 'CANDIDATE_WINDOW_READY'}:
+            raise ServiceError('INVALID_SEARCH_GATE', 'Invalid business continuation decision', 503)
+        return {**self.jobs.view(job.job_id), 'status': 'paused', 'pause_reason': reason,
+                'network_attempts': 0, 'outcomes': []}
 
     @staticmethod
     def _current(task, job):
@@ -390,7 +426,25 @@ class CLIPSearchExecutor:
                 job.scope.task_id, job.scope.revision, job.scope.generation,
                 job.scope.requirement_digest) and scope.task_version >= job.scope.task_version
 
+    def _search(self, job, context, request):
+        member = next(m for m in job.members if m.request.plan_id == request.plan_id)
+        if member.shard_group:
+            endpoint = self.client.endpoints.get(request.binding.binding_id)
+            if (endpoint is None or endpoint.shard_paths != member.shard_group
+                    or endpoint.declared_shards != member.declared_shards):
+                raise ServiceError('SHARD_CATALOG_CHANGED', 'Frozen shard configuration changed', 409)
+        if self.budget is not None:
+            self.budget._charge(job.scope, request.batch_size)
+        return self.client.search_text(context, request)
+
     def tick(self, job_id, *, max_requests=1):
+        from contextlib import nullcontext
+        job = self.jobs.job(job_id)
+        guard = self.budget.execution(job.scope) if self.budget is not None else nullcontext()
+        with guard:
+            return self._tick(job_id, max_requests=max_requests)
+
+    def _tick(self, job_id, *, max_requests=1):
         if type(max_requests) is not int or not 1 <= max_requests <= 64:
             raise ServiceError("INPUT_LIMIT", "Bounded CLIP search tick required", 422)
         job = self.jobs.job(job_id)
@@ -398,17 +452,21 @@ class CLIPSearchExecutor:
         attempts, outcomes = 0, []
         for _ in range(max_requests):
             task = self.tasks.get(actor, job.scope.task_id)
+            paused = self._pause(task, job, 'initial')
+            if paused is not None:
+                return {**paused, 'network_attempts': attempts, 'outcomes': outcomes}
             if not self._current(task, job):
                 self.jobs.supersede(job_id)
                 break
-            reserved = self.jobs.next_request(job_id)
+            selected = self.initial_selector(task, job) if self.initial_selector else None
+            reserved = self.jobs.next_request(job_id, plan_ids=selected)
             if reserved is None:
                 break
             branch_id, request, expected_cursor = reserved
             attempts += 1
             context = AccessContext(actor, job.scope.task_id, "retrieval", job.authorization_version)
             try:
-                batch = self.client.search_text(context, request)
+                batch = self._search(job, context, request)
                 current = self.tasks.get(actor, job.scope.task_id)
                 if not self._current(current, job):
                     self.jobs.supersede(job_id)
@@ -430,10 +488,20 @@ class CLIPSearchExecutor:
                 "outcomes": outcomes, **self.jobs.view(job_id)}
 
     def tick_refill(self, job_id, *, plan_id, expected_cursor):
+        from contextlib import nullcontext
+        job = self.jobs.job(job_id)
+        guard = self.budget.execution(job.scope) if self.budget is not None else nullcontext()
+        with guard:
+            return self._tick_refill(job_id, plan_id=plan_id, expected_cursor=expected_cursor)
+
+    def _tick_refill(self, job_id, *, plan_id, expected_cursor):
         """Execute one exact pending position after downstream task-version advances."""
         job = self.jobs.job(job_id)
         actor = Actor(job.scope.tenant_id, job.scope.owner_user_id)
         task = self.tasks.get(actor, job.scope.task_id)
+        paused = self._pause(task, job, 'refill')
+        if paused is not None:
+            return paused
         if not self._refill_current(task, job):
             self.jobs.supersede(job_id)
             return {"job_id": job_id, "network_attempts": 0,
@@ -446,7 +514,7 @@ class CLIPSearchExecutor:
         branch_id, request, cursor = reserved
         context = AccessContext(actor, job.scope.task_id, "retrieval", job.authorization_version)
         try:
-            batch = self.client.search_text(context, request)
+            batch = self._search(job, context, request)
             if not self._refill_current(self.tasks.get(actor, job.scope.task_id), job):
                 self.jobs.supersede(job_id)
                 return {"job_id": job_id, "network_attempts": 1,
@@ -465,3 +533,25 @@ class CLIPSearchExecutor:
                 raise
         return {"job_id": job_id, "network_attempts": 1, "outcomes": [outcome],
                 **self.jobs.view(job_id)}
+
+
+def execution_coverage(members, states):
+    """Per-query physical coverage; a page observed is not exhaustive search."""
+    branches = {}
+    for member, state in zip(members, states):
+        if not member.get('declared_shards'):
+            continue
+        key = (member['branch_id'], member['request']['binding']['library_id'],
+               member['request']['binding']['index_version'])
+        row = branches.setdefault(key, dict(total=set(), visited=set(), exhausted=set(), failed=set()))
+        row['total'].update(member['declared_shards'])
+        group = set(member['shard_group'])
+        if state['pages'] > 0: row['visited'].update(group)
+        if state['done'] and state.get('terminal_reason') == 'exhausted' and not state['last_error']:
+            row['exhausted'].update(group)
+        if state['last_error']: row['failed'].update(group)
+    return {'known': bool(branches) and all(m.get('declared_shards') for m in members), 'queries': [dict(branch_id=k[0], library_id=k[1],
+        index_version=k[2], total=len(r['total']), visited=len(r['visited']), exhausted=len(r['exhausted']),
+        failed=len(r['failed']), pending=len(r['total'] - r['visited']),
+        complete=r['total'] == r['exhausted'] and not r['failed'])
+        for k, r in branches.items()]}

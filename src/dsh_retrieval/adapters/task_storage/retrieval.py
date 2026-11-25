@@ -6,6 +6,9 @@ changes are not made atomic by SQLite. The durable events are an unsent local
 outbox only, with no relay, leases, or production delivery guarantee.
 """
 from contextlib import closing
+from . import transactions
+from .transactions import checked_access
+from . import ledger_rows
 from dataclasses import asdict, replace
 import json
 import sqlite3
@@ -109,26 +112,28 @@ class SQLiteRetrievalPlanRepository:
         try:
             with closing(self.tasks._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
-                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='retrieval_ledger'").fetchone()
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='retrieval_ledger'").fetchone()
                 if exists:
                     load_state(db.execute("SELECT format,payload FROM retrieval_ledger WHERE id=1").fetchone())
                 else:
                     db.execute("CREATE TABLE retrieval_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)")
                     db.execute("INSERT INTO retrieval_ledger VALUES (1,1,?)", (dump_state(empty_state()),))
+                ledger_rows.migrate(db, 'retrieval_ledger', load_state)
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "retrieval ledger unavailable", 503, retryable=True) from exc
 
-    def _transaction(self, write, operation):
+    @transactions.staged()
+    def _transaction(self, write, operation, *, with_connection=False):
         try:
             with closing(self.tasks._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                 memory = self.tasks._load(db.execute("SELECT format,payload FROM local_ledger WHERE id=1").fetchone())
                 state = load_state(db.execute("SELECT format,payload FROM retrieval_ledger WHERE id=1").fetchone())
-                result = operation(memory, state)
+                result = operation(memory, state, db) if with_connection else operation(memory, state)
                 if write:
-                    db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                    ledger_rows.write_memory(db, memory)
                     self.tasks._sync_task_read_summaries(db, memory)
-                    db.execute("UPDATE retrieval_ledger SET payload=? WHERE id=1", (dump_state(state),))
+                    ledger_rows.write_state(db, 'retrieval_ledger', 1, state)
                 return result
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "retrieval transaction failed", 503, retryable=True) from exc
@@ -137,10 +142,10 @@ class SQLiteRetrievalPlanRepository:
         task = memory.get(actor, task_id)
         if self.projects is None or self.authorization is None:
             raise ServiceError("ACCESS_DENIED", "retrieval authority not configured", 403)
-        self.projects.require_access(actor, task.project_id, task.dimension_id, action)
+        checked_access(self.projects, actor, task.project_id, task.dimension_id, action)
         if plan is not None:
             context = AccessContext(actor, task_id, "retrieval", "current")
-            self.authorization.require_access(context, "library:" + plan.request.binding.library_id, "search")
+            checked_access(self.authorization, context, "library:" + plan.request.binding.library_id, "search")
         return task
 
     @staticmethod
@@ -158,26 +163,32 @@ class SQLiteRetrievalPlanRepository:
                                details={"expected_epoch": expected})
 
     def put_proposal(self, actor, proposal):
-        def put(memory, state):
-            task = self._authorize(memory, actor, proposal.scope.task_id, proposal, "approve")
-            validate_plan(proposal)
-            key = (task.task_id, proposal.request.plan_id)
-            old = state["proposals"].get(key)
-            if old is not None:
-                if old != proposal:
-                    raise ServiceError("PLAN_ID_CONFLICT", "plan ID is immutable", 409)
-                return
-            validate_scope(actor, task, proposal.scope)
-            self._epoch(state, proposal)
-            self._authorize(memory, actor, task.task_id, proposal, "approve")
-            state["proposals"][key] = proposal
-        return self._transaction(True, put)
+        return self._transaction(True, lambda memory, state: self._put_proposal(memory, state, actor, proposal))
 
-    def confirm(self, actor, task_id, plan_id, *, key, proposal_digest, expected_task_version, action):
+    def _put_proposal(self, memory, state, actor, proposal):
+        """Same validation for ordinary writes and atomic Agent handoff writes."""
+        task = self._authorize(memory, actor, proposal.scope.task_id, proposal, "approve")
+        validate_plan(proposal)
+        key = (task.task_id, proposal.request.plan_id)
+        old = state["proposals"].get(key)
+        if old is not None:
+            if old != proposal:
+                raise ServiceError("PLAN_ID_CONFLICT", "plan ID is immutable", 409)
+            return
+        validate_scope(actor, task, proposal.scope)
+        self._epoch(state, proposal)
+        self._authorize(memory, actor, task.task_id, proposal, "approve")
+        state["proposals"][key] = proposal
+
+    def confirm(self, actor, task_id, plan_id, *, key, proposal_digest, expected_task_version, action,
+                on_confirm=None):
         require_key(key)
         fingerprint = digest({"plan_id": plan_id, "digest": proposal_digest,
                               "version": expected_task_version, "action": action})
-        def approve(memory, state):
+        def approve(memory, state, db):
+            def linked(value, replayed):
+                if on_confirm is not None: on_confirm(db, value)
+                return value, replayed
             self._authorize(memory, actor, task_id, action="approve")
             proposal = self._proposal(state, task_id, plan_id)
             task = self._authorize(memory, actor, task_id, proposal, "approve")
@@ -186,7 +197,7 @@ class SQLiteRetrievalPlanRepository:
             if old is not None:
                 if old[0] != fingerprint:
                     raise ServiceError("IDEMPOTENCY_CONFLICT", "confirmation key changed", 409)
-                return old[1], True
+                return linked(old[1], True)
             if action != "confirm":
                 raise ServiceError("CONFIRMATION_REQUIRED", "explicit owner confirmation required", 422)
             if type(expected_task_version) is not int or expected_task_version != proposal.scope.task_version:
@@ -197,9 +208,11 @@ class SQLiteRetrievalPlanRepository:
             saved = state["approved"].get(proposal_key)
             if saved is not None:
                 state["confirm_keys"][scope] = (fingerprint, saved)
-                return saved, True
+                return linked(saved, True)
             validate_confirmation(actor, task, proposal, action=action,
                                   proposal_digest=proposal_digest, expected_task_version=expected_task_version)
+            from .agent_retrieval import require_current_handoff
+            require_current_handoff(db, proposal)
             self._epoch(state, proposal)
             if task.active_cleaning_operation_id:
                 cleaning = memory._cleaning_operations[task.active_cleaning_operation_id]
@@ -215,8 +228,8 @@ class SQLiteRetrievalPlanRepository:
             state["confirm_keys"][scope] = (fingerprint, approved)
             state["events"].append({"event_id": "retrieval-approved:" + approved.proposal_digest,
                                     "kind": "plan_approved", "plan": approved})
-            return approved, False
-        return self._transaction(True, approve)
+            return linked(approved, False)
+        return self._transaction(True, approve, with_connection=True)
 
     def get_current(self, actor, task_id):
         def read(memory, state):

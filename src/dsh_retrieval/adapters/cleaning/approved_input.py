@@ -1,6 +1,8 @@
 """Bind a generic worker to the current approval and its authorized manifest."""
 
 from ...errors import ServiceError
+from contextlib import contextmanager
+from ...video_media import open_verified_video, VideoResourcePolicy
 from ...integration_models import AccessContext
 from ...multi_rule_contracts import CleaningBinding, CleaningCandidateRef
 from .runner import MAX_CANDIDATE_BYTES
@@ -21,6 +23,7 @@ class ApprovedManifestAccess:
         if not callable(getattr(gateway, "open_read", None)):
             raise ValueError("authorized media gateway is required")
         self.approvals, self.actor, self.task_id, self.gateway = approvals, actor, task_id, gateway
+        self.video_policy = getattr(gateway, "video_policy", VideoResourcePolicy())
 
     def _approval(self, binding):
         if type(binding) is not CleaningBinding or binding.task_id != self.task_id:
@@ -59,3 +62,18 @@ class ApprovedManifestAccess:
                     raise ServiceError("MEDIA_LIMIT_EXCEEDED", "Approved media exceeds worker limit", 413)
         self._approval(binding)
         return bytes(content)
+
+
+    @contextmanager
+    def open_file(self, candidate, binding):
+        approval = self._approval(binding)
+        if approval.job.recipe.media_type != 'video' or candidate not in approval.proposal.candidates:
+            raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Video outside approved input', 409)
+        manifest = self.approvals.get_manifest(self.actor, self.task_id, approval.proposal.manifest_ref)
+        item = next((i for i in manifest.proposal.items if i.candidate_id == candidate.candidate_id), None)
+        if item is None or item.media.content_digest != candidate.content_digest or item.media.asset_version != candidate.asset_version:
+            raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Video manifest changed', 409)
+        context = AccessContext(self.actor, self.task_id, 'cleaning_input', 'current')
+        with open_verified_video(self.gateway, context, item.media.authorized_media_ref,
+                candidate.content_digest, policy=self.video_policy, guard=lambda: self._approval(binding)) as file:
+            yield file

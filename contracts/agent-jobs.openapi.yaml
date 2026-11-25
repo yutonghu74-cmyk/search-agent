@@ -1,0 +1,650 @@
+openapi: 3.0.3
+info:
+  title: Unified Agent jobs
+  version: 1.3.0
+  description: Opt-in job facade over existing confirmed tasks, stage reviews, business
+    approvals and candidate manifests. retrieval-agent-job@1 executes one image/text
+    page; explicit @2 supports up to ten pages. Task creation defaults closed; explicitly
+    enabled projects may confirm bounded pure retrieval through the existing Chat
+    window. Integrations require explicit delegation and root binding; confirmations
+    are owner-only.
+paths:
+  /v1/retrieval/projects/{project_id}/agent-retrieval:
+    parameters:
+    - name: project_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    get:
+      operationId: getRetrievalAgentWindowProfile
+      description: Owner-window configuration discovery only; no draft, run, model
+        call or capability probe
+      responses:
+        '200':
+          description: Project opt-in status and current authorized source and budget
+            bounds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WindowProfile'
+        '403':
+          description: Project or source authorization denied
+        '503':
+          description: Authorized source configuration unavailable
+  /v1/retrieval/tasks/{task_id}/agent-retrieval/prepare:
+    parameters:
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/TaskId
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/IdempotencyKey
+    post:
+      operationId: prepareRetrievalAgentWindowJob
+      description: Explicit owner-window preparation or recovery of the first current
+        job; no confirmation or execution
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              maxProperties: 0
+      responses:
+        '200':
+          description: Prepared or recovered current job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '409':
+          description: Agent requirements absent or task scope changed
+        '422':
+          description: Project or request scope is not admitted
+        '503':
+          description: Window
+          worker or runtime unavailable: null
+  /v1/retrieval/tasks/{task_id}/agent-jobs:
+    parameters:
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/TaskId
+    get:
+      operationId: listAgentJobs
+      responses:
+        '200':
+          description: At most 32 current authorized jobs; no execution is triggered
+        '503':
+          description: Job service is not configured
+  /v1/retrieval/tasks/{task_id}/agent-jobs/prepare:
+    parameters:
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/TaskId
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/IdempotencyKey
+    post:
+      operationId: prepareAgentJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Prepare'
+      responses:
+        '201':
+          description: Existing stage review and workflow links; no task/run/model
+            call created
+        '200':
+          description: Same-body replay returns the current job view
+          including after business confirmation: null
+        '403':
+          description: Capability or external binding not granted
+        '409':
+          description: Stale scope or conflicting key
+        '503':
+          description: Capability is not installed
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}:
+    parameters:
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/TaskId
+    - $ref: '#/components/parameters/JobRef'
+    get:
+      operationId: getAgentJob
+      responses:
+        '200':
+          description: Current authorized job projection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '403':
+          description: Project/library/media authorization was revoked
+        '404':
+          description: Job is outside this task or actor
+        '409':
+          description: Scope or business plan was superseded
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}/confirm:
+    parameters:
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/TaskId
+    - $ref: '#/components/parameters/JobRef'
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/IdempotencyKey
+    post:
+      operationId: confirmAgentJobCheckpoint
+      description: Explicit original-owner confirmation through existing stage/plan/manifest
+        transactions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Confirm'
+      responses:
+        '200':
+          description: Confirmation recorded and workflow linked atomically; repeated
+            confirmation has one effect
+        '403':
+          description: Integration credentials cannot confirm
+        '409':
+          description: Review/version/input changed or checkpoint not ready
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}/start:
+    parameters:
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/TaskId
+    - $ref: '#/components/parameters/JobRef'
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/IdempotencyKey
+    post:
+      operationId: startAgentJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - allOf:
+                - $ref: ./agent-stages.openapi.yaml#/components/schemas/StageAction
+                - properties:
+                    action:
+                      type: string
+                      enum:
+                      - start
+              - $ref: '#/components/schemas/CoordinatorStart'
+      responses:
+        '202':
+          description: Bounded planning queued. Original retrieval requires action=start;
+            coordination uses CoordinatorStart and does not confirm any child business gate.
+        '409':
+          description: Confirmation required or review changed
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}/cancel:
+    parameters:
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/TaskId
+    - $ref: '#/components/parameters/JobRef'
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/IdempotencyKey
+    post:
+      operationId: cancelAgentJobRootTask
+      description: Cancels the root business task, increments generation and fences
+        publication; remote termination is unknown
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - action
+              - expected_task_version
+              properties:
+                action:
+                  type: string
+                  enum:
+                  - cancel
+                expected_task_version:
+                  $ref: ./agent-stages.openapi.yaml#/components/schemas/StageAction/properties/expected_task_version
+      responses:
+        '200':
+          description: Root cancellation fence persisted
+          retries do not increment generation again: null
+        '409':
+          description: Stale task version or completed job
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}/artifacts:
+    parameters:
+    - $ref: ./agent-stages.openapi.yaml#/components/parameters/TaskId
+    - $ref: '#/components/parameters/JobRef'
+    get:
+      operationId: getAgentJobArtifacts
+      responses:
+        '200':
+          description: Authorized original per-page manifests; v2 adds page_count
+            and cross-page unique candidate_count; rules unchecked and accepted_count
+            null
+        '403':
+          description: Media/project authorization revoked
+        '409':
+          description: Job cancelled or scope superseded
+components:
+  parameters:
+    JobRef:
+      name: job_ref
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^agentdraft_[a-f0-9]{32}$
+  schemas:
+    WindowProfile:
+      type: object
+      required:
+      - schema_version
+      - enabled
+      properties:
+        schema_version:
+          type: string
+          enum:
+          - retrieval-agent-window@1
+        enabled:
+          type: boolean
+        chat_entry:
+          type: string
+          enum:
+          - conversation
+          - candidate
+          default: conversation
+          description: Conversation keeps the established dialogue and multi-term
+            execution; candidate explicitly selects the bounded independent workflow
+        confirmed_terms_execution:
+          $ref: ./confirmed-terms-execution.schema.json
+        candidate_review_execution:
+          $ref: ./confirmed-terms-execution.schema.json
+        coordinator:
+          type: object
+          description: Optional owner-window bounded coordinator over an already confirmed task.
+          required: [enabled, workflow_ref, max_model_calls, max_seconds]
+          properties:
+            enabled:
+              type: boolean
+            workflow_ref:
+              enum: [platform-coordinator@1]
+            max_model_calls:
+              type: integer
+              minimum: 1
+            max_seconds:
+              type: integer
+              minimum: 1
+        available:
+          type: boolean
+          description: Local worker availability; does not certify runtime or model
+            readiness
+        reason_code:
+          type: string
+        scope_ref:
+          type: string
+          description: Opaque subject and project scope for browser draft recovery
+        output_kind:
+          type: string
+          enum:
+          - unverified_candidates
+        max_pages:
+          type: integer
+          minimum: 1
+          maximum: 10
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+        max_candidates:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: Upper bound of raw hit slots; not a verified candidate guarantee
+        library_ids:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: string
+        model_profile_ref:
+          type: string
+        max_model_calls:
+          type: integer
+          minimum: 1
+          maximum: 100
+        max_seconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+        actions:
+          type: array
+          items:
+            type: string
+            enum:
+            - rewrite_query
+            - switch_source
+            - paginate
+        methods:
+          type: array
+          items:
+            type: string
+            enum:
+            - text
+            - vector
+    Prepare:
+      type: object
+      additionalProperties: false
+      required:
+      - capability
+      - planning
+      properties:
+        capability:
+          type: string
+          enum:
+          - retrieval
+          - coordination
+        workflow_ref:
+          type: string
+          enum:
+          - retrieval-agent-job@1
+          - retrieval-agent-job@2
+          - confirmed-terms-retrieval@1
+          - platform-coordinator@1
+        planning:
+          oneOf:
+          - $ref: '#/components/schemas/PlanningAllocation'
+          - $ref: '#/components/schemas/ConfirmedTermsAllocation'
+          - $ref: '#/components/schemas/CoordinationAllocation'
+      allOf:
+      - oneOf:
+        - properties:
+            capability:
+              enum: [retrieval]
+            workflow_ref:
+              enum: [retrieval-agent-job@1, retrieval-agent-job@2, confirmed-terms-retrieval@1]
+        - required: [workflow_ref]
+          properties:
+            capability:
+              enum: [coordination]
+            workflow_ref:
+              enum: [platform-coordinator@1]
+      description: Coordination requires an installed owner-window workflow; integration
+        credentials remain restricted to explicitly delegated retrieval.
+    CoordinationAllocation:
+      type: object
+      additionalProperties: false
+      required: [message, model_profile_ref, expected_revision, expected_generation, expected_task_version]
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        model_profile_ref:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/PrepareStage/properties/model_profile_ref
+        expected_revision:
+          type: integer
+          minimum: 1
+        expected_generation:
+          type: integer
+          minimum: 1
+        expected_task_version:
+          type: integer
+          minimum: 1
+    CoordinatorStart:
+      type: object
+      additionalProperties: false
+      required: [proposal_digest, expected_task_version]
+      properties:
+        proposal_digest:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/StageAction/properties/proposal_digest
+        expected_task_version:
+          type: integer
+          minimum: 1
+    PlanningAllocation:
+      type: object
+      additionalProperties: false
+      required:
+      - model_profile_ref
+      - model_calls
+      - expected_revision
+      - expected_generation
+      - expected_task_version
+      properties:
+        model_profile_ref:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/PrepareStage/properties/model_profile_ref
+        model_calls:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/PrepareStage/properties/model_calls
+        expected_revision:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/PrepareStage/properties/expected_revision
+        expected_generation:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/PrepareStage/properties/expected_generation
+        expected_task_version:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/PrepareStage/properties/expected_task_version
+    ConfirmedTermsAllocation:
+      type: object
+      additionalProperties: false
+      required:
+      - expected_revision
+      - expected_generation
+      - expected_task_version
+      properties:
+        expected_revision:
+          type: integer
+          minimum: 1
+        expected_generation:
+          type: integer
+          minimum: 1
+        expected_task_version:
+          type: integer
+          minimum: 1
+    Confirm:
+      type: object
+      additionalProperties: false
+      required:
+      - action
+      - checkpoint
+      - proposal_digest
+      - expected_task_version
+      properties:
+        action:
+          type: string
+          enum:
+          - confirm
+        checkpoint:
+          type: string
+          enum:
+          - planning
+          - retrieval
+          - candidates
+        proposal_digest:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/StageAction/properties/proposal_digest
+        expected_task_version:
+          $ref: ./agent-stages.openapi.yaml#/components/schemas/StageAction/properties/expected_task_version
+    Job:
+      type: object
+      required:
+      - schema_version
+      - job_ref
+      - task_id
+      - capability
+      - workflow_ref
+      - status
+      - phase
+      - confirmation
+      - artifacts_ready
+      properties:
+        schema_version:
+          type: string
+          enum:
+          - agent-job@1
+        job_ref:
+          type: string
+        task_id:
+          type: string
+        capability:
+          type: string
+          enum:
+          - retrieval
+          - coordination
+        workflow_ref:
+          type: string
+          enum:
+          - retrieval-agent-job@1
+          - retrieval-agent-job@2
+          - confirmed-terms-retrieval@1
+          - platform-coordinator@1
+        status:
+          type: string
+          enum:
+          - waiting_confirmation
+          - ready
+          - queued
+          - running
+          - dispatching
+          - completed
+          - failed
+          - unknown
+          - cancelled
+        phase:
+          type: string
+          enum:
+          - planning
+          - compilation
+          - retrieval
+          - candidates
+          - execution
+          - coordination
+          - cancelled
+        revision:
+          type: integer
+        generation:
+          type: integer
+          description: Original job scope; cancellation fences the current root task
+        task_version:
+          type: integer
+        source_task_version:
+          type: integer
+          description: Frozen coordinator input version; task_version is the current root version.
+        publication_fenced:
+          type: boolean
+        proposal_digest:
+          type: string
+        max_model_calls:
+          type: integer
+        max_seconds:
+          type: integer
+        model_profile_ref:
+          type: string
+        coordination:
+          type: object
+          properties:
+            suggestion:
+              type: string
+              nullable: true
+            steps:
+              type: array
+              maxItems: 8
+              items:
+                type: object
+                required: [step_id, capability, action, state, result]
+                properties:
+                  step_id:
+                    type: string
+                  capability:
+                    type: string
+                  action:
+                    type: string
+                  state:
+                    enum: [pending_or_unknown, delivered]
+                  result:
+                    type: object
+                    nullable: true
+                    description: Original capability receipt. Delivery does not mean child completion.
+        confirmation:
+          type: object
+          nullable: true
+        planning_review:
+          type: object
+        query_terms:
+          type: array
+          description: Exact validated strategy query linked to the compiled plan;
+            empty before compilation
+          items:
+            type: string
+        planning_progress:
+          type: object
+          properties:
+            elapsed_seconds:
+              type: integer
+              minimum: 0
+            max_seconds:
+              type: number
+              minimum: 0
+            model_calls_admitted:
+              type: integer
+              minimum: 0
+            deadline_reached:
+              type: boolean
+        accepted_count:
+          nullable: true
+          description: Always null for unverified retrieval candidates
+        artifacts_ready:
+          type: boolean
+        execution_mode:
+          type: string
+          enum:
+          - confirmed_terms
+        implementation_ref:
+          type: string
+        code:
+          type: string
+          nullable: true
+        candidate_intake:
+          type: string
+          enum: [auto, manual]
+          description: Auto freezes candidates under the original delegation; manual waits for optional owner review.
+        cleaning_operation_id:
+          type: [string, 'null']
+          description: Existing cleaning operation queued by the new delegated intake; not an independent cleaning Agent run.
+        execution_scope:
+          oneOf:
+          - $ref: ./confirmed-terms-execution.schema.json
+          - type: object
+            required:
+            - max_pages
+            - batch_size
+            properties:
+              max_pages:
+                type: integer
+                minimum: 1
+                maximum: 10
+              batch_size:
+                type: integer
+                minimum: 1
+                maximum: 100
+        retrieval_progress:
+          type: object
+          description: V2 materialized page prefix; does not count an unknown page
+            as empty
+          properties:
+            expected_task_version:
+              type: integer
+            page_count:
+              type: integer
+              minimum: 0
+              maximum: 10
+            raw_hit_count:
+              type: integer
+              minimum: 0
+              maximum: 1000
+            candidate_count:
+              type: integer
+              minimum: 0
+              maximum: 1000
+            accepted_count:
+              nullable: true
+            stop_reason:
+              type: string
+              nullable: true
+              enum:
+              - candidate_target
+              - exhausted
+              - depth_limit
+              - page_limit
+              - null
+        recall_analysis:
+          type:
+          - object
+          - 'null'
+          description: Optional recorded evidence scope/digest or unavailable code.
+            Reauthorize current recall endpoint before using it; this is not approval
+            or cleaned quality.

@@ -3,6 +3,7 @@ import time
 import unittest
 import json
 import threading
+from types import SimpleNamespace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -31,6 +32,10 @@ class Dialogue:
 
 
 class TaskServiceStub:
+    @property
+    def repository(self):
+        return SimpleNamespace(get=lambda actor, task_id: (self.get_task(actor, task_id), SimpleNamespace(confirmed_proposal_json='{"query_spec": {}}'))[1])
+
     def get_task(self, actor, task_id):
         if actor.user_id != 'owner' or task_id != 'rt_' + 'a' * 32:
             raise ServiceError('TASK_NOT_FOUND', 'Missing task', 404)
@@ -65,11 +70,16 @@ class Runtime:
 
 
 class ExpansionJobsTest(unittest.TestCase):
+    def make_jobs(self, *args, **kwargs):
+        jobs = ExpansionJobs(*args, **kwargs)
+        self.addCleanup(jobs.close)
+        return jobs
+
     def test_small_initial_request_uses_three_terms_unless_count_is_explicit(self):
         for raw, expected in [('找10张猫图片', 3), ('每组生成8个检索词，找10张猫图片', 8)]:
             with self.subTest(raw=raw):
                 runtime = Runtime()
-                jobs = ExpansionJobs(None, runtime, Dialogue(), Projects())
+                jobs = self.make_jobs(None, runtime, Dialogue(), Projects())
                 jobs.start(Actor('tenant', 'owner'), 'demo', {
                     'dialogue_session_id': 'dlg_one', 'dialogue_version': 3,
                     'raw_request': raw, 'dimension_id': 'default', 'target_count': 10,
@@ -83,7 +93,7 @@ class ExpansionJobsTest(unittest.TestCase):
 
     def test_one_group_count_reduction_preserves_other_groups_without_generation(self):
         runtime = Runtime()
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
         actor = Actor('tenant', 'owner')
         task_id = 'rt_' + 'a' * 32
         current = [{'primary_label': '猫', 'auxiliary_terms': ['猫在草地', '猫在窗边', '猫在树下']},
@@ -118,7 +128,7 @@ class ExpansionJobsTest(unittest.TestCase):
 
     def test_quoted_complete_replacement_skips_generation_and_stays_provisional(self):
         runtime = Runtime()
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
         actor = Actor('tenant', 'owner')
         task_id = 'rt_' + 'a' * 32
         feedback = '检索词减少到两个，保留“猫”和“猫在草地上”，其他需求和1张目标不变。'
@@ -144,7 +154,7 @@ class ExpansionJobsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'dialogue.sqlite3'
             runtime = Runtime()
-            jobs = ExpansionJobs(path, runtime, Dialogue(), Projects())
+            jobs = self.make_jobs(path, runtime, Dialogue(), Projects())
             actor = Actor('tenant', 'owner')
             body = {'dialogue_session_id': 'dlg_one', 'dialogue_version': 3,
                     'raw_request': '每类生成25个检索词，找猫图片', 'dimension_id': 'default',
@@ -168,7 +178,7 @@ class ExpansionJobsTest(unittest.TestCase):
             self.assertIsNotNone(done['timing_ms']['complete'])
             self.assertEqual(len(done['result']['plan']['groups'][0]['auxiliary_terms']), 25)
             self.assertEqual(runtime.calls, [(None, 0, 8), ('猫', 8, 10), ('猫', 18, 7), ('猫', 18, 7)])
-            reopened = ExpansionJobs(path, runtime, Dialogue(), Projects())
+            reopened = self.make_jobs(path, runtime, Dialogue(), Projects())
             self.assertEqual(reopened.get(actor, 'demo', 'dlg_one')['status'], 'completed')
             with self.assertRaises(ServiceError):
                 reopened.get(Actor('tenant', 'other'), 'demo', 'dlg_one')
@@ -176,7 +186,7 @@ class ExpansionJobsTest(unittest.TestCase):
     def test_count_increase_keeps_existing_terms_and_only_generates_missing_batches(self):
         runtime = Runtime()
         runtime.fail_once = False
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects())
         actor = Actor('tenant', 'owner')
         body = {'dialogue_session_id': 'dlg_one', 'dialogue_version': 3,
                 'raw_request': '找猫图片', 'dimension_id': 'default', 'target_count': 20,
@@ -193,7 +203,7 @@ class ExpansionJobsTest(unittest.TestCase):
     def test_explicit_reduction_replaces_hundred_term_preview_with_two_term_proposal(self):
         runtime = Runtime()
         runtime.fail_once = False
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects())
         actor = Actor('tenant', 'owner')
         old_terms = [f'猫场景{i}' for i in range(100)]
         jobs.start(actor, 'demo', {
@@ -213,7 +223,7 @@ class ExpansionJobsTest(unittest.TestCase):
     def test_task_job_rejects_stale_hundred_target_after_latest_two_word_feedback(self):
         runtime = Runtime()
         runtime.fail_once = False
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
         actor = Actor('tenant', 'owner')
         task_id = 'rt_' + 'a' * 32
         body = {'expected_task_version': 7, 'expected_revision': 2,
@@ -240,7 +250,7 @@ class ExpansionJobsTest(unittest.TestCase):
 
     def test_count_only_reduction_reuses_existing_terms_without_model_call(self):
         runtime = Runtime()
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
         actor = Actor('tenant', 'owner')
         task_id = 'rt_' + 'a' * 32
         terms = [f'猫场景{i}' for i in range(100)]
@@ -294,7 +304,7 @@ class ExpansionJobsTest(unittest.TestCase):
             return original(*args, **kwargs)
 
         runtime.expand_chunk = first_batch_fails
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects())
         actor = Actor('tenant', 'owner')
         body = {'dialogue_session_id': 'dlg_one', 'dialogue_version': 3,
                 'raw_request': '每类生成12个检索词，找猫图片', 'dimension_id': 'default',
@@ -309,7 +319,7 @@ class ExpansionJobsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'dialogue.sqlite3'
             runtime = Runtime()
-            jobs = ExpansionJobs(path, runtime, Dialogue(), Projects())
+            jobs = self.make_jobs(path, runtime, Dialogue(), Projects())
             actor = Actor('tenant', 'owner')
             started = jobs.start(actor, 'demo', {
                 'dialogue_session_id': 'dlg_one', 'dialogue_version': 3,
@@ -320,7 +330,7 @@ class ExpansionJobsTest(unittest.TestCase):
                 _, state, _ = jobs._load(started['job_id'])
                 state['status'] = 'running'
                 jobs._save(started['job_id'], state)
-            reopened = ExpansionJobs(path, runtime, Dialogue(), Projects())
+            reopened = self.make_jobs(path, runtime, Dialogue(), Projects())
             reopened.recover()
             self.assertEqual(self.wait_for(reopened, 'completed')['completed_terms'], 25)
             self.assertEqual(sum(1 for label, _, _ in runtime.calls if label is None), 1)
@@ -328,7 +338,7 @@ class ExpansionJobsTest(unittest.TestCase):
     def test_hundred_terms_are_generated_in_bounded_batches(self):
         runtime = Runtime()
         runtime.fail_once = False
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects())
         jobs.start(Actor('tenant', 'owner'), 'demo', {
             'dialogue_session_id': 'dlg_one', 'dialogue_version': 3,
             'raw_request': '每类生成100个检索词，找猫图片', 'dimension_id': 'default',
@@ -341,7 +351,7 @@ class ExpansionJobsTest(unittest.TestCase):
     def test_confirmed_task_feedback_uses_same_background_job(self):
         runtime = Runtime()
         runtime.fail_once = False
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
         task_id = 'rt_' + 'a' * 32
         started = jobs.start_task(Actor('tenant', 'owner'), task_id, {
             'expected_task_version': 7, 'expected_revision': 2,
@@ -364,7 +374,7 @@ class ExpansionJobsTest(unittest.TestCase):
     def test_task_without_old_terms_defers_relative_edit_until_seed_exists(self):
         runtime = Runtime()
         runtime.fail_once = False
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects(), TaskServiceStub())
         task_id = 'rt_' + 'a' * 32
         jobs.start_task(Actor('tenant', 'owner'), task_id, {
             'expected_task_version': 7, 'expected_revision': 2,
@@ -386,7 +396,7 @@ class ExpansionJobsTest(unittest.TestCase):
         service = TaskService(InMemoryTaskRepository(), LocalProjectAccess([
             ('tenant', 'owner', 'demo', 'default')]))
         dialogue = Dialogue()
-        jobs = ExpansionJobs(None, runtime, dialogue, service.projects)
+        jobs = self.make_jobs(None, runtime, dialogue, service.projects)
         server = ThreadingHTTPServer(('127.0.0.1', 0), create_handler(
             service, model_runtime=runtime, dialogue=dialogue, expansion_jobs=jobs))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -416,7 +426,7 @@ class ExpansionJobsTest(unittest.TestCase):
         runtime = Runtime()
         runtime.fail_once = False
         service = TaskServiceStub()
-        jobs = ExpansionJobs(None, runtime, Dialogue(), Projects(), service)
+        jobs = self.make_jobs(None, runtime, Dialogue(), Projects(), service)
         server = ThreadingHTTPServer(('127.0.0.1', 0), create_handler(
             service, model_runtime=runtime, dialogue=Dialogue(), expansion_jobs=jobs))
         thread = threading.Thread(target=server.serve_forever, daemon=True)

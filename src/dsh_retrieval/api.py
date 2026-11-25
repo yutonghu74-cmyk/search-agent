@@ -14,10 +14,11 @@ from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, unquote
 
 from .errors import ServiceError
 from .conversation_timing import ConversationTiming, timed_call, increment
+from .pipeline_timing import http_measured, measured, response_headers, bind as bind_timing
 from .models import Actor
 from .service import InMemoryTaskRepository, TaskService
 from .adapters.projects import LocalProjectAccess
@@ -45,6 +46,12 @@ from .dialogue import DialogueStore, DialogueCoordinator
 from .expansion_jobs import ExpansionJobs
 
 
+AGENT_STAGE_LIST_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/agent-stages$")
+AGENT_CAPABILITIES_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/agent-capabilities$")
+AGENT_JOB_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/agent-jobs(?:/(prepare|agentdraft_[a-f0-9]{32})(?:/(confirm|start|cancel|artifacts))?)?$")
+AGENT_WINDOW_PROFILE_PATH = re.compile(r'^/v1/retrieval/projects/([^/]+)/agent-retrieval$')
+AGENT_WINDOW_PREPARE_PATH = re.compile(r'^/v1/retrieval/tasks/([^/]+)/agent-retrieval/prepare$')
+AGENT_STAGE_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/agent-stages/(?:(prepare)|(agentdraft_[a-f0-9]{32})(?:/(confirm|start|cancel))?)$")
 TASK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)$")
 DRAFT_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/drafts(?:/([^/]+))?$")
 FEEDBACK_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/feedback(?:/([^/]+))?$")
@@ -64,8 +71,9 @@ PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
-EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)/expansion-jobs(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
-TASK_EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/tasks/(rt_[a-f0-9]{32})/expansion-jobs(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
+EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)/(?:expansion-jobs|retrieval-agent/terms)(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
+TASK_EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/tasks/(rt_[a-f0-9]{32})/(?:expansion-jobs|retrieval-agent/terms)(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
+RETRIEVAL_RECALL_PATH = re.compile(r"^/v1/retrieval/tasks/(rt_[a-f0-9]{32})/retrieval-agent/recall$")
 INTENT_PREVIEW_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/intent-preview$")
 DIALOGUE_TURN_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/(?:dialogue-turn|dialogue-command)$")
 DIALOGUE_COMMAND_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-commands/([^/]+)$")
@@ -94,6 +102,8 @@ QUERY_IMAGES_PATH = re.compile(
     r"^/v1/retrieval/projects/([^/]+)/query-images(?:/(qimg_[a-f0-9]{32})(?:/(preview))?)?$")
 
 
+NATIVE_VIDEO_PATH = re.compile(r'^/v1/retrieval/projects/([^/]+)/tasks/(rt_[a-f0-9]{32})/((?:candidates|cleaning/candidates)/candidate_[a-f0-9]{64}/video|delivery/original/candidate_[a-f0-9]{64})$')
+
 def platform_request(method):
     """Bind identity/project for all API dispatch paths, including SSE and uploads."""
     from functools import wraps
@@ -108,15 +118,26 @@ def platform_request(method):
                 if urlsplit(self.path).path.startswith('/v1/platform/'):
                     return self.platform_browser.handle(self, urlsplit(self.path).path)
                 self.headers = self.platform_browser.request_headers(self.headers, self.command)
+            native_video = NATIVE_VIDEO_PATH.fullmatch(urlsplit(self.path).path) if self.command == 'GET' else None
+            if native_video and not self.headers.get('x-app-id'):
+                from email.message import Message
+                scoped_headers = Message()
+                for key, value in self.headers.items(): scoped_headers[key] = value
+                scoped_headers['x-app-id'] = unquote(native_video.group(1))
+                self.headers = scoped_headers
             with self.service.projects.request_scope(self.headers) as actor:
                 path_project = re.match(r'^/v1/retrieval/projects/([^/]+)(?:/|$)', urlsplit(self.path).path)
-                if path_project and path_project.group(1) != self.headers.get('x-app-id'):
+                if path_project and (unquote(path_project.group(1)) if native_video else path_project.group(1)) != self.headers.get('x-app-id'):
                     raise ServiceError('PROJECT_ACCESS_DENIED', 'request project does not match route', 403)
                 self._platform_actor = actor
                 try:
+                    if self.shared_access is not None:
+                        self._shared_principal = self.shared_access.authorize(
+                            actor, self.headers, self.command, urlsplit(self.path).path)
                     return method(self)
                 finally:
                     self._platform_actor = None
+                    self._shared_principal = None
         except ServiceError as error:
             self._json(error.status, error.as_dict(trace_id=self._trace_id()))
         finally:
@@ -125,6 +146,7 @@ def platform_request(method):
 
 
 class Handler(BaseHTTPRequestHandler):
+    shared_access = None
     identity_provider = None
     platform_browser = None
     browse_only = False
@@ -133,6 +155,9 @@ class Handler(BaseHTTPRequestHandler):
     result_reader: Any = None
     cleaning_reader: Any = None
     cleaning_service: Any = None
+    agent_planning: Any = None
+    agent_jobs: Any = None
+    agent_window: Any = None
     cleaning_dispatch: Any = None
     delivery_service: Any = None
     model_runtime: Any = None
@@ -144,6 +169,7 @@ class Handler(BaseHTTPRequestHandler):
     refill_service: Any = None
     dialogue: Any = None
     expansion_jobs: Any = None
+    retrieval_terms: Any = None
     task_events: Any = None
     query_images: Any = None
     event_stream_duration = 25.0
@@ -185,6 +211,11 @@ class Handler(BaseHTTPRequestHandler):
         mutation_reader = getattr(self.task_events, 'task_mutation_sequence', None)
         mutation = mutation_reader(task_id) if callable(mutation_reader) else None
         task, proposal = self.service.current_read_binding(actor, task_id)
+        if 'agent_requirements' in proposal['query_spec'] and self.agent_window is not None:
+            workspace = self.agent_window.workspace(actor, task_id)
+            return {'task': workspace, 'progress': workspace['progress'], 'result_binding': None,
+                    'executions': [], 'step_outputs': [], 'cleaning_view': {'available': False, 'runs': []},
+                    'as_of_sequence': 0}
         result_set = None
         cleaning_view = None
         paired_reader = getattr(self.cleaning_service, 'progress_inputs', None)
@@ -265,9 +296,14 @@ class Handler(BaseHTTPRequestHandler):
                 "cleaning_view": cleaning_view,
                 "as_of_sequence": sequence}
 
+    @measured('workspace_projection')
     def _task_workspace(self, actor, task_id):
         """Bounded read model shared by Chat and sidebar; never prepare a manifest."""
         from copy import deepcopy
+        if self.agent_window is not None:
+            from .agent_retrieval_window import agent_task
+            if agent_task(self.service.repository.get(actor, task_id)):
+                return self.agent_window.workspace(actor, task_id)
         from .workflow_state import binding, current_source, branch_counts, project_workflow
         mutation_reader = getattr(self.task_events, 'task_mutation_sequence', None)
         for attempt in range(2):
@@ -322,6 +358,8 @@ class Handler(BaseHTTPRequestHandler):
                     if error.status in (401, 403, 404):
                         raise
                     errors.append({'source': 'cleaning', 'code': error.code})
+            confirmed = getattr(self.agent_window, 'confirmed_terms', None)
+            execution_job = confirmed.current_job(actor, task_id) if confirmed is not None else None
             latest = self.service.task_read_summary(actor, task_id)
             after_mutation = mutation_reader(task_id) if callable(mutation_reader) else None
             if (binding(latest) != binding(task) or before_mutation is not None
@@ -343,7 +381,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise
                     capabilities[key] = False
             workflow = project_workflow(task, progress, search=search, manifest=manifest, cleaning=cleaning,
-                                        errors=errors, capabilities=capabilities)
+                                        errors=errors, capabilities=capabilities, execution_job=execution_job)
             if current_source(search, task, allow_unapproved=True):
                 search = {**{key: search[key] for key in ('task_id', 'revision', 'generation', 'task_version',
                     'status', 'job_status', 'pagination_stopped', 'initial_window_complete') if key in search},
@@ -355,11 +393,19 @@ class Handler(BaseHTTPRequestHandler):
             progress.update(nodes=workflow['nodes'], workflow=workflow)
             return {**task, 'schema_version': 'task-workspace@1', 'progress': progress,
                     'workflow': workflow, 'search': search, 'manifest': manifest,
+                    'retrieval_agent_job': execution_job,
+                    'retrieval_recall_available': callable(getattr(self.first_search, 'recall', None)),
+                    'coordinator_available': getattr(self.agent_window, 'coordinator', None) is not None,
                     'mutation_sequence': after_mutation}
         raise AssertionError('unreachable workspace retry')
 
     def _json(self, status: int, body: dict[str, Any], *, replayed: bool = False, extra_headers=None) -> None:
-        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if isinstance(body, dict):
+            bind_timing(task_id=body.get('task_id'), job_id=body.get('job_id'),
+                        revision=body.get('revision', body.get('confirmed_revision')),
+                        generation=body.get('generation', body.get('run_generation')),
+                        task_version=body.get('task_version'))
+        encoded = timed_call('response_encode', json.dumps, body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
@@ -369,8 +415,11 @@ class Handler(BaseHTTPRequestHandler):
         if replayed:
             self.send_header("Idempotent-Replayed", "true")
         timing = body.get('timings') if isinstance(body, dict) else None
+        metrics = response_headers(status)
         if not replayed and isinstance(timing, dict) and type(timing.get('total_ms')) in (int, float):
-            self.send_header('Server-Timing', f'conversation;dur={timing["total_ms"]:.3f}')
+            metrics['Server-Timing'] = ', '.join(filter(None, (metrics.get('Server-Timing'), f'conversation;dur={timing["total_ms"]:.3f}')))
+        for name, value in metrics.items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -389,6 +438,188 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors " + frame_ancestors)
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _agent_window_route(self, parsed, *, post=False):
+        profile = AGENT_WINDOW_PROFILE_PATH.fullmatch(parsed.path)
+        prepare = AGENT_WINDOW_PREPARE_PATH.fullmatch(parsed.path)
+        if not profile and not prepare: return False
+        def action():
+            if parsed.query: raise ServiceError('INVALID_SPEC', 'Agent window routes have no query parameters', 422)
+            actor = self._actor()
+            if profile and not post:
+                if self.agent_window is None:
+                    self.service.projects.require_access(actor, profile.group(1), 'default', 'read')
+                    return HTTPStatus.OK, {'schema_version': 'retrieval-agent-window@1', 'enabled': False}, False
+                return HTTPStatus.OK, self.agent_window.profile(actor, profile.group(1)), False
+            if prepare and post:
+                if self.agent_window is None: raise ServiceError('AGENT_EXECUTION_UNAVAILABLE', 'Agent window is not enabled', 503)
+                if self._body(): raise ServiceError('INVALID_SPEC', 'Task scope selects the Agent job', 422)
+                value = self.agent_window.ensure_job(actor, prepare.group(1), self.headers.get('Idempotency-Key', ''))
+                return HTTPStatus.OK, value, False
+            raise ServiceError('NOT_FOUND', 'Agent window route not found', 404)
+        self._run(action)
+        return True
+
+    def _agent_job_route(self, parsed, *, post=False):
+        match = AGENT_JOB_PATH.fullmatch(parsed.path)
+        if match is None: return False
+        def action():
+            if self.agent_jobs is None:
+                raise ServiceError('AGENT_JOBS_UNAVAILABLE', 'Agent job service is not configured', 503)
+            task_id, job_ref, operation = match.groups()
+            actor = self._actor()
+            principal = getattr(self, '_shared_principal', None)
+            external = principal is not None and principal.kind == 'integration'
+            allowed = frozenset({'retrieval'}) if external else None
+            if parsed.query:
+                raise ServiceError('INVALID_SPEC', 'Agent job routes have no query parameters', 422)
+            if post:
+                key = self.headers.get('Idempotency-Key', '')
+                if external:
+                    from .adapters.platform_access import single_header
+                    from .query_spec import digest
+                    key = 'external_' + digest({'integration': principal.integration_ref,
+                        'ref': single_header(self.headers, 'X-External-Task-Ref', required=True), 'key': key})[7:]
+                    # Validate before hashing so an absent client key cannot become valid.
+                    from .service import require_key
+                    require_key(self.headers.get('Idempotency-Key', ''))
+                body = self._body()
+                if job_ref == 'prepare' and operation is None:
+                    value, replayed = self.agent_jobs.prepare(actor, task_id, key, body, allowed=allowed)
+                    return HTTPStatus.OK if replayed else HTTPStatus.CREATED, value, replayed
+                if job_ref and job_ref != 'prepare' and operation in ('confirm', 'start', 'cancel'):
+                    value, replayed = self.agent_jobs.act(actor, task_id, job_ref, operation, key, body, allowed=allowed)
+                    return HTTPStatus.ACCEPTED if operation == 'start' else HTTPStatus.OK, value, replayed
+                raise ServiceError('NOT_FOUND', 'Agent job action not found', 404)
+            if job_ref is None:
+                return HTTPStatus.OK, self.agent_jobs.list(actor, task_id, allowed=allowed), False
+            if job_ref == 'prepare' or operation not in (None, 'artifacts'):
+                raise ServiceError('NOT_FOUND', 'Agent job query not found', 404)
+            reader = self.agent_jobs.artifacts if operation == 'artifacts' else self.agent_jobs.get
+            return HTTPStatus.OK, reader(actor, task_id, job_ref, allowed=allowed), False
+        self._run(action)
+        return True
+
+    def _agent_stage_route(self, parsed, *, post=False):
+        match = AGENT_STAGE_PATH.fullmatch(parsed.path)
+        listing = AGENT_STAGE_LIST_PATH.fullmatch(parsed.path)
+        capabilities = AGENT_CAPABILITIES_PATH.fullmatch(parsed.path)
+        if match is None and listing is None and capabilities is None: return False
+        def action():
+            if self.agent_planning is None:
+                raise ServiceError('AGENT_PLANNING_UNAVAILABLE', 'Agent planning API is not configured', 503)
+            task_id, prepare, draft_id, operation = match.groups() if match else ((listing or capabilities).group(1),None,None,None)
+            actor = self._actor()
+            if capabilities:
+                if post:
+                    raise ServiceError('NOT_FOUND', 'Agent capabilities are read-only', 404)
+                if parsed.query:
+                    raise ServiceError('INVALID_SPEC', 'Agent capabilities have no query parameters', 422)
+                return HTTPStatus.OK, self.agent_planning.capabilities(actor, task_id), False
+            if post:
+                if parsed.query: raise ServiceError('INVALID_SPEC', 'Stage actions have no query parameters', 422)
+                key = self.headers.get('Idempotency-Key', '')
+                body = self._body()
+                if prepare:
+                    value, replayed = self.agent_planning.prepare(actor, task_id, key, body)
+                    return HTTPStatus.OK if replayed else HTTPStatus.CREATED, value, replayed
+                if operation:
+                    value, replayed = self.agent_planning.act(actor, task_id, draft_id, operation, key, body)
+                    return HTTPStatus.ACCEPTED if operation == 'start' else HTTPStatus.OK, value, replayed
+                raise ServiceError('NOT_FOUND', 'Stage action route not found', 404)
+            if prepare or operation:
+                raise ServiceError('NOT_FOUND', 'Stage query route not found', 404)
+            try:
+                params = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+                field = 'limit' if listing else 'after_cursor'
+                if set(params) - {field} or any(len(v) != 1 for v in params.values()): raise ValueError()
+                text = params.get(field, ['32' if listing else '0'])[0]
+                if not text.isascii() or not text.isdigit() or len(text) > 19: raise ValueError()
+                cursor = int(text)
+                if cursor > 9223372036854775807: raise ValueError()
+            except ValueError:
+                raise ServiceError('INVALID_SPEC', 'Invalid stage event cursor', 422) from None
+            if listing:
+                return HTTPStatus.OK, self.agent_planning.list(actor,task_id,limit=cursor),False
+            return HTTPStatus.OK, self.agent_planning.get(actor, task_id, draft_id, after_cursor=cursor), False
+        self._run(action)
+        return True
+
+    def _shared_route(self, parsed, *, post=False):
+        from .shared_access import SHARED_ROUTE
+        match = SHARED_ROUTE.fullmatch(parsed.path)
+        if not match and parsed.path != '/v1/shared/capabilities': return False
+        def action():
+            from .adapters.platform_access import single_header
+            if self.shared_access is None:
+                raise ServiceError('SHARED_ACCESS_UNAVAILABLE', 'Shared access is not configured', 503)
+            principal = getattr(self, '_shared_principal', None)
+            if principal is None or principal.kind != 'integration':
+                raise ServiceError('SHARED_CAPABILITY_DENIED', 'Verified integration identity required', 403)
+            if parsed.query and (match is None or match.group(2)!='receipt'):
+                raise ServiceError('INVALID_REQUEST', 'Unexpected query parameters', 422)
+            if match is None:
+                if post: raise ServiceError('INVALID_REQUEST', 'Capability discovery is read-only', 422)
+                return HTTPStatus.OK, {'schema_version':'shared-capabilities@1',
+                    'integration_ref':principal.integration_ref,'project_id':principal.project_id,
+                    'granted':sorted(principal.capabilities), 'owner_confirmation_required':True,
+                    'retrieval_configured':self.first_search is not None,
+                    'retrieval_terms_configured':self.retrieval_terms is not None,
+                    'retrieval_recall_configured':callable(getattr(self.first_search, 'recall', None)),
+                    'cleaning_configured':self.cleaning_service is not None}, False
+            task_id, operation = match.groups()
+            store = self.shared_access.bindings
+            if not post:
+                if operation=='receipt':
+                    values=parse_qs(parsed.query,keep_blank_values=True)
+                    if set(values)!={'operation','key'} or any(len(v)!=1 for v in values.values()):
+                        raise ServiceError('INVALID_REQUEST','Receipt operation and key required',422)
+                    return HTTPStatus.OK,store.receipt(principal,task_id,
+                        single_header(self.headers,'X-External-Task-Ref',required=True),
+                        values['key'][0],values['operation'][0]),False
+                if operation != 'binding': raise ServiceError('NOT_FOUND', 'Route not found', 404)
+                return HTTPStatus.OK, store.get(principal,task_id,
+                    single_header(self.headers,'X-External-Task-Ref',required=True),current=False), False
+            key=single_header(self.headers,'Idempotency-Key',required=True)
+            if operation=='binding':
+                result,replayed=store.bind(principal,task_id,key,self._body())
+                return HTTPStatus.OK,result,replayed
+            result,replayed=store.cancel(principal,task_id,
+                single_header(self.headers,'X-External-Task-Ref',required=True),key,self._body())
+            return HTTPStatus.OK,result,replayed
+        self._run(action)
+        return True
+
+    def _shared_command(self, task_id, operation, body, callback):
+        principal=getattr(self,'_shared_principal',None)
+        if principal is None or principal.kind!='integration': return callback(),False
+        from .adapters.platform_access import single_header
+        return self.shared_access.bindings.invoke_once(principal,task_id,
+            single_header(self.headers,'X-External-Task-Ref',required=True),
+            single_header(self.headers,'Idempotency-Key',required=True),operation,body,callback)
+
+    def _start_confirmed_search(self, actor, task_id, key):
+        from .agent_retrieval_window import agent_task
+        task = self.service.repository.get(actor, task_id)
+        if 'retrieval_execution' in json.loads(task.confirmed_proposal_json)['query_spec']:
+            confirmed = getattr(self.agent_window, 'confirmed_terms', None)
+            if confirmed is None:
+                raise ServiceError('AGENT_EXECUTION_UNAVAILABLE', 'Confirmed terms Agent is unavailable', 503)
+            return (self.search_dispatch.dispatch_task(task_id) if self.search_dispatch is not None else
+                    confirmed.enqueue(actor, task_id, key=key))
+        if agent_task(task):
+            if self.agent_window is None:
+                raise ServiceError('AGENT_EXECUTION_UNAVAILABLE', 'Agent task cannot enter legacy search', 503)
+            job = self.agent_window.ensure_job(actor, task_id, key)
+            return {'status': 'awaiting_confirmation' if job['status'] == 'waiting_confirmation' else job['status'],
+                    'task_id': task_id, 'job_ref': job['job_ref'],
+                    'backend': 'retrieval-agent'}
+        if self.shared_access is not None:
+            task=self.service.repository.get(actor,task_id)
+            if json.loads(task.confirmed_proposal_json)['node_modes']['retrieval']=='manual':
+                return {'status':'awaiting_confirmation','task_id':task_id}
+        return (self.search_dispatch.dispatch_task(task_id) if self.search_dispatch is not None
+                else self.first_search.auto_start(actor,task_id,key=key))
 
     def _body(self) -> dict[str, Any]:
         try:
@@ -420,6 +651,19 @@ class Handler(BaseHTTPRequestHandler):
     def _run(self, action: Any) -> None:
         trace_id = self._trace_id()
         try:
+            legacy = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/(first-search(?:/.*)?|cleaning(?:/.*)?|refill(?:/.*)?|delivery(?:/.*)?|followup-intent|conversation-turn(?:s/.*)?|expansion-jobs(?:/.*)?|retrieval-agent/terms(?:/.*)?|manual-reviews|result-exclusions)', urlsplit(self.path).path)
+            if legacy and getattr(self, 'command', None) == 'POST':
+                from .agent_retrieval_window import agent_task
+                try:
+                    task = self.service.repository.get(self._actor(), legacy.group(1))
+                except ServiceError as error:
+                    if error.code != 'NOT_FOUND': raise
+                    task = None  # The original handler owns missing-task/error semantics.
+                if task is not None and agent_task(task):
+                    raise ServiceError('AGENT_LEGACY_EXECUTION_DENIED', 'Use the confirmed Agent job for candidate retrieval', 409)
+                if (task is not None and 'retrieval_execution' in json.loads(task.confirmed_proposal_json)['query_spec']
+                        and legacy.group(2).startswith('first-search') and legacy.group(2) != 'first-search/manifest'):
+                    raise ServiceError('AGENT_LEGACY_EXECUTION_DENIED', 'Confirmed terms are executed by the retrieval Agent job', 409)
             scope = getattr(self.model_runtime, 'request_scope', None)
             settings = getattr(self.model_runtime, 'settings', None)
             actor = self._actor() if self.identity_provider is not None else None
@@ -630,6 +874,7 @@ class Handler(BaseHTTPRequestHandler):
             # callbacks retain all stale-draft and permission checks.
             return True
 
+    @measured('conversation_processing')
     def _followup_response(self, actor, task_id, body, orchestrated, receipt=None):
         trace = ConversationTiming()
         try:
@@ -741,11 +986,54 @@ class Handler(BaseHTTPRequestHandler):
                                                  body['text'], result.get('reply') or '本轮理解：' + result['kind'])
         return self._conversation_result(task, result, orchestrated)
 
+    def _historical_route(self, parsed, *, post=False):
+        match = re.fullmatch(r'/v1/retrieval/projects/([^/]+)/historical-(batches|dedup)', parsed.path)
+        if match is None:
+            return False
+        try:
+            actor, project = self._actor(), unquote(match.group(1))
+            if post:
+                if match.group(2) != 'dedup' or parsed.query:
+                    raise ServiceError('INVALID_SPEC', 'Invalid historical selection route', 422)
+                body = self._body()
+                if set(body) != {'dimension_id', 'references'} or not isinstance(body['references'], list):
+                    raise ServiceError('INVALID_SPEC', 'Explicit historical references required', 422)
+                dimension = body['dimension_id']
+            else:
+                params = parse_qs(parsed.query, keep_blank_values=True)
+                if match.group(2) != 'batches' or set(params) - {'dimension_id'} or any(len(v) != 1 for v in params.values()):
+                    raise ServiceError('INVALID_SPEC', 'Invalid historical list parameters', 422)
+                dimension = params.get('dimension_id', ['default'])[0]
+            if not isinstance(dimension, str) or not dimension:
+                raise ServiceError('INVALID_SPEC', 'Dimension required', 422)
+            self.service.projects.require_access(actor, project, dimension, 'read')
+            repository = self.service.repository
+            if not callable(getattr(repository, 'historical_options', None)):
+                raise ServiceError('FEATURE_NOT_SUPPORTED', 'Persistent historical resolver required', 422)
+            result = ({'policy': repository.resolve_historical(actor, project, dimension, body['references'])}
+                      if post else {'options': repository.historical_options(actor, project, dimension),
+                                    'scope': 'owned_delivered_images'})
+            self._json(200, result)
+        except ServiceError as error:
+            self._json(error.status, error.as_dict(trace_id=self._trace_id()))
+        return True
+
+    @http_measured
     @platform_request
     def do_POST(self) -> None:  # noqa: N802
         if self.browse_only:
             self._json(503, {'code':'BROWSE_ONLY', 'message':'This validation instance is browse-only',
                              'retryable':False, 'trace_id':self._trace_id()})
+            return
+        if self._shared_route(urlsplit(self.path), post=True):
+            return
+        if self._agent_window_route(urlsplit(self.path), post=True):
+            return
+        if self._agent_job_route(urlsplit(self.path), post=True):
+            return
+        if self._agent_stage_route(urlsplit(self.path), post=True):
+            return
+        if self._historical_route(urlsplit(self.path), post=True):
             return
         query_image_match = QUERY_IMAGES_PATH.fullmatch(urlsplit(self.path).path)
         if query_image_match and query_image_match.group(2) is None:
@@ -781,17 +1069,17 @@ class Handler(BaseHTTPRequestHandler):
         task_expansion_match = TASK_EXPANSION_JOBS_PATH.fullmatch(self.path)
         if task_expansion_match:
             def task_expansion_action():
-                if self.expansion_jobs is None:
+                if self.retrieval_terms is None:
                     raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Expansion jobs are unavailable', 503)
                 task_id, job_id, operation = task_expansion_match.groups()
                 actor = self._actor()
                 body = self._body()
                 if job_id is None:
-                    return HTTPStatus.ACCEPTED, self.expansion_jobs.start_task(actor, task_id, body), False
+                    return HTTPStatus.ACCEPTED, self.retrieval_terms.start_task(actor, task_id, body), False
                 if operation != 'retry' or body:
                     raise ServiceError('INVALID_SPEC', 'Invalid expansion retry', 422)
                 task = self.service.get_task(actor, task_id)
-                return HTTPStatus.ACCEPTED, self.expansion_jobs.retry(
+                return HTTPStatus.ACCEPTED, self.retrieval_terms.retry(
                     actor, task['project_id'], 'task:' + task_id, job_id), False
             self._run(task_expansion_action)
             return
@@ -815,7 +1103,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if expansion_job_match:
             def expansion_job_action():
-                if self.expansion_jobs is None:
+                if self.retrieval_terms is None:
                     raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Expansion jobs are unavailable', 503)
                 actor = self._actor()
                 project_id, session_id, job_id, operation = expansion_job_match.groups()
@@ -823,10 +1111,10 @@ class Handler(BaseHTTPRequestHandler):
                 if job_id is None:
                     if body.get('dialogue_session_id') != session_id:
                         raise ServiceError('INVALID_SPEC', 'Session binding mismatch', 422)
-                    return HTTPStatus.ACCEPTED, self.expansion_jobs.start(actor, project_id, body), False
+                    return HTTPStatus.ACCEPTED, self.retrieval_terms.start(actor, project_id, body), False
                 if operation != 'retry' or body:
                     raise ServiceError('INVALID_SPEC', 'Invalid expansion retry', 422)
-                return HTTPStatus.ACCEPTED, self.expansion_jobs.retry(actor, project_id, session_id, job_id), False
+                return HTTPStatus.ACCEPTED, self.retrieval_terms.retry(actor, project_id, session_id, job_id), False
             self._run(expansion_job_action)
             return
         delivery_match = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/delivery/(prepare|publish)', self.path)
@@ -935,9 +1223,13 @@ class Handler(BaseHTTPRequestHandler):
                 task_id, operation = cleaning_match.groups()
                 body = self._body()
                 if operation == 'prepare':
+                    principal=getattr(self,'_shared_principal',None)
+                    if principal is not None and principal.kind=='integration' and set(body)!={'manifest_ref'}:
+                        raise ServiceError('SHARED_CAPABILITY_DENIED','Shared cleaning requires an explicit confirmed manifest',403)
                     if set(body) == {'manifest_ref'}:
-                        return HTTPStatus.OK, self.cleaning_service.prepare(
-                            actor, task_id, body['manifest_ref']), False
+                        result,replayed=self._shared_command(task_id,'cleaning.prepare',body,
+                            lambda:self.cleaning_service.prepare(actor,task_id,body['manifest_ref']))
+                        return HTTPStatus.OK,result,replayed
                     if body == {'incremental_recompute': True} and callable(
                             getattr(self.cleaning_service, 'prepare_incremental_recompute', None)):
                         return HTTPStatus.OK, self.cleaning_service.prepare_incremental_recompute(
@@ -953,10 +1245,16 @@ class Handler(BaseHTTPRequestHandler):
                     return HTTPStatus.ACCEPTED, result, replayed
                 if operation == 'execute' and set(body) == {'operation_id'}:
                     if self.cleaning_dispatch is not None:
-                        self.cleaning_service.steps(actor, task_id)
-                        self.cleaning_dispatch.notify()
-                        return HTTPStatus.ACCEPTED, self.cleaning_dispatch.status(
-                            actor, task_id, body['operation_id']), False
+                        def notify_cleaning():
+                            self.cleaning_service.steps(actor, task_id)
+                            self.cleaning_dispatch.notify()
+                            return self.cleaning_dispatch.status(actor,task_id,body['operation_id'])
+                        result,replayed=self._shared_command(task_id,'cleaning.execute',body,notify_cleaning)
+                        return HTTPStatus.ACCEPTED,result,replayed
+                    if getattr(self,'_shared_principal',None) is not None and self._shared_principal.kind=='integration':
+                        result,replayed=self._shared_command(task_id,'cleaning.execute',body,
+                            lambda:self.cleaning_service.execute(actor,task_id,body['operation_id'])[0])
+                        return HTTPStatus.OK,result,replayed
                     result, replayed = self.cleaning_service.execute(
                         actor, task_id, body['operation_id'])
                     return HTTPStatus.OK, result, replayed
@@ -989,7 +1287,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise ServiceError('LOCAL_SEARCH_NOT_CONFIGURED', 'Local first search is not enabled', 503)
                 body = self._body()
                 if action == 'prepare' and set(body) == {'routing_digest', 'choices'}:
-                    return HTTPStatus.OK, self.first_search.prepare(actor, task_id, **body), False
+                    result,replayed=self._shared_command(task_id,'retrieval.prepare',body,
+                        lambda:self.first_search.prepare(actor,task_id,**body))
+                    return HTTPStatus.OK,result,replayed
                 if action == 'confirm' and set(body) == {'proposal_digest', 'expected_task_version', 'action'}:
                     result, replay = self.first_search.confirm(actor, task_id,
                         key=self.headers.get('Idempotency-Key', ''), **body)
@@ -1199,17 +1499,18 @@ class Handler(BaseHTTPRequestHandler):
                             != base['query_spec'].get('grouped_expansion')
                             or draft['proposal']['query_spec'].get('target_count')
                             != base['query_spec'].get('target_count'))):
-                    result['search_enqueue'] = (self.search_dispatch.dispatch_task(task_id)
-                        if self.search_dispatch is not None else self.first_search.auto_start(
-                            actor, task_id, key='terms:' + draft['proposal_digest']))
+                    result['search_enqueue'] = self._start_confirmed_search(actor,task_id,'terms:'+draft['proposal_digest'])
                     result['task'] = self.service.get_task(actor, task_id)
                 return HTTPStatus.ACCEPTED, result, replayed
             actor = self._actor()
             result, replayed = self.service.create_task(actor, self.headers.get("Idempotency-Key", ""), self._body())
-            if self.first_search is not None:
-                enqueue = (self.search_dispatch.dispatch_task(result['task_id'])
-                    if self.search_dispatch is not None else self.first_search.auto_start(
-                        actor, result['task_id'], key='terms:' + result['task_id'] + ':1'))
+            if self.first_search is not None or self.agent_window is not None:
+                from .agent_retrieval_window import agent_task
+                is_agent = agent_task(self.service.repository.get(actor, result['task_id']))
+                if (self.first_search is None and not is_agent
+                        and 'retrieval_execution' not in json.loads(self.service.repository.get(actor,result['task_id']).confirmed_proposal_json)['query_spec']):
+                    return HTTPStatus.ACCEPTED, result, replayed
+                enqueue = self._start_confirmed_search(actor,result['task_id'],'terms:'+result['task_id']+':1')
                 result = self.service.get_task(actor, result['task_id'])
                 result['search_enqueue'] = enqueue
             return HTTPStatus.ACCEPTED, result, replayed
@@ -1264,9 +1565,86 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {'code': 'NOT_FOUND', 'message': 'route was not found',
                          'retryable': False, 'trace_id': self._trace_id()})
 
+    @http_measured
     @platform_request
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        if self._shared_route(parsed):
+            return
+        if self._agent_window_route(parsed):
+            return
+        if self._agent_job_route(parsed):
+            return
+        if self._agent_stage_route(parsed):
+            return
+        if self._historical_route(parsed):
+            return
+        native_video = NATIVE_VIDEO_PATH.fullmatch(parsed.path)
+        if native_video:
+            try:
+                task = self.service.get_task(self._actor(), native_video.group(2))
+                if task['project_id'] != unquote(native_video.group(1)):
+                    raise ServiceError('NOT_FOUND', 'Video outside requested project', 404)
+                parsed = parsed._replace(path='/v1/retrieval/tasks/'+native_video.group(2)+'/'+native_video.group(3))
+            except ServiceError as error:
+                self._json(error.status, error.as_dict(trace_id=self._trace_id()));return
+        path = parsed.path
+        video_stream = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/(candidates|cleaning/candidates|delivery/original)/(candidate_[a-f0-9]{64})/video', path)
+        original_stream = re.fullmatch(r'/v1/retrieval/tasks/([^/]+)/delivery/original/(candidate_[a-f0-9]{64})', path)
+        if video_stream or original_stream:
+            video_headers_sent = False
+            try:
+                actor = self._actor()
+                params = parse_qs(parsed.query, keep_blank_values=True)
+                if any(len(values) != 1 for values in params.values()):
+                    raise ServiceError('INVALID_SPEC', 'Invalid video reference', 422)
+                if original_stream:
+                    if set(params) != {'source_digest'}:
+                        raise ServiceError('INVALID_SPEC', 'Published result digest required', 422)
+                    task_id, candidate_id = original_stream.groups()
+                    if self.delivery_service is None:
+                        raise ServiceError('DELIVERY_UNAVAILABLE', 'Video delivery not configured', 503)
+                    stream = self.delivery_service.open_original(actor, task_id, candidate_id,
+                        source_digest=params['source_digest'][0])
+                else:
+                    task_id, kind, candidate_id = video_stream.groups()
+                    if set(params) - {'ref'} or kind == 'delivery/original':
+                        raise ServiceError('INVALID_SPEC', 'Invalid video preview reference', 422)
+                    provider = self.first_search if kind == 'candidates' else self.cleaning_service
+                    if provider is None or not callable(getattr(provider, 'open_candidate_video', None)):
+                        raise ServiceError('PREVIEW_UNAVAILABLE', 'Video preview unavailable', 404)
+                    stream = (provider.open_candidate_video(actor, task_id, candidate_id, ref=params.get('ref', [None])[0])
+                              if kind == 'candidates' else provider.open_candidate_video(actor, task_id, candidate_id))
+                with stream as (file, metadata, guard):
+                    from .video_media import byte_range
+                    start, end, partial = byte_range(self.headers.get('Range'), file.size)
+                    self.send_response(206 if partial else 200)
+                    self.send_header('Content-Type', 'video/mp4' if metadata['container'] == 'mp4' else 'video/webm')
+                    self.send_header('Content-Length', str(end-start+1))
+                    self.send_header('Accept-Ranges', 'bytes')
+                    if partial: self.send_header('Content-Range', f'bytes {start}-{end}/{file.size}')
+                    self.send_header('Cache-Control', 'private, no-store')
+                    self.send_header('X-Content-Type-Options', 'nosniff')
+                    self.end_headers()
+                    video_headers_sent = True
+                    with file.path.open('rb') as source:
+                        source.seek(start); remaining = end-start+1; since_guard = 0
+                        while remaining:
+                            block = source.read(min(65536, remaining))
+                            if not block: raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Video file truncated', 409)
+                            if since_guard >= 1024**2: guard(); since_guard = 0
+                            self.wfile.write(block); remaining -= len(block); since_guard += len(block)
+            except ServiceError as error:
+                if video_headers_sent:
+                    self.close_connection = True
+                elif error.status == 416:
+                    self.send_response(416);self.send_header('Content-Range', f'bytes */{file.size}')
+                    self.send_header('Content-Length', '0');self.send_header('Cache-Control', 'private, no-store');self.end_headers()
+                else:
+                    self._json(error.status, error.as_dict(trace_id=self._trace_id()))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         if parsed.path == '/platform.js' and self.platform_browser is not None:
             from .platform_ui import PLATFORM_JS
             self._asset('text/javascript', PLATFORM_JS)
@@ -1339,17 +1717,28 @@ class Handler(BaseHTTPRequestHandler):
             except ServiceError as error:
                 self._json(error.status, error.as_dict(trace_id=trace_id))
             return
+        recall_match = RETRIEVAL_RECALL_PATH.fullmatch(urlsplit(self.path).path)
+        if recall_match:
+            def recall_action():
+                if urlsplit(self.path).query:
+                    raise ServiceError('INVALID_SPEC', '召回分析不接受查询参数', 422)
+                reader = getattr(self.first_search, 'recall', None)
+                if not callable(reader):
+                    raise ServiceError('RECALL_UNAVAILABLE', '当前检索实现未提供召回分析', 503)
+                return HTTPStatus.OK, reader(self._actor(), recall_match.group(1)), False
+            self._run(recall_action)
+            return
         task_expansion_match = TASK_EXPANSION_JOBS_PATH.fullmatch(urlsplit(self.path).path)
         if task_expansion_match:
             def task_expansion_action():
                 if urlsplit(self.path).query or task_expansion_match.group(3):
                     raise ServiceError('INVALID_SPEC', 'Invalid expansion job URL', 422)
-                if self.expansion_jobs is None:
+                if self.retrieval_terms is None:
                     raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Expansion jobs are unavailable', 503)
                 task_id, job_id, _ = task_expansion_match.groups()
                 actor = self._actor()
                 task = self.service.get_task(actor, task_id)
-                return HTTPStatus.OK, self.expansion_jobs.get(
+                return HTTPStatus.OK, self.retrieval_terms.get(
                     actor, task['project_id'], 'task:' + task_id, job_id), False
             self._run(task_expansion_action)
             return
@@ -1358,10 +1747,10 @@ class Handler(BaseHTTPRequestHandler):
             def expansion_job_action():
                 if urlsplit(self.path).query or expansion_job_match.group(4):
                     raise ServiceError('INVALID_SPEC', 'Invalid expansion job URL', 422)
-                if self.expansion_jobs is None:
+                if self.retrieval_terms is None:
                     raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Expansion jobs are unavailable', 503)
                 project_id, session_id, job_id, _ = expansion_job_match.groups()
-                return HTTPStatus.OK, self.expansion_jobs.get(self._actor(), project_id, session_id, job_id), False
+                return HTTPStatus.OK, self.retrieval_terms.get(self._actor(), project_id, session_id, job_id), False
             self._run(expansion_job_action)
             return
         settings_match = MODEL_SETTINGS_PATH.fullmatch(urlsplit(self.path).path)
@@ -1682,9 +2071,16 @@ class Handler(BaseHTTPRequestHandler):
                 if set(params) - {'ref'} or any(len(values) != 1 for values in params.values()):
                     raise ServiceError('INVALID_RESULT_VIEW', 'Invalid preview reference', 422)
                 if not isinstance(self.first_search, LocalFirstSearch):
+                    if self.agent_window is None:
+                        raise ServiceError('PREVIEW_UNAVAILABLE', 'Candidate image bytes are unavailable', 404)
+                from .agent_retrieval_window import agent_task
+                preview_actor = self._actor()
+                reader = (self.agent_window if self.agent_window is not None
+                    and agent_task(self.service.repository.get(preview_actor, preview_match.group(1))) else self.first_search)
+                if reader is None:
                     raise ServiceError('PREVIEW_UNAVAILABLE', 'Candidate image bytes are unavailable', 404)
-                content_type, content = self.first_search.candidate_preview(
-                    self._actor(), *preview_match.groups(), ref=params.get('ref', [None])[0])
+                content_type, content = reader.candidate_preview(
+                    preview_actor, *preview_match.groups(), ref=params.get('ref', [None])[0])
                 self.send_response(HTTPStatus.OK)
                 self.send_header('Content-Type', content_type)
                 self.send_header('Content-Length', str(len(content)))
@@ -1699,11 +2095,13 @@ class Handler(BaseHTTPRequestHandler):
         first_search_match = FIRST_SEARCH_GET_PATH.fullmatch(path)
         if first_search_match:
             def first_search_action():
-                if self.first_search is None:
-                    raise ServiceError('LOCAL_SEARCH_NOT_CONFIGURED', 'Local first search is not enabled', 503)
                 actor = self._actor()
                 task_id, view, alias = first_search_match.groups()
                 view = view or alias
+                from .agent_retrieval_window import agent_task
+                is_agent = self.agent_window is not None and agent_task(self.service.repository.get(actor, task_id))
+                if self.first_search is None and not is_agent:
+                    raise ServiceError('LOCAL_SEARCH_NOT_CONFIGURED', 'Local first search is not enabled', 503)
                 params = parse_qs(parsed.query, keep_blank_values=True)
                 options = {}
                 if view in ('candidates', 'candidates/changes'):
@@ -1716,6 +2114,10 @@ class Handler(BaseHTTPRequestHandler):
                         raise ServiceError('INVALID_RESULT_VIEW', 'Invalid candidate page limit', 422) from None
                 elif params:
                     raise ServiceError('INVALID_RESULT_VIEW', 'Search status has no query parameters', 422)
+                if is_agent:
+                    if view in ('candidates', 'candidates/changes'):
+                        return HTTPStatus.OK, self.agent_window.candidates(actor, task_id, **options), False
+                    return HTTPStatus.OK, self.agent_window.workspace(actor, task_id), False
                 result = (self.first_search.candidates(actor, task_id, **options) if view in ('candidates', 'candidates/changes')
                           else self.first_search.progress(actor, task_id) if view == 'progress'
                           else self.first_search.preview(actor, task_id))
@@ -1803,6 +2205,10 @@ class Handler(BaseHTTPRequestHandler):
                                  "executions": snapshot["executions"],
                                  "step_outputs": snapshot["step_outputs"]}}, False
             self._run(task_events_action)
+            return
+        video_caps = re.fullmatch(r'/v1/retrieval/projects/([^/]+)/video-capabilities', path)
+        if video_caps:
+            self._run(lambda: (HTTPStatus.OK, self.service.video_capabilities(self._actor(), video_caps.group(1)), False))
             return
         if path == '/catalog':
             self._asset('text/html', CATALOG_HTML)
@@ -2014,10 +2420,15 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
                    cleaning_service=None, cleaning_dispatch=None, delivery_service=None,
                    expansion_jobs=None, refill_service=None, task_events=None,
                    query_images=None, browse_only=False, identity_provider=None,
-                   identity_mode="development", platform_browser=None) -> type[Handler]:
+                   identity_mode="development", platform_browser=None, video_initial_intake=None, agent_planning=None,
+                   shared_access=None, agent_jobs=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
+
+    connector = getattr(first_search, 'configure_cleaning_reader', None)
+    if callable(connector) and cleaning_reader is not None:
+        connector(cleaning_reader)
 
     if identity_mode not in ('development', 'platform'):
         raise ValueError('unknown identity mode')
@@ -2031,6 +2442,15 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
         raise ValueError('identity provider requires explicit platform mode')
     if platform_browser is not None and identity_mode != 'platform':
         raise ValueError('browser sessions require platform mode')
+    if shared_access is not None:
+        from .shared_access import SharedAccess
+        task_path=getattr(service.repository,'path',None)
+        if (identity_mode != 'platform' or type(shared_access) is not SharedAccess or task_path is None
+                or shared_access.bindings.repository.path.resolve() != task_path.resolve()):
+            raise ValueError('shared access requires verified platform identity and the same task ledger')
+        if search_dispatch is not None and not getattr(search_dispatch,'respect_manual_retrieval',False):
+            raise ValueError('shared access requires a search dispatcher respecting manual retrieval nodes')
+    BoundHandler.shared_access = shared_access
     BoundHandler.platform_browser = platform_browser
     BoundHandler.identity_provider = identity_provider
     BoundHandler.browse_only = browse_only
@@ -2038,6 +2458,13 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.result_reader = result_reader if result_reader is not None else cleaning_reader
     BoundHandler.cleaning_reader = cleaning_reader
     BoundHandler.cleaning_service = cleaning_service
+    BoundHandler.agent_planning = agent_planning
+    BoundHandler.agent_jobs = agent_jobs
+    BoundHandler.agent_window = getattr(service, 'agent_execution', None)
+    if BoundHandler.agent_window is not None:
+        if agent_jobs is not None and agent_jobs is not BoundHandler.agent_window.jobs:
+            raise ValueError('Chat and Agent jobs must use the same service')
+        BoundHandler.agent_jobs = BoundHandler.agent_window.jobs
     BoundHandler.cleaning_dispatch = cleaning_dispatch
     BoundHandler.delivery_service = delivery_service
     BoundHandler.model_runtime = model_runtime or ModelRuntime()
@@ -2045,12 +2472,16 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.routing_preview = routing_preview
     BoundHandler.plan_set_repository = plan_set_repository
     BoundHandler.first_search = first_search
+    BoundHandler.video_initial_intake = video_initial_intake
     BoundHandler.search_dispatch = search_dispatch
     BoundHandler.refill_service = refill_service
     BoundHandler.dialogue = dialogue
     from .task_commands import TaskCommandStore
     BoundHandler.task_commands = TaskCommandStore(getattr(dialogue, 'store', None) or DialogueStore())
-    BoundHandler.expansion_jobs = expansion_jobs
+    BoundHandler.expansion_jobs = expansion_jobs  # legacy dependency name
+    BoundHandler.retrieval_terms = expansion_jobs
+    if expansion_jobs is not None and getattr(expansion_jobs, 'recall_provider', None) is None:
+        expansion_jobs.recall_provider = getattr(first_search, 'recall', None)
     BoundHandler.task_events = task_events or TaskEventFeed(
         getattr(getattr(service, 'repository', None), 'path', None))
     BoundHandler.query_images = query_images
@@ -2074,6 +2505,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Local development only; simulated identity headers, no W3")
     parser.add_argument("--browse-only", action="store_true", help="disable business writes and worker recovery for isolated browsing validation")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument('--search-workers', type=int, default=2)
+    parser.add_argument('--search-max-pending', type=int, default=128)
+    parser.add_argument('--search-max-pending-per-user', type=int, default=16)
+    parser.add_argument('--search-max-calls', type=int, default=128)
+    parser.add_argument('--search-max-hit-slots', type=int, default=1000)
     parser.add_argument("--demo-project", action="store_true", help="grant tenant-a/user-a access to demo/default")
     parser.add_argument("--ledger", help="local SQLite ledger path; omitted means in-memory storage")
     parser.add_argument('--dialogue-ledger', help='separate SQLite ledger for unconfirmed conversation turns')
@@ -2112,7 +2548,11 @@ def main() -> None:
     parser.add_argument('--clip-search-jobs', help='independent SQLite ledger for combined CLIP jobs')
     parser.add_argument('--clip-search-media-mappings',
                         help='trusted CLIP hit-to-media mapping JSON (optional simulation adapter)')
+    parser.add_argument('--retrieval-agent-config',
+                        help='explicit private deployment configuration for the local CLIP retrieval Agent')
     args = parser.parse_args()
+    if args.retrieval_agent_config and (args.browse_only or not args.local_clip_model):
+        parser.error('--retrieval-agent-config requires writable LOCAL_CLIP mode')
     if bool(args.model_settings_store) != bool(args.model_key_file):
         parser.error('--model-settings-store and --model-key-file must be supplied together')
     if args.model_settings_store and any(Path(args.model_settings_store).resolve() == Path(p).resolve()
@@ -2187,6 +2627,12 @@ def main() -> None:
     plan_sets = build_local_demo_progress_repository(Path(args.ledger), projects=service.projects,
         source_path=args.catalog_source) if args.plan_set_progress else None
     first_search = None
+    from .search_scheduling import SearchLimits
+    try:
+        search_limits = SearchLimits(args.search_workers, args.search_max_pending,
+                                     args.search_max_calls, args.search_max_hit_slots, args.search_max_pending_per_user)
+    except ValueError as error:
+        parser.error(str(error))
     if args.local_first_search_fixture:
         secret = os.environ.get('DSH_LOCAL_CURSOR_SECRET', '').encode()
         if len(secret) < 32:
@@ -2196,7 +2642,7 @@ def main() -> None:
             fixture_path=args.local_first_search_fixture, cursor_secret=secret,
             legacy_fixture_path=args.local_first_search_legacy_fixture,
             legacy_capabilities_path=args.local_first_search_legacy_capabilities,
-            clip_model_path=args.local_clip_model, start=not args.browse_only)
+            clip_model_path=args.local_clip_model, start=not args.browse_only, search_limits=search_limits)
         plan_sets = first_search.repository
     elif all(clip_values):
         secret = os.environ.get('DSH_LOCAL_CURSOR_SECRET', '').encode()
@@ -2210,7 +2656,7 @@ def main() -> None:
         first_search = CLIPFirstSearch(service, catalog, source_path=args.catalog_source,
             capabilities_path=args.query_capabilities, registry=registry, endpoints=endpoints,
             jobs_path=args.clip_search_jobs, cursor_secret=secret,
-            media_mappings_path=args.clip_search_media_mappings)
+            media_mappings_path=args.clip_search_media_mappings, search_limits=search_limits)
     commit, clean = source_version(Path(__file__).resolve().parents[2])
     if args.require_clean_source and (not commit or clean is not True):
         parser.error('--require-clean-source requires a clean Git checkout')
@@ -2221,7 +2667,8 @@ def main() -> None:
                   'retrieval_mode': (getattr(first_search, 'mode', 'local_fixture')
                                      if first_search else 'unconfigured'),
                   'identity_mode': 'demo' if args.demo_project else 'external',
-                  'browse_only':args.browse_only}
+                  'browse_only':args.browse_only,
+                  'search_execution_limits': {name: getattr(search_limits, name) for name in ('workers', 'max_pending', 'max_calls', 'max_hit_slots', 'max_pending_per_user')}}
     search_dispatch = (SearchDispatchCoordinator(repository, first_search)
                        if not args.browse_only and first_search is not None and isinstance(repository, SQLiteTaskRepository)
                        else None)
@@ -2260,6 +2707,18 @@ def main() -> None:
             refill_runtime.enable_auto_intake(
                 repository, first_search, cleaning_service, cleaning_dispatch,
                 refill_service)
+    agent_deployment = None
+    if args.retrieval_agent_config:
+        from .local_agent_runtime import load_local_retrieval_deployment
+        agent_deployment = load_local_retrieval_deployment(args.retrieval_agent_config,service,first_search,runtime,
+            cleaning_service=cleaning_service, cleaning_dispatch=cleaning_dispatch)
+        from .local_coordination import install_local_coordinator
+        install_local_coordinator(agent_deployment, cleaning=cleaning_service)
+        if search_dispatch is not None:
+            search_dispatch.confirmed_terms_agent = agent_deployment.confirmed_terms
+        build_info['retrieval_agent'] = {'enabled':True,
+            'workflow_ref':agent_deployment.window.workflow.contract_ref,
+            'max_pages':agent_deployment.window.workflow.max_pages}
     handler = create_handler(service, model_runtime=runtime, catalog_config=catalog,
                              routing_preview=routing, plan_set_repository=plan_sets,
                              first_search=first_search, dialogue=dialogue, expansion_jobs=expansion_jobs,
@@ -2283,6 +2742,8 @@ def main() -> None:
     finally:
         server.server_close()
         handler.task_commands.close()
+        if agent_deployment:
+            agent_deployment.close()
         if search_dispatch:
             search_dispatch.close()
         if refill_runtime:

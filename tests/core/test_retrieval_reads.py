@@ -52,7 +52,7 @@ class RetrievalReadTest(unittest.TestCase):
         before = self.f.state()
         task = self.f.tasks.get(self.f.actor, self.f.tid)
         # Any write path would serialize both ledgers; deliberately fail if used.
-        with patch("dsh_retrieval.adapters.task_storage.retrieval.dump_state", side_effect=AssertionError("write")):
+        with patch("dsh_retrieval.adapters.task_storage.ledger_rows.prepare_state", side_effect=AssertionError("write")):
             for _ in range(3):
                 self.assertEqual(self.get().page, self.f.first)
                 self.assertEqual(self.pending(), ())

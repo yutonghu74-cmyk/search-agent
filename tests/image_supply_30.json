@@ -1,0 +1,212 @@
+[
+  {
+    "id": "IMG-01",
+    "stage": "数量理解",
+    "scenario": "物体数不冒充图片总数",
+    "test": "test_image_quantities.ImageQuantityTest.test_object_numbers_and_unspecified_counts_are_not_totals",
+    "expected": "描述中物体数量和未指定总量不生成虚假图片目标"
+  },
+  {
+    "id": "IMG-02",
+    "stage": "数量理解",
+    "scenario": "多轮草稿修改后确认",
+    "test": "test_image_quantities.ImageQuantityTest.test_multiturn_draft_add_clear_and_confirm",
+    "expected": "新增、清除约束和确认使用最终有效草稿"
+  },
+  {
+    "id": "IMG-03",
+    "stage": "检索",
+    "scenario": "任意文本走动态编码",
+    "test": "test_first_search_local.FirstSearchLocalTest.test_clip_mode_uses_dynamic_text_encoder_not_fixed_word_rules",
+    "expected": "动态编码器接收文本，候选数不冒充有效数"
+  },
+  {
+    "id": "IMG-04",
+    "stage": "检索",
+    "scenario": "未经批准或预览变更",
+    "test": "test_first_search_local.FirstSearchLocalTest.test_approval_required_and_changed_preview_rejected",
+    "expected": "未批准和陈旧预览均拒绝执行"
+  },
+  {
+    "id": "IMG-05",
+    "stage": "检索",
+    "scenario": "多索引首批及重启",
+    "test": "test_first_search_local.FirstSearchLocalTest.test_two_index_first_batch_restart_and_candidate_mapping",
+    "expected": "检索绑定、候选映射和重启读取保持一致"
+  },
+  {
+    "id": "IMG-06",
+    "stage": "检索",
+    "scenario": "旧代次执行和读取",
+    "test": "test_first_search_local.FirstSearchLocalTest.test_old_generation_cannot_execute_or_read_candidates",
+    "expected": "旧generation无法执行或读取当前候选"
+  },
+  {
+    "id": "IMG-07",
+    "stage": "检索",
+    "scenario": "空语料",
+    "test": "test_first_search_local.FirstSearchLocalTest.test_empty_local_corpus_is_exhausted_but_not_effective_count",
+    "expected": "明确耗尽且不宣称有效数量"
+  },
+  {
+    "id": "IMG-08",
+    "stage": "以图搜图",
+    "scenario": "图像向量及参考图排除",
+    "test": "test_reference_image_search.ReferenceImageSearchTest.test_real_plan_uses_image_vector_and_exact_exclusion",
+    "expected": "计划绑定图像查询，按确认配置精确排除参考图"
+  },
+  {
+    "id": "IMG-09",
+    "stage": "候选读取",
+    "scenario": "同素材多次命中",
+    "test": "retrieval.test_materialization.MaterializationTest.test_same_identity_aggregates_hits",
+    "expected": "同身份命中聚合并保留来源"
+  },
+  {
+    "id": "IMG-10",
+    "stage": "候选读取",
+    "scenario": "源内容发生变化",
+    "test": "retrieval.test_materialization.MaterializationTest.test_changed_content",
+    "expected": "摘要不符拒绝物化且清理临时文件"
+  },
+  {
+    "id": "IMG-11",
+    "stage": "候选读取",
+    "scenario": "读取中撤权",
+    "test": "retrieval.test_materialization.MaterializationTest.test_authority_revoked_during_read",
+    "expected": "读取后复验权限，撤权不产生可用候选"
+  },
+  {
+    "id": "IMG-12",
+    "stage": "清洗",
+    "scenario": "批准后执行及幂等重放",
+    "test": "test_multi_rule_pipeline.MultiRulePipelineTests.test_approved_job_executes_persists_and_replays_without_rerun",
+    "expected": "结果持久化，重放不重复执行检测器"
+  },
+  {
+    "id": "IMG-13",
+    "stage": "清洗",
+    "scenario": "检测中撤权",
+    "test": "test_multi_rule_pipeline.MultiRulePipelineTests.test_revocation_during_detection_writes_nothing",
+    "expected": "检测后撤权拒绝结果写入"
+  },
+  {
+    "id": "IMG-14",
+    "stage": "清洗",
+    "scenario": "结果写入后中断恢复",
+    "test": "test_multi_rule_pipeline.MultiRulePipelineTests.test_failure_after_result_write_resumes_without_rerun",
+    "expected": "中断恢复复用已落盘结果，检测不重跑"
+  },
+  {
+    "id": "IMG-15",
+    "stage": "清洗",
+    "scenario": "失败及未知计数",
+    "test": "test_result_contracts.ExactResultContractTests.test_fail_unknown_never_become_representatives",
+    "expected": "fail和unknown均不进入合格或候补代表"
+  },
+  {
+    "id": "IMG-16",
+    "stage": "去重",
+    "scenario": "去重与目标候补拆分",
+    "test": "test_result_contracts.ExactResultContractTests.test_exact_dedup_and_target_split",
+    "expected": "精确去重后选样，合格、候补、缺口正确"
+  },
+  {
+    "id": "IMG-17",
+    "stage": "去重",
+    "scenario": "跨库重复保留证据",
+    "test": "test_result_contracts.ExactResultContractTests.test_exact_duplicate_fuses_candidate_aliases_and_source_evidence",
+    "expected": "重复只计一张，候选别名和跨库证据保留"
+  },
+  {
+    "id": "IMG-18",
+    "stage": "补数",
+    "scenario": "跨轮去重与缺口重算",
+    "test": "test_result_contracts.ExactResultContractTests.test_cumulative_merge_deduplicates_content_and_recomputes_gap",
+    "expected": "合并新旧轮次后统一去重并重算缺口"
+  },
+  {
+    "id": "IMG-19",
+    "stage": "补数",
+    "scenario": "自动事件幂等预留",
+    "test": "test_refill_service.ConfirmedRefillServiceTest.test_confirmed_auto_event_reserves_exact_position_idempotently",
+    "expected": "只预留已批准位置，重复事件不重复预留"
+  },
+  {
+    "id": "IMG-20",
+    "stage": "补数",
+    "scenario": "预算到达停止",
+    "test": "test_refill_service.ConfirmedRefillServiceTest.test_confirmed_round_budget_stops_before_another_position",
+    "expected": "轮数预算耗尽不继续派发"
+  },
+  {
+    "id": "IMG-21",
+    "stage": "补数",
+    "scenario": "连续无进展停止",
+    "test": "test_refill_planning.RefillPlanningTest.test_no_progress_stops_even_when_more_positions_exist",
+    "expected": "仍有页可检索也受无进展停止门禁约束"
+  },
+  {
+    "id": "IMG-22",
+    "stage": "配额",
+    "scenario": "满组不再补数",
+    "test": "test_refill_service.GroupQuotaRefillTest.test_full_group_queries_are_never_offered",
+    "expected": "补数候选不包含已经达标分组"
+  },
+  {
+    "id": "IMG-23",
+    "stage": "配额",
+    "scenario": "缺组不能用别组补齐",
+    "test": "test_refill_service.GroupQuotaRefillTest.test_short_group_with_no_positions_stops_even_if_others_have_pages",
+    "expected": "缺组耗尽时明确停止，不借用其他组余量"
+  },
+  {
+    "id": "IMG-24",
+    "stage": "交付",
+    "scenario": "暂存发布重启及重复点击",
+    "test": "test_delivery.DeliveryTest.test_staged_gate_publication_zip_restart_and_idempotency",
+    "expected": "暂存不可下载，确认后ZIP/清单/计数一致且重放幂等"
+  },
+  {
+    "id": "IMG-25",
+    "stage": "交付",
+    "scenario": "内容变化禁止发布下载",
+    "test": "test_delivery.DeliveryTest.test_changed_media_cannot_stage_or_publish_or_download",
+    "expected": "媒体摘要变化使暂存、发布和下载均失败关闭"
+  },
+  {
+    "id": "IMG-26",
+    "stage": "交付",
+    "scenario": "发起人及撤权",
+    "test": "test_delivery.DeliveryTest.test_owner_authorization_and_revocation",
+    "expected": "其他用户无权操作，撤权后拒绝交付"
+  },
+  {
+    "id": "IMG-27",
+    "stage": "交付",
+    "scenario": "打包过程中取消",
+    "test": "test_delivery.DeliveryTest.test_cancel_during_io_cannot_commit_package",
+    "expected": "IO期间取消任务，旧操作不能提交包"
+  },
+  {
+    "id": "IMG-28",
+    "stage": "交付",
+    "scenario": "新代次使旧确认失效",
+    "test": "test_delivery.DeliveryTest.test_new_generation_invalidates_staged_approval",
+    "expected": "需求换代后不能批准旧包"
+  },
+  {
+    "id": "IMG-29",
+    "stage": "交付",
+    "scenario": "ZIP损坏",
+    "test": "test_delivery.DeliveryTest.test_zip_corruption_fails_closed",
+    "expected": "包被篡改或损坏后拒绝读取"
+  },
+  {
+    "id": "IMG-30",
+    "stage": "交付",
+    "scenario": "合法非空部分交付",
+    "test": "test_delivery.DeliveryTest.test_legally_stopped_nonempty_result_publishes_as_partial",
+    "expected": "合法停止且非空才能以partial发布，不能冒充达标"
+  }
+]

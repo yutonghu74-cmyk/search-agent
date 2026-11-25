@@ -79,6 +79,9 @@ async function candidateImage(img,item,view){
 }
 function candidateRender(view){
   if(!candidateCurrent(view))return;
+  return typeof measureChatRender==='function'?measureChatRender('candidate_gallery_render',()=>candidateRenderContent(view),view):candidateRenderContent(view);
+}
+function candidateRenderContent(view){
   const grid=$('candidate-grid'),allGroups=candidateGroups(view),groups=candidateWindow(view,allGroups),existing=new Map([...grid.children].map(el=>[el.dataset.key,el]));
   grid.querySelector('.candidate-empty')?.remove();
   const visible=new Set(groups.map(candidateGroupKey));for(const [id,tile] of existing)if(!visible.has(id)){for(const img of tile.querySelectorAll('img')){img._observer?.disconnect();img._abort?.abort();if(img._url)URL.revokeObjectURL(img._url)}tile.remove();existing.delete(id)}
@@ -127,12 +130,13 @@ async function candidateMove(delta){const view=candidateActive;if(!view||view.bu
 async function candidateLoad(view,incremental=false,replacement=null){
   if(!candidateCurrent(view)||view.busy)return;view.busy=true;const epoch=view.epoch;const current=()=>candidateCurrent(view)&&view.epoch===epoch;
   try{
-    if(candidateResultTab(view)){const pageCursor=replacement?replacement.cursor:view.next;const params=new URLSearchParams({view:view.tab,limit:'60'});if(pageCursor)params.set('cursor',pageCursor);const data=await api(`/v1/retrieval/tasks/${view.taskId}/results?${params}`);if(!current())return;if(view.version&&data.result_set_digest&&view.version!==data.result_set_digest)throw new Error('结果版本已变化，请重新加载当前版本');if(!data.available)view.items=[];view.version=data.result_set_digest;view.taskVersion=data.task_version;view.publicationKind=data.publication_kind;if(replacement){view.items=[];view.itemCursors=new Map();view.page=0}view.lastPageCursor=pageCursor;candidateRememberPage(view,data.items||[],pageCursor);view.next=data.next_cursor;const seen=new Set(view.items.map(item=>item.candidate_id));for(const item of data.items||[])if(!seen.has(item.candidate_id)){view.items.push(item);seen.add(item.candidate_id)}candidateTrimCache(view);view.readError=false;candidateHint(data.available?`${candidateTabLabel(view.tab)} · 当前结果版本 ${data.result_set_digest} · 当前窗口 ${view.items.length} 张`:(data.note||'尚无当前版本结果'));candidateRender(view);candidateSave(view);return}
+    if(candidateResultTab(view)){const pageCursor=replacement?replacement.cursor:view.next;const params=new URLSearchParams({view:view.tab,limit:'60'});if(pageCursor)params.set('cursor',pageCursor);const data=await api(`/v1/retrieval/tasks/${view.taskId}/results?${params}`);if(!current())return;if(typeof linkPipelineRender==='function')linkPipelineRender(view,data);if(view.version&&data.result_set_digest&&view.version!==data.result_set_digest)throw new Error('结果版本已变化，请重新加载当前版本');if(!data.available)view.items=[];view.version=data.result_set_digest;view.taskVersion=data.task_version;view.publicationKind=data.publication_kind;if(replacement){view.items=[];view.itemCursors=new Map();view.page=0}view.lastPageCursor=pageCursor;candidateRememberPage(view,data.items||[],pageCursor);view.next=data.next_cursor;const seen=new Set(view.items.map(item=>item.candidate_id));for(const item of data.items||[])if(!seen.has(item.candidate_id)){view.items.push(item);seen.add(item.candidate_id)}candidateTrimCache(view);view.readError=false;candidateHint(data.available?`${candidateTabLabel(view.tab)} · 当前结果版本 ${data.result_set_digest} · 当前窗口 ${view.items.length} 张`:(data.note||'尚无当前版本结果'));candidateRender(view);candidateSave(view);return}
     const cursor=replacement?replacement.cursor:(incremental?view.changes:(view.next||view.changes));
     if(incremental&&!cursor)return;
     const params=new URLSearchParams({limit:'60',query:view.query});if(cursor)params.set('cursor',cursor);
     const data=await api(`/v1/retrieval/tasks/${view.taskId}/candidates${cursor?'/changes':''}?${params}`);
     if(!current())return;
+    if(typeof linkPipelineRender==='function')linkPipelineRender(view,data);
     if(view.version&&view.version!==data.search_version)throw new Error('检索版本已变化，请重新加载当前版本');
     if(replacement){view.items=[];view.itemCursors=new Map();view.page=0}
     view.version=data.search_version;if(!incremental)view.lastPageCursor=cursor;view.next=data.next_cursor;view.changes=data.changes_cursor;view.rawHitCount=data.raw_hit_count;

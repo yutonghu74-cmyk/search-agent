@@ -61,6 +61,12 @@ class ExplicitTargetParsingTests(unittest.TestCase):
             self.assertEqual(len(sealed['plan']['groups'][0]['auxiliary_terms']), 8)
             self.assertIsNone(sealed['plan']['groups'][0]['delivery_target'])
 
+    def test_shared_category_count_is_preserved_on_the_plan(self):
+        raw = '一只毛驴在奔跑、一只狗在吃饭、一个兔子在睡觉的图，每个类型要20张'
+        labels = ['毛驴奔跑', '狗吃饭', '兔子睡觉']
+        self.assertEqual(explicit_group_targets(raw, labels, 60), dict.fromkeys(labels, 20))
+        self.assertIsNone(explicit_group_targets(raw, labels, 20))
+
     def test_label_first_phrasing_from_the_acceptance_example(self):
         self.assertEqual(explicit_group_targets('狗 20 张、猫 30 张', self.LABELS, 50),
                          {'狗': 20, '猫': 30})

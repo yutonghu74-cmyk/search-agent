@@ -7,6 +7,9 @@ the transaction. Confirmations and their search-dispatch events commit together.
 Full snapshots trade throughput for a simple recovery baseline.
 """
 from contextlib import closing
+from . import transactions
+from .transactions import checked_access
+from . import ledger_rows
 from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -108,7 +111,7 @@ def decode(value):
                       "source_operation_ids", "near_duplicate_pairs",
                       "near_duplicate_decisions", "group_quotas",
                       "exclusion_decisions", "publication_mutation_count"}
-            legacy.add("manual_review_decisions")
+            legacy.update({"manual_review_decisions", "historical_reference_digest", "historical_exclusions"})
             if missing <= legacy:
                 defaults = {"parent_result_set_id": None,
                             "parent_result_set_digest": None,
@@ -118,7 +121,9 @@ def decode(value):
                             "group_quotas": encode(()),
                             "exclusion_decisions": encode(()),
                             "manual_review_decisions": encode(()),
-                            "publication_mutation_count": None}
+                            "publication_mutation_count": None,
+                            "historical_reference_digest": None,
+                            "historical_exclusions": encode(())}
                 data = {**data, **{key: value for key, value in defaults.items()
                                    if key in missing}}
         if kind == "ExactRepresentative":
@@ -192,13 +197,14 @@ class SQLiteTaskRepository:
         try:
             with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
-                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                allowed = {"local_ledger", "retrieval_ledger", "candidate_ledger",
+                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+                allowed = {"ledger_storage_meta", "ledger_registry", "ledger_sections", "ledger_items", "local_ledger", "retrieval_ledger", "candidate_ledger",
                            "multi_rule_cleaning_ledger", "plan_set_ledger",
                            "plan_task_read_views", "plan_task_read_meta",
                            "plan_source_meta", "plan_task_sources", "plan_page_sources",
                            "search_dispatch_outbox", "candidate_browse_hits", "sqlite_sequence",
                            "image_deliveries", "image_delivery_events", "cleaning_dispatch_attempts", "cleaning_checkpoints",
+                           "cleaning_usage_steps", "cleaning_usage_http", "retrieval_execution_budgets",
                            "refill_reservations", "refill_dispatch_outbox",
                            "auto_refill_outbox", "auto_refill_intake_outbox",
                            "near_duplicate_review_keys", "result_exclusion_keys",
@@ -213,6 +219,11 @@ class SQLiteTaskRepository:
                            "task_step_read_items", "task_read_summaries",
                            "task_read_summaries_meta", "task_node_read_heads", "task_node_read_items",
                            "task_event_write_heads", "chat_read_summaries", "chat_read_meta"}
+                allowed.update({'harness_journal_meta', 'harness_stages', 'harness_stage_heads',
+                                'harness_model_budgets', 'harness_attempts', 'harness_tool_receipts',
+                                'harness_attempt_tools', 'harness_run_events',
+                                'harness_stage_drafts', 'harness_stage_actions', 'agent_retrieval_handoffs', 'agent_processing_handoffs',
+                                'external_task_bindings', 'external_task_actions', 'agent_job_links'})
                 if tables and ("local_ledger" not in tables or tables - allowed):
                     raise ServiceError("STORAGE_FORMAT_UNSUPPORTED", "not a local demo ledger", 500)
                 db.execute("CREATE TABLE IF NOT EXISTS local_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)")
@@ -273,14 +284,16 @@ class SQLiteTaskRepository:
                 if row is None:
                     db.execute('INSERT OR IGNORE INTO task_read_summaries_meta '
                                '(id,format,task_count,dirty) VALUES (1,1,0,0)')
-                db.execute('''CREATE TRIGGER IF NOT EXISTS task_read_summaries_invalidate
-                    AFTER UPDATE ON local_ledger BEGIN
-                      UPDATE task_read_summaries_meta SET dirty=1 WHERE id=1;
-                    END''')
+                ledger_rows.migrate(db, 'local_ledger', self._load)
+                ledger_rows.watch(db, 'local_ledger', 'task_read_summaries_invalidate', 'UPDATE',
+                    'UPDATE task_read_summaries_meta SET dirty=1 WHERE id=1;')
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "local ledger could not be opened", 503, retryable=True) from exc
 
     def _connect(self):
+        prepared = transactions.connection(self.path)
+        if prepared is not None:
+            return prepared
         db = sqlite3.connect(self.path, timeout=5)
         db.execute("PRAGMA synchronous=FULL")
         return db
@@ -365,7 +378,7 @@ class SQLiteTaskRepository:
         sync_chat_history(db, memory, task_ids=task_ids)
         live = set(memory._tasks)
         tables = {row[0] for row in db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
         supplied_searches = searches is not None
         searches = searches or {}
         if not supplied_searches and 'plan_set_ledger' in tables:
@@ -436,8 +449,12 @@ class SQLiteTaskRepository:
             sync_node_views(db, task, tables)
             from ...task_events import publish_task_change
             publish_task_change(db, task, summary, tables)
-        db.execute('INSERT OR REPLACE INTO task_read_summaries_meta '
-                   '(id,format,task_count,dirty) VALUES (1,1,?,0)',
+        db.execute('INSERT INTO task_read_summaries_meta '
+                   '(id,format,task_count,dirty) VALUES (1,1,?,0) '
+                   'ON CONFLICT(id) DO UPDATE SET format=1,task_count=excluded.task_count,dirty=0 '
+                   'WHERE task_read_summaries_meta.format!=1 '
+                   'OR task_read_summaries_meta.task_count!=excluded.task_count '
+                   'OR task_read_summaries_meta.dirty!=0',
                    (len(live),))
 
     def list_task_read_page(self, actor, project_id, *, limit, after=None):
@@ -578,6 +595,7 @@ class SQLiteTaskRepository:
             raise ServiceError('STORAGE_UNAVAILABLE',
                 'task read binding unavailable', 503, retryable=True) from exc
 
+    @transactions.staged(always=True)
     def rebuild_task_read_summaries(self):
         try:
             with closing(self._connect()) as db, db:
@@ -590,14 +608,28 @@ class SQLiteTaskRepository:
             raise ServiceError('STORAGE_UNAVAILABLE',
                 'task read summary rebuild failed', 503, retryable=True) from exc
 
+    @transactions.staged(write_arg=1)
     def _call(self, name, write, *args, **kwargs):
         try:
             with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                 memory = self._load(db.execute("SELECT format, payload FROM local_ledger WHERE id=1").fetchone())
                 result = getattr(memory, name)(*args, **kwargs)
+                if name in ('save_draft', 'save_feedback_draft'):
+                    from ...historical_dedup import resolve
+                    draft, replayed = result
+                    spec = (draft['proposal']['query_spec'] if isinstance(draft, dict)
+                            else json.loads(draft.proposal_json)['query_spec'])
+                    target = memory.get(args[0], args[2]) if name == 'save_feedback_draft' else None
+                    unchanged = target is not None and spec['cross_batch_dedup'] == json.loads(
+                        target.confirmed_proposal_json)['query_spec']['cross_batch_dedup']
+                    resolve(db, memory, args[0], target.project_id if target else draft.project_id,
+                            target.dimension_id if target else draft.dimension_id,
+                            spec['cross_batch_dedup'], fresh=not replayed and not unchanged,
+                            target_task_id=target.task_id if target else None,
+                            target_batch_id=target.batch_id if target else None)
                 if write:
-                    db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                    ledger_rows.write_memory(db, memory)
                     self._sync_task_read_summaries(db, memory)
                 return result
         except sqlite3.Error as exc:
@@ -605,6 +637,8 @@ class SQLiteTaskRepository:
 
     @staticmethod
     def _queue_search_dispatch(db, task, dispatch_key):
+        if 'agent_requirements' in json.loads(task.confirmed_proposal_json)['query_spec']:
+            return  # Agent jobs own their explicit planning/confirmation chain.
         event_id = (f"search:{task.task_id}:{task.confirmed_revision}:"
                     f"{task.run_generation}:{task.task_version}")
         db.execute("""INSERT OR IGNORE INTO search_dispatch_outbox
@@ -615,14 +649,22 @@ class SQLiteTaskRepository:
              task.confirmed_revision, task.run_generation, task.task_version,
              dispatch_key, datetime.now(UTC).isoformat()))
 
-    def confirm_draft(self, *args, **kwargs):
+    @transactions.staged(always=True)
+    def confirm_draft(self, *args, confirmation_guard=None, **kwargs):
         try:
             with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 memory = self._load(db.execute(
                     "SELECT format, payload FROM local_ledger WHERE id=1").fetchone())
                 task, replayed = memory.confirm_draft(*args, **kwargs)
-                db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                if confirmation_guard is not None:
+                    confirmation_guard(task, replayed)
+                from ...historical_dedup import resolve
+                spec = json.loads(task.confirmed_proposal_json)['query_spec']
+                resolve(db, memory, args[0], task.project_id, task.dimension_id,
+                        spec['cross_batch_dedup'], fresh=not replayed,
+                        target_task_id=task.task_id, target_batch_id=task.batch_id)
+                ledger_rows.write_memory(db, memory)
                 self._sync_task_read_summaries(db, memory)
                 self._queue_search_dispatch(
                     db, task, f"terms:{task.task_id}:{task.confirmed_revision}")
@@ -631,7 +673,8 @@ class SQLiteTaskRepository:
             raise ServiceError("STORAGE_UNAVAILABLE", "local ledger transaction failed", 503,
                                retryable=True) from exc
 
-    def confirm_feedback_draft(self, *args, **kwargs):
+    @transactions.staged(always=True)
+    def confirm_feedback_draft(self, *args, confirmation_guard=None, **kwargs):
         try:
             with closing(self._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
@@ -641,13 +684,24 @@ class SQLiteTaskRepository:
                 before = memory.get(actor, task_id)
                 before_spec = json.loads(before.confirmed_proposal_json)["query_spec"]
                 result, replayed = memory.confirm_feedback_draft(*args, **kwargs)
-                db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                if confirmation_guard is not None and kwargs.get('action') == 'confirm':
+                    confirmation_guard(memory.get(actor, task_id), replayed)
+                if kwargs.get('action') == 'confirm' and not replayed:
+                    from ...historical_dedup import resolve
+                    after = memory.get(actor, task_id)
+                    history = json.loads(after.confirmed_proposal_json)['query_spec']['cross_batch_dedup']
+                    resolve(db, memory, actor, after.project_id, after.dimension_id, history,
+                            fresh=history != before_spec['cross_batch_dedup'],
+                            target_task_id=task_id, target_batch_id=after.batch_id)
+                ledger_rows.write_memory(db, memory)
                 self._sync_task_read_summaries(db, memory)
                 if kwargs.get("action") == "confirm" and not replayed:
                     after = memory.get(actor, task_id)
                     after_spec = json.loads(after.confirmed_proposal_json)["query_spec"]
                     if (after_spec.get("grouped_expansion") != before_spec.get("grouped_expansion")
-                            or after_spec.get("target_count") != before_spec.get("target_count")):
+                            or after_spec.get("target_count") != before_spec.get("target_count")
+                            or after_spec.get('cross_batch_dedup') != before_spec.get('cross_batch_dedup')
+                            or after_spec.get('retrieval_execution') != before_spec.get('retrieval_execution')):
                         self._queue_search_dispatch(db, after, "terms:" + after.request_digest)
                 return result, replayed
         except sqlite3.Error as exc:
@@ -706,6 +760,26 @@ class SQLiteTaskRepository:
                                retryable=True) from exc
 
     def get(self, *args, **kwargs): return self._call("get", False, *args, **kwargs)
+
+    def historical_options(self, actor, project_id, dimension_id):
+        from ...historical_dedup import options
+        with closing(self._connect()) as db, db:
+            db.execute('BEGIN')
+            memory = self._load(db.execute('SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+            return options(db, memory, actor, project_id, dimension_id)
+
+    def resolve_historical(self, actor, project_id, dimension_id, references):
+        from ...historical_dedup import resolve
+        from ...query_spec import digest
+        policy = ({'scope': 'selected_batches', 'references': references,
+                   'comparison_methods': ['exact-content@1'], 'reference_digest': digest(references)}
+                  if references else {'scope': 'none', 'references': [],
+                                     'comparison_methods': [], 'reference_digest': None})
+        with closing(self._connect()) as db, db:
+            db.execute('BEGIN')
+            memory = self._load(db.execute('SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+            resolve(db, memory, actor, project_id, dimension_id, policy, fresh=True)
+        return policy
     def create(self, *args, **kwargs): return self._call("create", True, *args, **kwargs)
     def get_draft(self, *args, **kwargs): return self._call("get_draft", False, *args, **kwargs)
     def save_draft(self, *args, **kwargs): return self._call("save_draft", True, *args, **kwargs)
@@ -722,6 +796,7 @@ class SQLiteTaskRepository:
     def list_conversations(self, *args, **kwargs): return self._call("list_conversations", False, *args, **kwargs)
     def delete_conversation(self, *args, **kwargs): return self._call("delete_conversation", True, *args, **kwargs)
 
+    @transactions.staged(always=True)
     def hard_delete_conversation(self, actor, conversation_id):
         """Force-cascade delete a conversation and its task tree in one transaction.
 
@@ -744,14 +819,22 @@ class SQLiteTaskRepository:
                     "SELECT format, payload FROM local_ledger WHERE id=1").fetchone())
                 cascade = memory.hard_delete_conversation(actor, conversation_id)
                 task_ids = cascade['tasks']
-                db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                ledger_rows.write_memory(db, memory)
                 self._sync_task_read_summaries(db, memory)
                 existing = {row[0] for row in db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
                 if task_ids:
                     placeholders = ",".join("?" for _ in task_ids)
                     if 'cleaning_checkpoints' in existing:
                         db.execute('DELETE FROM cleaning_checkpoints WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
+                    if 'retrieval_execution_budgets' in existing:
+                        db.execute('DELETE FROM retrieval_execution_budgets WHERE task_id IN (' + ','.join('?' for _ in task_ids) + ')', tuple(task_ids))
+                    if 'cleaning_usage_steps' in existing:
+                        where = "json_extract(binding_json,'$.task_id') IN (" + placeholders + ')'
+                        if 'cleaning_usage_http' in existing:
+                            db.execute('DELETE FROM cleaning_usage_http WHERE step_token IN '
+                                '(SELECT token FROM cleaning_usage_steps WHERE ' + where + ')', tuple(task_ids))
+                        db.execute('DELETE FROM cleaning_usage_steps WHERE ' + where, tuple(task_ids))
                     if 'cleaning_dispatch_attempts' in existing:
                         db.execute('DELETE FROM cleaning_dispatch_attempts WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
                     if 'near_duplicate_review_keys' in existing:
@@ -813,11 +896,27 @@ class SQLiteTaskRepository:
                     placeholders = ",".join("?" for _ in purged_digests)
                     db.execute("DELETE FROM candidate_browse_hits WHERE source IN ("
                                + placeholders + ")", tuple(purged_digests))
+                if 'harness_stages' in existing:
+                    from .harness import purge_for_tasks
+                    purge_for_tasks(db, task_ids)
+                if 'harness_stage_drafts' in existing or 'agent_job_links' in existing:
+                    from .agent_stages import purge_for_tasks as purge_stage_drafts
+                    purge_stage_drafts(db, task_ids)
+                if 'agent_retrieval_handoffs' in existing:
+                    from .agent_retrieval import purge_for_tasks as purge_agent_handoffs
+                    purge_agent_handoffs(db, task_ids)
+                if 'agent_processing_handoffs' in existing:
+                    from .agent_processing import purge_for_tasks as purge_processing_handoffs
+                    purge_processing_handoffs(db, task_ids)
+                if 'external_task_bindings' in existing or 'external_task_actions' in existing:
+                    from .shared import purge_for_tasks as purge_external_bindings
+                    purge_external_bindings(db, task_ids)
                 return cascade
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "local ledger transaction failed", 503,
                                retryable=True) from exc
 
+    @transactions.staged(always=True)
     def hard_delete_task(self, actor, task_id):
         """Force-cascade delete a legacy task tree by task id in one transaction.
 
@@ -839,14 +938,22 @@ class SQLiteTaskRepository:
                     "SELECT format, payload FROM local_ledger WHERE id=1").fetchone())
                 cascade = memory.hard_delete_task(actor, task_id)
                 task_ids = cascade['tasks']
-                db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                ledger_rows.write_memory(db, memory)
                 self._sync_task_read_summaries(db, memory)
                 existing = {row[0] for row in db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
                 if task_ids:
                     placeholders = ",".join("?" for _ in task_ids)
                     if 'cleaning_checkpoints' in existing:
                         db.execute('DELETE FROM cleaning_checkpoints WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
+                    if 'retrieval_execution_budgets' in existing:
+                        db.execute('DELETE FROM retrieval_execution_budgets WHERE task_id IN (' + ','.join('?' for _ in task_ids) + ')', tuple(task_ids))
+                    if 'cleaning_usage_steps' in existing:
+                        where = "json_extract(binding_json,'$.task_id') IN (" + placeholders + ')'
+                        if 'cleaning_usage_http' in existing:
+                            db.execute('DELETE FROM cleaning_usage_http WHERE step_token IN '
+                                '(SELECT token FROM cleaning_usage_steps WHERE ' + where + ')', tuple(task_ids))
+                        db.execute('DELETE FROM cleaning_usage_steps WHERE ' + where, tuple(task_ids))
                     if 'cleaning_dispatch_attempts' in existing:
                         db.execute('DELETE FROM cleaning_dispatch_attempts WHERE task_id IN (' + placeholders + ')', tuple(task_ids))
                     if 'near_duplicate_review_keys' in existing:
@@ -899,6 +1006,21 @@ class SQLiteTaskRepository:
                     placeholders = ",".join("?" for _ in purged_digests)
                     db.execute("DELETE FROM candidate_browse_hits WHERE source IN ("
                                + placeholders + ")", tuple(purged_digests))
+                if 'harness_stages' in existing:
+                    from .harness import purge_for_tasks
+                    purge_for_tasks(db, task_ids)
+                if 'harness_stage_drafts' in existing or 'agent_job_links' in existing:
+                    from .agent_stages import purge_for_tasks as purge_stage_drafts
+                    purge_stage_drafts(db, task_ids)
+                if 'agent_retrieval_handoffs' in existing:
+                    from .agent_retrieval import purge_for_tasks as purge_agent_handoffs
+                    purge_agent_handoffs(db, task_ids)
+                if 'agent_processing_handoffs' in existing:
+                    from .agent_processing import purge_for_tasks as purge_processing_handoffs
+                    purge_processing_handoffs(db, task_ids)
+                if 'external_task_bindings' in existing or 'external_task_actions' in existing:
+                    from .shared import purge_for_tasks as purge_external_bindings
+                    purge_external_bindings(db, task_ids)
                 return cascade
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "local ledger transaction failed", 503,
@@ -915,10 +1037,10 @@ class SQLiteTaskRepository:
         row = db.execute("SELECT format, payload FROM plan_set_ledger WHERE id=1").fetchone()
         state, purged_digests = purge(load(row), task_ids)
         db.execute("UPDATE plan_set_ledger SET format=3, payload=? WHERE id=1", (dump(state),))
-        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_task_read_views'").fetchone():
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='plan_task_read_views'").fetchone():
             from .plan_read_views import sync
             sync(db, state)
-        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_task_sources'").fetchone():
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='plan_task_sources'").fetchone():
             from . import plan_sources
             plan_sources.sync(db, state)
         return purged_digests

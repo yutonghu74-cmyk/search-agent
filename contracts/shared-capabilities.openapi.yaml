@@ -1,0 +1,107 @@
+openapi: 3.1.0
+info:
+  title: Shared module access
+  version: 1.0.0
+  description: Opt-in verified integration access over existing retrieval and cleaning APIs. Human approval uses the original owner endpoints. No new task or approval model.
+security:
+  - bearerAuth: []
+paths:
+  /v1/shared/capabilities:
+    get:
+      operationId: sharedCapabilities
+      parameters:
+        - $ref: '#/components/parameters/Project'
+      responses:
+        '200': {description: Integration grants and retrieval_configured/retrieval_terms_configured/cleaning_configured. Terms prepare/read grants are explicit; no owner confirmation rights.}
+        '401': {$ref: '#/components/responses/Denied'}
+        '403': {$ref: '#/components/responses/Denied'}
+        '503': {description: Shared access is not configured}
+  /v1/shared/tasks/{task_id}/binding:
+    parameters:
+      - $ref: '#/components/parameters/Task'
+      - $ref: '#/components/parameters/Project'
+    get:
+      operationId: getExternalTaskBinding
+      parameters:
+        - $ref: '#/components/parameters/ExternalRef'
+      responses:
+        '200': {description: Association and current task metadata, including stale flag; does not dispatch}
+        '401': {$ref: '#/components/responses/Denied'}
+        '403': {$ref: '#/components/responses/Denied'}
+        '404': {description: Binding or authorized task not found}
+    post:
+      operationId: bindExternalTask
+      parameters:
+        - $ref: '#/components/parameters/Idempotency'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [external_task_ref, expected_revision, expected_generation, expected_task_version]
+              properties:
+                external_task_ref: {type: string, minLength: 1, maxLength: 128}
+                expected_revision: {type: integer, minimum: 1}
+                expected_generation: {type: integer, minimum: 1}
+                expected_task_version: {type: integer, minimum: 1}
+      responses:
+        '200': {description: Persisted external association; idempotent replay never creates or approves tasks}
+        '401': {$ref: '#/components/responses/Denied'}
+        '403': {$ref: '#/components/responses/Denied'}
+        '404': {description: Authorized task not found}
+        '409': {description: Version, external-reference, idempotency or association-capacity conflict}
+        '422': {description: Invalid request}
+  /v1/shared/tasks/{task_id}/receipt:
+    get:
+      operationId: getSharedInvocationReceipt
+      parameters:
+        - $ref: '#/components/parameters/Task'
+        - $ref: '#/components/parameters/Project'
+        - $ref: '#/components/parameters/ExternalRef'
+        - {name: operation, in: query, required: true, schema: {type: string, enum: [retrieval.prepare, cleaning.prepare, cleaning.execute]}}
+        - {name: key, in: query, required: true, schema: {type: string}}
+      responses:
+        '200': {description: recorded result/error or pending_or_unknown; does not retry or dispatch}
+        '401': {$ref: '#/components/responses/Denied'}
+        '403': {$ref: '#/components/responses/Denied'}
+        '404': {description: Receipt or authorized binding not found}
+        '422': {description: Invalid query}
+  /v1/shared/tasks/{task_id}/cancel:
+    post:
+      operationId: cancelSharedTask
+      description: Requires task.cancel grant. Fences the entire bound task by advancing version/generation. Remote termination remains unknown; no budget refunds.
+      parameters:
+        - $ref: '#/components/parameters/Task'
+        - $ref: '#/components/parameters/Project'
+        - $ref: '#/components/parameters/ExternalRef'
+        - $ref: '#/components/parameters/Idempotency'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action, expected_task_version]
+              properties:
+                action: {type: string, const: cancel}
+                expected_task_version: {type: integer, minimum: 1}
+      responses:
+        '200': {description: Cancellation fence or identical prior cancellation receipt}
+        '401': {$ref: '#/components/responses/Denied'}
+        '403': {$ref: '#/components/responses/Denied'}
+        '404': {description: Authorized binding not found}
+        '409': {description: Stale version, invalid state or changed idempotency payload}
+        '422': {description: Invalid request}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    Project: {name: x-app-id, in: header, required: true, schema: {type: string}, description: Verified canonical platform project}
+    Task: {name: task_id, in: path, required: true, schema: {type: string}}
+    ExternalRef: {name: X-External-Task-Ref, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
+    Idempotency: {name: Idempotency-Key, in: header, required: true, schema: {type: string}}
+  responses:
+    Denied: {description: Verified identity, principal scope or project permission denied}

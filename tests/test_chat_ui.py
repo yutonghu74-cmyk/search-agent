@@ -8,6 +8,83 @@ from dsh_retrieval.production_board_ui import BOARD_CSS, BOARD_HTML, BOARD_JS
 
 
 class ChatUiTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node required for delegated candidate review choices')
+    def test_term_confirmation_discloses_automatic_cleaning_and_optional_candidate_review(self):
+        source = CHAT_JS[CHAT_JS.index('function showTermReview('):CHAT_JS.index('async function prepareGuidedExpansion(')]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');let checkbox,selected,copy='';const actions=[];
+const auto={schema_version:'confirmed-terms-execution@2',candidate_intake:'auto',policy_digest:'auto',max_calls:8,max_hit_slots:80};
+const manual={...auto,candidate_intake:'manual',policy_digest:'manual'};
+const proposal={count:20,lines:'狗',raw:'狗20张',plan:{groups:[{primary_label:'狗'}]}};
+const state={proposedExpansion:proposal,agentWindowProfile:{confirmed_terms_execution:auto,candidate_review_execution:manual,library_ids:['dogs']}};
+const document={createElement:tag=>{const item={append(){},addEventListener:(event,fn)=>item[event]=fn};if(tag==='input')checkbox=item;return item},createTextNode:text=>({textContent:text})};
+const message=(role,title,text)=>{copy=text;return {append(){},querySelector(){return null}}};
+const fields={'query-image-exclude':{checked:false},status:{}};
+const show=new Function('state','document','$','message','reviewDetails','guidedAction','refillFormValue','refillSummary','confirmGuidedExpansion',process.env.SOURCE+';return showTermReview')(
+ state,document,id=>fields[id],message,()=>{},(bubble,label,fn)=>actions.push({label,fn}),()=>({enabled:false}),()=>'',async(...args)=>selected=args[3]);
+show(proposal);assert(copy.includes('现有清洗流程'));assert(copy.includes('图片会发送给本次选定的清洗模型'));
+assert.equal(checkbox.checked,false);await actions[0].fn();assert.equal(selected,auto);
+checkbox.checked=true;checkbox.change();await actions[0].fn();assert.equal(selected,manual);
+assert(!copy.includes('清洗 Agent 已接通'));
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node','-e',script],env={**os.environ,'SOURCE':source},capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for failed dialogue send recovery')
+    def test_failed_dialogue_releases_new_input_but_uncertain_work_remains_pending(self):
+        source = (CHAT_JS[CHAT_JS.index('function taskTurnStorageKey('):CHAT_JS.index('async function sendTaskTurn(')] +
+                  CHAT_JS[CHAT_JS.index('function dialogueCommandScope('):CHAT_JS.index('async function reviseGuidedExpansion(')])
+        script = r"""
+const assert=require('node:assert/strict');
+const state={dialogueId:'dlg_one',newChatToken:'token'};const saved=new Map(),headers={};
+const sessionStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)};
+let status='failed',posts=0,actions=[];
+const api=async(path,options)=>{if(options?.method==='POST'){posts++;assert.equal(options.retryFailed,true);assert.equal(options.keyValue,'original-key');return {schema_version:'dialogue-command@1',status:'failed',error:{code:'MODEL_RATE_LIMIT',message:'429'}}}return {status,error:{message:'429'}}};
+const funcs=new Function('state','headers','sessionStorage','key','api','setDialogueBusy','saveDialogueSession','restoreDialogueSession','message','guidedAction','$',process.env.SOURCE+';return {saveTaskTurn,pendingDialogueCommand,recoverDialogueCommand};')(
+state,headers,sessionStorage,()=>{throw Error('must reuse key')},api,()=>{},()=>{},async()=>{},()=>({remove(){}}),(...a)=>actions.push(a),()=>({textContent:''}));
+const pending={taskId:'dialogue:dlg_one',key:'original-key',body:{session_id:'dlg_one',message:'old'},selection:{llm:'original'}};
+(async()=>{
+ // Check the scope used by production rather than duplicating its format.
+ pending.taskId='dialogue:'+state.dialogueId;
+ funcs.saveTaskTurn(pending);assert(funcs.pendingDialogueCommand());
+ for(status of ['understanding','interrupted']){
+   assert.notEqual(await funcs.recoverDialogueCommand(false,true),true);
+   assert(funcs.pendingDialogueCommand());assert.equal(state.requestController,null);
+ }
+ status='failed';await funcs.recoverDialogueCommand(true);assert.equal(posts,1);
+ assert(funcs.pendingDialogueCommand());assert.equal(state.requestController,null);
+ assert.equal(await funcs.recoverDialogueCommand(false,true),true);
+ assert.equal(funcs.pendingDialogueCommand(),null);assert.equal(posts,1);
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for semantic draft page transition')
+    def test_category_edit_regenerates_from_effective_draft_and_missing_count_stops_preview(self):
+        source = CHAT_JS[CHAT_JS.index('async function applyDialogueTurn('):CHAT_JS.index('async function reviseGuidedExpansion(')]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');
+const proposal={count:60,raw:'旧兔子睡觉',plan:{groups:[{delivery_target:20}]}};
+const state={proposedExpansion:proposal};let generated=[],revised=0,replies=[];
+const apply=new Function('state','saveDialogueSession','message','prepareGuidedExpansion','reviseGuidedExpansion',process.env.SOURCE+';return applyDialogueTurn')(
+ state,()=>{},(...args)=>replies.push(args),async(...args)=>generated.push(args),async()=>revised++);
+const turn={action:'revise_terms',stage:'terms',session_id:'dlg_x',version:2,requirement_edits:[{op:'remove_category'}],
+ request:{target_count:50,effective_request:'毛驴20张、狗30张'}};
+await apply(turn,proposal,'兔子不要了',{llm:'selected'},null);
+assert.equal(generated.length,1);assert.equal(generated[0][0],'毛驴20张、狗30张');assert.equal(generated[0][1],50);
+assert.equal(revised,0);
+state.proposedExpansion=proposal;
+await apply({...turn,stage:'request',request:{target_count:null},reply:'新增猫图片需要多少张？'},proposal,'再加猫',{},null);
+assert.equal(generated.length,1);assert.equal(state.proposedExpansion,null);assert.equal(state.guidedPhase,'input');
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @unittest.skipUnless(shutil.which('node'), 'Node required for task async receipt tests')
     def test_task_async_acceptance_polls_without_reposting_and_keeps_failed_key(self):
         source = CHAT_JS[CHAT_JS.index('function taskTurnStorageKey('):CHAT_JS.index('async function recoverTaskTurn(')]
@@ -330,6 +407,7 @@ const prepare=new Function('state','$','api','message','setDialogueBusy','saveDi
     @unittest.skipUnless(shutil.which('node'), 'Node required for connection error behavior test')
     def test_api_distinguishes_disconnect_from_abort_and_never_retries_posts(self):
         source = CHAT_JS[CHAT_JS.index('async function api('):CHAT_JS.index('function stopTaskEvents(')]
+        source = 'const window={};' + CHAT_JS[CHAT_JS.index('const pipelineResponseTraces='):CHAT_JS.index('const headers=')] + source
         script = r"""
 const assert=require('node:assert/strict');let calls=0,mode='disconnect';
 const fetch=async()=>{calls++;if(mode==='disconnect')throw TypeError('Failed to fetch');
@@ -832,6 +910,7 @@ assert.match(status.textContent,/保留你的文字/);
                          CHAT_JS.index('async function deleteHistoryChat(')]
         start = CHAT_JS[CHAT_JS.index('function startNewChat()'):
                         CHAT_JS.index('const settingsPath=')]
+        start += CHAT_JS[CHAT_JS.index('function showHistoryPolicy()'):CHAT_JS.index('function bindHistoryControls()')]
         script = r"""
 const assert=require('node:assert/strict');
 let reloads=0,focuses=0;
@@ -855,12 +934,37 @@ assert.equal(reloads,1);assert(removed.includes('dsh-dialogue'));
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    @unittest.skipUnless(shutil.which('node'), 'Node required for navigation isolation test')
+    def test_fresh_chat_ignores_old_storage_and_invalidates_pending_history_reads(self):
+        source = CHAT_JS[CHAT_JS.index('function chatNavigationIntent()'):CHAT_JS.index('function syncRefillFields()')]
+        script = r"""
+const assert=require('node:assert/strict');
+const local=new Map([['dsh-task-id','old-task']]),session=new Map([['dsh-dialogue','old-dialogue']]);
+const store=m=>({getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,v),removeItem:k=>m.delete(k)});
+let reloads=0;const location={search:'',reload(){reloads++}};
+const state={task:{task_id:'old-task'},historyOpenToken:7,sidebarReadToken:4};
+const [intent,start]=new Function('state','localStorage','sessionStorage','location','$','cancelDialogueRequest','showHistoryPolicy','key',
+ process.env.SOURCE+';return [chatNavigationIntent,startNewChat]')(
+ state,store(local),store(session),location,()=>({focus(){}}),()=>{},()=>{},()=> 'fresh-token');
+assert.equal(intent().taskId,'old-task');start();assert.equal(reloads,1);
+assert.equal(state.historyOpenToken,8);assert.equal(state.sidebarReadToken,5);assert.equal(state.task,null);
+assert.equal(session.get('dsh-fresh-chat'),'fresh-token');
+local.set('dsh-task-id','late-old-task');session.set('dsh-dialogue','late-old-dialogue');
+assert.deepEqual(intent(),{fresh:true,taskId:null});assert(!local.has('dsh-task-id'));assert(!session.has('dsh-dialogue'));
+const linked='rt_'+'a'.repeat(32);location.search='?task='+linked;
+assert.deepEqual(intent(),{fresh:false,taskId:linked});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("if(bootEpoch!==(state.historyOpenToken||0))return", CHAT_JS)
+
     @unittest.skipUnless(shutil.which('node'), 'Node required for deficit suggestion test')
     def test_authoritative_gap_offers_new_unconfirmed_term_draft(self):
         stop_label = CHAT_JS[CHAT_JS.index('function refillStopLabel('):
                              CHAT_JS.index('function completedNodeOutput(')]
         source = stop_label + CHAT_JS[CHAT_JS.index('const resultViewLabels='):
                                       CHAT_JS.index('async function loadMoreResults(')]
+        source = 'const window={};' + CHAT_JS[CHAT_JS.index('const pipelineResponseTraces='):CHAT_JS.index('const headers=')] + source
         script = r"""
 (async()=>{
 const assert=require('node:assert/strict');
@@ -1070,7 +1174,7 @@ const values=new Map([['dsh-task-id','task-hello']]);
 let restored=false;
 const state={task:{task_id:'task-hello'},conversationId:'old',dialogueId:null,draft:{},resumeDraft:{}};
 const localStorage={getItem:key=>values.get(key)||null,removeItem:key=>values.delete(key)};
-const sessionStorage={setItem:(key,value)=>values.set(key,value),getItem:key=>values.get(key)||null};
+const sessionStorage={setItem:(key,value)=>values.set(key,value),getItem:key=>values.get(key)||null,removeItem:key=>values.delete(key)};
 const fields={'llm-model':{value:'llm-id'},'vlm-model':{value:'vlm-id'},'new-request':{classList:{remove(){}}},'feedback-box':{classList:{add(){}}}};
 const open=new Function('state','localStorage','sessionStorage','readStoredModelChoice','$','restoreDialogueSession','cancelDialogueRequest',
   process.env.OPEN_SOURCE+';return openDialogueSession')(
@@ -1368,7 +1472,7 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertNotIn('多索引歧义会另行要求选择', CHAT_JS)
         self.assertIn('当前文本编码器无法处理', CHAT_JS)
         self.assertNotIn("if(turn.action==='confirm_terms'&&proposal){await confirmGuidedExpansion", CHAT_JS)
-        self.assertNotIn("body.node_modes.retrieval='auto'", CHAT_JS)
+        self.assertIn("if(confirmedExecution.candidate_intake){body.node_modes.retrieval='auto';body.node_modes.cleaning='auto'}", CHAT_JS)
         self.assertIn("refreshTaskSidebar();offerExistingSearch(taskId);refreshHistory()", CHAT_JS)
         self.assertIn("error.code==='INVALID_STATE_TRANSITION'&&['AWAITING_INPUT','PARTIAL','COMPLETED','FAILED'].includes(state.task.run_status)", CHAT_JS)
         self.assertIn("'检查检索计划',guidedStartSearch", CHAT_JS)
@@ -1402,7 +1506,7 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertIn('const feedbackText=text;', CHAT_JS)
         self.assertIn('async function reviseGuidedExpansion', CHAT_JS)
         self.assertIn('feedback_text:instruction,current_groups:current,count_edits:edits', CHAT_JS)
-        self.assertIn("if(turn.action==='revise_terms'&&proposal)", CHAT_JS)
+        self.assertIn("if(turn.action==='revise_terms'&&turn.stage==='terms'&&proposal)", CHAT_JS)
         self.assertIn("体验环境说明", CHAT_HTML)
         self.assertNotIn("确认需求与扩词，开始检索", CHAT_JS)
         self.assertIn("仅保存反馈文本", CHAT_JS)

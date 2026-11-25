@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import unittest
+from types import SimpleNamespace
 
 from dsh_retrieval.adapters.retrieval.clip_search import CLIPTextSearchRequest
 from dsh_retrieval.integration_models import IndexBinding, QueryVector, SearchHit, SearchPage, SearchRequest
@@ -42,6 +43,54 @@ class RefillCLIPAdapterTest(unittest.TestCase):
             confirmed_proposal_json=json.dumps(BODY, ensure_ascii=False))
         self.binding = IndexBinding(
             "binding-1", "library-a", "index-v1", "encoder-v1", 2, "COSINE")
+
+    def test_local_refill_balances_durable_page_depth_and_skips_exhausted(self):
+        branch = compile_query_branches(BODY['query_spec'])['branches'][0]
+        requests = tuple(SearchRequest(
+            f'plan-{i}', 1, self.binding, QueryVector('encoder-v1', (0.1, 0.2)),
+            'filter-v1', 10) for i in range(4))
+        heads = tuple(PlanSetMemberProgress(
+            request.plan_id, request, f'op-{i}',
+            SearchPage((), None if i == 3 else f'cursor-{i}',
+                       'exhausted' if i == 3 else None, 'snapshot', 'snap-1'), depth)
+            for i, (request, depth) in enumerate(zip(requests, (4, 1, 1, 1))))
+        approved = SimpleNamespace(proposal_digest='approved', members=tuple(
+            SimpleNamespace(branch_id=branch['branch_id']) for _ in heads))
+        search = SimpleNamespace(
+            mode='LOCAL_CLIP', service=SimpleNamespace(repository=Tasks(self.task)),
+            repository=SimpleNamespace(
+                get_browse_current=lambda *args: approved,
+                get_progress=lambda *args, **kwargs: heads))
+        adapter = LocalCLIPRefillAdapter(search)
+        def order():
+            return [parse_refill_position(p)['parameters']['plan_id'] for p in
+                    adapter.list_refill_positions(self.actor, self.task.task_id,
+                                                  revision=2, generation=4)]
+        self.assertEqual(order(), ['plan-1', 'plan-2', 'plan-0'])
+        heads = tuple(replace(h, committed_pages=2) if h.plan_id == 'plan-1'
+                      else h for h in heads)
+        self.assertEqual(order(), ['plan-2', 'plan-1', 'plan-0'])
+
+    def test_combined_refill_balances_depth_without_changing_position_identity(self):
+        requests = tuple(CLIPTextSearchRequest(
+            f'plan-{i}', 4, self.binding, '客厅', 'filter-v1', 20, f'cursor-{i}')
+            for i in range(3))
+        pending = tuple((f'branch-{i}', request, depth)
+                        for i, (request, depth) in enumerate(zip(requests, (5, 1, 1))))
+        search = SimpleNamespace(
+            mode='CLIP_COMBINED', service=SimpleNamespace(repository=Tasks(self.task)),
+            jobs=SimpleNamespace(current_for_browse=lambda scope: 'job-1',
+                                 pending_requests=lambda job: pending))
+        adapter = CombinedCLIPRefillAdapter(search)
+        positions = adapter.list_refill_positions(self.actor, self.task.task_id,
+                                                  revision=2, generation=4)
+        self.assertEqual([parse_refill_position(p)['parameters']['plan_id']
+                          for p in positions], ['plan-1', 'plan-2', 'plan-0'])
+        pending = tuple((branch, request, 6) for branch, request, _ in pending)
+        replay = adapter.list_refill_positions(self.actor, self.task.task_id,
+                                               revision=2, generation=4)
+        self.assertEqual({p.fingerprint for p in positions},
+                         {p.fingerprint for p in replay})
 
     def test_local_clip_resolves_and_executes_one_exact_approved_page(self):
         logical = compile_query_branches(BODY["query_spec"])

@@ -8,7 +8,7 @@ from dsh_retrieval.result_views import build_result_page, VIEWS as RESULT_VIEWS
 
 def verify(repository):
     def compare(memory, retrieval, candidates, state, db):
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
         checked = {'tasks': 0, 'result_views': 0, 'result_items': 0, 'node_items': 0, 'step_items': 0}
         def equal(actual, expected, label):
             if actual != expected:

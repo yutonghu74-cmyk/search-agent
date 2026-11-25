@@ -38,7 +38,7 @@ class PlatformMediaReader:
 
     @contextmanager
     def __call__(self, context, project_id, media_ref, max_bytes):
-        if type(max_bytes) is not int or not 0 < max_bytes <= 100_000_000:
+        if type(max_bytes) is not int or not 0 < max_bytes <= 2 * 1024**3:
             raise ServiceError('MEDIA_LIMIT_EXCEEDED', 'invalid media byte limit', 422)
         # Resolver must call the platform preview endpoint with actor/project authorization.
         url = self.preview_url(context, project_id, media_ref)

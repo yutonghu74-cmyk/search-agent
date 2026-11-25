@@ -85,11 +85,45 @@ class SQLiteTest(unittest.TestCase):
             self.assertEqual(reopened.list_tasks_page(
                 self.actor, 'demo')['items'][0]['task_id'], tid)
         conversation_id = reopened.get_task(self.actor, tid)['conversation_id']
+        from dataclasses import replace
+        from cleaning.test_generic_runner import make_job
+        from dsh_retrieval.cleaning_usage import CleaningUsageRecorder, observed_http
+        from io import BytesIO
+        from types import SimpleNamespace
+        job = make_job(contents=(b'test',))
+        binding = replace(job.binding, task_id=tid)
+        recorder = CleaningUsageRecorder(self.db, binding, lambda: None)
+        with recorder.step(job.candidates[0], job.recipe.steps[0], supported=False):
+            opener = SimpleNamespace(open=lambda *args, **kwargs: BytesIO(b'fixture'))
+            with observed_http(opener, None, timeout=1, model_kind='vlm') as response:
+                response.read()
+        with closing(sqlite3.connect(self.db)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM cleaning_usage_http').fetchone(), (1,))
         reopened.hard_delete_conversation(self.actor, conversation_id)
         self.assertEqual(reopened.list_tasks_page(self.actor, 'demo')['items'], [])
         with closing(sqlite3.connect(self.db)) as db:
             self.assertEqual(db.execute(
                 'SELECT COUNT(*) FROM task_read_summaries').fetchone(), (0,))
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM cleaning_usage_steps').fetchone(), (0,))
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM cleaning_usage_http').fetchone(), (0,))
+
+    def test_hard_delete_task_also_purges_usage(self):
+        from dataclasses import replace
+        from cleaning.test_generic_runner import make_job
+        from dsh_retrieval.cleaning_usage import CleaningUsageRecorder
+        from dsh_retrieval.models import Task
+        legacy = Task('rt_legacy_usage', self.actor.tenant_id, self.actor.user_id,
+                      'legacy request', 'image', 1, 'domain', True, 'interactive',
+                      'sha256:' + '1' * 64, project_id='demo', dimension_id='default')
+        self.repo.create(self.actor, 'legacy-usage', legacy.request_digest, legacy)
+        tid = legacy.task_id
+        job = make_job(contents=(b'test',))
+        recorder = CleaningUsageRecorder(self.db, replace(job.binding, task_id=tid), lambda: None)
+        with recorder.step(job.candidates[0], job.recipe.steps[0], supported=False):
+            pass
+        self.repo.hard_delete_task(self.actor, tid)
+        with closing(sqlite3.connect(self.db)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM cleaning_usage_steps').fetchone()[0], 0)
 
     def test_task_read_summary_missing_row_fails_closed(self):
         tid = self.create()
@@ -180,7 +214,7 @@ print(json.dumps({'task':r.get(a,sys.argv[2]).to_summary(),'op':r.cleaning_resul
         self.assertEqual(new.get(self.actor, tid).run_generation, old.proposal.generation + 1)
 
     def test_failed_serialization_rolls_back_confirmation(self):
-        with patch("dsh_retrieval.adapters.task_storage.sqlite.dump", side_effect=RuntimeError("injected")):
+        with patch("dsh_retrieval.adapters.task_storage.ledger_rows.prepare_state", side_effect=RuntimeError("injected")):
             with self.assertRaises(RuntimeError):
                 self.create()
         new = SQLiteTaskRepository(self.db)

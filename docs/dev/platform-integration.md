@@ -67,3 +67,46 @@ resolve_hits 的 `items_path` 指向与输入等长、同序的映射列表，�
 本地测试使用合成身份、脱敏结构与合成字节，覆盖真实业务账本及装配，但没有访问内部平台。需要平台交付已确认的 PAT 支持、账号停用/吊销语义、当前项目授权版本映射、实际检索及预览响应，才能填写 wire 配置并运行内网定向验收。固定普通测试用户、测试项目与测试素材也须由平台准备。
 
 本仓库实现不要求这些未知字段通过“猜一个值”继续运行。配置缺失、协议错误、无个人委托或权限服务故障均拒绝受限操作。完成本地开发不能记为 W3/PAT 接通、真实素材授权通过或 v1.9 全量验收。
+
+
+## 整段视频执行与文件接入
+
+视频默认不可执行。受信 integration factory 可在原 `capabilities` / `encode_query` / 检索、解析与授权读取协议之外提供：
+
+| Hook | 返回与责任 |
+| --- | --- |
+| `whole_video_bindings(app)` | 精确 `IndexBinding` 序列；声明已核验为整段原视频的索引，不能登记帧或片段索引 |
+| `video_preflight(app, actor, project_id, spec_or_none)` | 实际核验文字编码、索引、原视频读取、解码和条件验证协议；只有 `{'ready': True}` 放行，能力查询时 spec 可为 None |
+| `video_registry(app, actor, task)` | 当前任务绑定的 `ReleasedDetectorRegistry`，包含 verified 视频能力与经摘要核验的发布工件 |
+| `inspect_video_file(app, path)` | 在受限临时文件上实际核验容器、视频流和时长，返回 `media_type=video`、`container=mp4/webm`、正整数 `duration_ms` |
+| `inspect_video(app, bytes)` | 兼容小文件检查器；只在不超过 10 MiB 时使用字节路径 |
+
+文件型 evaluator 用 `WholeVideoConditionDetector(task, evaluate, evaluate_file=...)` 接入。文件 callback 不得缓存临时路径，须自己约束解码/模型调用资源并保存可追溯证据；路径在本次处理结束后删除。`preflight` 是受信服务端健康检查协议，不能填固定 ready 冒充真实核验，也不能从前端开启。
+
+配置可选 `video_resources` 对象：`max_video_bytes` 默认 100,000,000、`max_job_bytes` 默认 500,000,000、`max_duration_ms` 默认 3,600,000、`read_seconds` 默认 120；均为正整数。单视频硬上限 2 GiB、单作业硬上限 8 GiB，进程同时最多两个视频临时文件读取。HTTP 上游仍须设置自身网络超时；本策略不强制终止不返回的第三方 callback。资源限制是服务端配置，不由草稿修改。没有安装默认解码器或模型。
+
+文件模式交付使用 `whole-video-delivery@2`：ZIP 保存原视频清单和鉴权下载路径，原视频经发布后的接口流式读取，不把大视频塞入 SQLite BLOB。原始内容、版本、条件与结果摘要仍绑定当前发布结果。旧小文件 `whole-video-delivery@1` ZIP 保持可读；图片清单不变。
+
+平台浏览器视频采用带项目的 GET 路径 `/v1/retrieval/projects/{project}/tasks/{task}/...`，从已有安全 Cookie 验证身份，再按 URL 项目重新授权；仅这类严格匹配的视频只读路径可推导 `x-app-id`。不把 token 放进 URL，不放宽 POST、CSRF 或跨项目校验。支持单一 Range、206/416；读取中断后浏览器重试仍须重新鉴权和校验当前结果。开发模式继续使用请求头鉴权。
+
+升级后旧平台搜索游标不再复用，需重新准备批准计划。新游标绑定用户、项目、任务、revision、generation、批准计划、索引与授权范围；正常清洗引发的 task_version 更新不使同一计划续页失效。旧运行仍被 revision/generation/计划栅栏拒绝。
+
+联调前必须提供实际源索引粒度、文字/视频 embedding 对齐信息、不可变原视频身份与版本摘要、授权读取协议、真实检查器及带证据的验证器。合成测试不代表内网、真实解码或质量验收通过。
+
+
+## 手动视频计划与固定输入
+
+已确认需求的 `node_modes.retrieval=manual` 时，平台后台首搜消费回执为 `status=manual`，不调用 auto_start。操作入口沿用现有接口：GET `tasks/{task}/first-search` 读取授权来源，POST `/first-search/prepare` 提交 routing_digest 与每分支所选 binding_id/batch_size，POST `/first-search/confirm` 提交 proposal_digest、expected_task_version 和 action=confirm。准备不执行，确认使用 Idempotency-Key，后台执行器随后处理首批。无需新增内网 API。
+
+视频计划准备与清洗准备分别检查容量及确认预算。固定输入任务只处理已确认的首批窗口，缺口按 INPUT_SCOPE_COMPLETE 原子持久化并进入 AWAITING_INPUT；发起人确认交付后才标记 PARTIAL。视频进度可以在同 revision/generation 的清洗及交付后读取，但只读路径不会授予续页执行权限。图片默认行为不变。
+
+## 多账号隔离补强与当前启用边界（2026-11-21）
+
+已选择接现有数据平台登录，不另建账号/密码主库。沿用平台核验个人凭据、项目授权、HttpOnly会话及租户/用户/项目存储命名空间。
+
+- 身份认证拒绝重复Authorization；浏览器桥接拒绝重复Cookie、页内用户及CSRF头、同名会话Cookie，避免不同组件取不同身份。
+- 当前上下文、资格复核和退出均核对页内用户与真实会话用户；旧页不能退出刚切换的新账号会话。
+- 页面展示已核验用户ID；定时、重新获得焦点、恢复浏览器页面及重新可见时复核身份、会话CSRF和项目资格。失败即中止请求、清除旧展示；失效后的晚到响应不再交付业务脚本。每次业务请求仍由服务端鉴权，页面复核不是授权缓存。
+- 双账号HTTP并发测试覆盖同幂等键分别创建私有草稿、本人读取成功、跨用户读取/确认拒绝。Node覆盖用户切换、会话变化、项目移除、撤权及切项目晚到响应，不以模拟平台测试替代真实平台联测。
+
+当前8096仍是开发演示装配；没有真实平台私有配置与HTTPS登录入口时不自动切换，不能宣称真实多用户已上线。需管理员提供仓库外配置文件路径（结构参考`config/platform.example.json`、`config/platform-wire.example.json`），包含已核验API及协议映射、独立平台账本/委托存储和密钥位置，并由HTTPS反向代理转发平台登录会话建立流程。不要将Token、密钥或真实地址写入仓库。既有演示任务不自动转移给真实账号；如需迁移应另行明确所有者映射并验收。

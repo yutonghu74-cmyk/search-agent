@@ -48,11 +48,21 @@ class SearchDispatchTest(unittest.TestCase):
         result = coordinator.dispatch_task(task_id)
         self.assertEqual(result["status"], "started")
         self.assertEqual(len(search.calls), 1)
+
         self.assertEqual(reopened.pending_search_dispatches(), ())
 
         replay = coordinator.dispatch_task(task_id)
         self.assertEqual(replay, result)
         self.assertEqual(len(search.calls), 1)
+
+    def test_shared_mode_persists_manual_gate_without_automatic_approval(self):
+        task_id=self.create();search=FakeFirstSearch()
+        dispatcher=SearchDispatchCoordinator(self.repo,search,start=False,respect_manual_retrieval=True)
+        self.assertEqual(dispatcher.dispatch_task(task_id)['status'],'manual')
+        self.assertEqual(search.calls,[])
+        restarted=SearchDispatchCoordinator(SQLiteTaskRepository(self.path),search,start=False,respect_manual_retrieval=True)
+        self.assertEqual(restarted.dispatch_task(task_id)['status'],'manual')
+        self.assertEqual(search.calls,[])
 
     def test_transient_failure_stays_pending_and_retries(self):
         task_id = self.create()
@@ -93,3 +103,24 @@ class SearchDispatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_one_users_full_queue_does_not_block_other_users_dispatch(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        events = [dict(event_id='e'+user, tenant_id='t', owner_user_id=user, task_id=user,
+                       revision=1, generation=1, task_version=1, dispatch_key='k'+user)
+                  for user in ('a', 'b')]
+        repository = Mock()
+        repository.pending_search_dispatches.return_value = events
+        repository.get.return_value = SimpleNamespace(confirmed_revision=1, run_generation=1,
+            task_version=1, media_type='image')
+        search = Mock()
+        def start(actor, task_id, **_):
+            if task_id == 'a':
+                raise ServiceError('SEARCH_USER_QUEUE_FULL', 'full', 503, True)
+            return {'status': 'queued', 'task_id': task_id}
+        search.auto_start.side_effect = start
+        coordinator = SearchDispatchCoordinator(repository, search, start=False)
+        coordinator._drain()
+        repository.mark_search_dispatched.assert_called_once_with('eb', {'status': 'queued', 'task_id': 'b'})
+        self.assertEqual(search.auto_start.call_count, 2)

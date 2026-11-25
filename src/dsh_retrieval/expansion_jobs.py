@@ -12,15 +12,22 @@ from pathlib import Path
 
 from .dialogue import resolve_count_edits
 from .errors import ServiceError
-from .expansion_models import MAX_EXPANSIONS, preview_edited_groups, seal_explicit_targets
+from .pipeline_timing import measured, bind
+from .expansion_models import MAX_EXPANSIONS, preview_edited_groups
+from .retrieval_terms_agent import RetrievalTermsAgent
 from .explicit_term_edits import explicit_term_list
 from .query_spec import digest
 from .model_runtime import _INITIAL_GROUP_TERMS, _grounded_followup_term_count, _number_value
 
 
 class ExpansionJobs:
-    def __init__(self, path: Path | None, runtime, dialogue, projects, service=None):
+    def __init__(self, path: Path | None, runtime, dialogue, projects, service=None, *, terms_agent=None,
+                 recall_provider=None):
         self.runtime, self.dialogue, self.projects, self.service = runtime, dialogue, projects, service
+        self.terms_agent = terms_agent or RetrievalTermsAgent(runtime)
+        if self.terms_agent.models is not runtime:
+            raise ValueError('Term agent and queue must share the authorized model port')
+        self.recall_provider = recall_provider
         self.lock = threading.RLock()
         self.slots = threading.Semaphore(2)
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='expansion-job')
@@ -44,13 +51,28 @@ class ExpansionJobs:
                 or task['confirmed_revision'] != body['expected_revision']):
             raise ServiceError('REVISION_CONFLICT', 'Task changed; reload before expanding', 409)
         transformed = {key: value for key, value in body.items()
-                       if key not in ('expected_task_version', 'expected_revision')}
+                       if key not in ('expected_task_version', 'expected_revision', 'recall_evidence_digest')}
+        recall = None
+        if 'recall_evidence_digest' in body:
+            recall = self._recall(actor, task_id, body['recall_evidence_digest'])
+            spec = json.loads(self.service.repository.get(actor, task_id).confirmed_proposal_json)['query_spec']
+            current = [{'primary_label': g['primary_label'], 'auxiliary_terms': list(g['auxiliary_terms'])}
+                       for g in spec['grouped_expansion']['groups']]
+            if (body.get('raw_request') != spec['raw_request'] or body.get('target_count') != spec['target_count']
+                    or body.get('current_groups', current) != current or body.get('count_edits')
+                    or body.get('term_count_only') or body.get('requested_terms_per_group') is not None):
+                raise ServiceError('INVALID_SPEC', '召回调整需保留当前主体、组别、词数及配额；其他修改请单独提出', 422)
+            transformed['current_groups'] = current
+            transformed['feedback_text'] = body.get('feedback_text') or (
+                '根据实际召回统计调整辅助词，增加不同可见场景的候选覆盖；保留主体、否定条件、分组及配额。'
+                '命中数量不能证明语义相关或清洗通过。')
+            transformed['confirmation_feedback_text'] = transformed['feedback_text']
         transformed.update(dialogue_session_id='task:' + task_id,
                            dialogue_version=body['expected_task_version'],
                            source_revision=body['expected_revision'])
-        return self.start(actor, task['project_id'], transformed, task_id=task_id)
+        return self.start(actor, task['project_id'], transformed, task_id=task_id, recall_context=recall)
 
-    def start(self, actor, project_id, body, *, task_id=None):
+    def start(self, actor, project_id, body, *, task_id=None, recall_context=None):
         self.projects.require_access(actor, project_id, 'default', 'create')
         required = {'dialogue_session_id', 'dialogue_version', 'raw_request', 'dimension_id',
                     'target_count', 'model_selection'}
@@ -70,7 +92,7 @@ class ExpansionJobs:
             raise ServiceError('INVALID_SPEC', 'Invalid regeneration key', 422)
         binding = self.runtime.binding(selection['llm'], selection['vlm'])
         self._current(actor, project_id, body['dialogue_session_id'], body['dialogue_version'],
-                      body.get('source_revision'))
+                      body.get('source_revision'), recall_context)
         current = body.get('current_groups')
         feedback = body.get('feedback_text')
         if (current is None) != (feedback is None) and not (task_id and current is None and feedback is not None):
@@ -133,6 +155,11 @@ class ExpansionJobs:
             raise ServiceError('INVALID_SPEC', 'Explicit replacement cannot be count-only', 422)
         if current is not None and body.get('current_target_count') is not None and type(body['current_target_count']) is not int:
             raise ServiceError('INVALID_SPEC', 'Invalid prior image count', 422)
+        if recall_context is not None:
+            # Only a trusted backend read can add context; HTTP input rejects this field.
+            body = {**body, 'recall_context': recall_context}
+            direct_groups = None  # This mode uses a model with verified recall context.
+            targets = {g['primary_label']: len(g['auxiliary_terms']) for g in current}
         request_digest = digest(body)
         with self.lock:
             row = self.db.execute('''SELECT job_id,request_digest,state FROM expansion_jobs
@@ -147,13 +174,13 @@ class ExpansionJobs:
             initial_counts = {_number_value(match.group(1)) for match in _INITIAL_GROUP_TERMS.finditer(body['raw_request'])} if current is None else set()
             if initial_counts and (len(initial_counts) != 1 or not 1 <= next(iter(initial_counts)) <= MAX_EXPANSIONS):
                 raise ServiceError('INVALID_SPEC', 'Initial term count must be 1-200', 422)
-            starting_groups = direct_groups or ([{'primary_label': group['primary_label'],
+            starting_groups = None if recall_context is not None else direct_groups or ([{'primary_label': group['primary_label'],
                                  'auxiliary_terms': list(group['auxiliary_terms'])[:targets[group['primary_label']]]
                                  if count_only else list(group['auxiliary_terms'])} for group in current]
                                if current is not None and targets and (count_only or all(
                                    targets[group['primary_label']] >= len(group['auxiliary_terms'])
                                    for group in current)) else None)
-            initial = {'status': 'queued', 'groups': starting_groups, 'targets': targets,
+            initial = {'agent': self.terms_agent.descriptor(), 'status': 'queued', 'groups': starting_groups, 'targets': targets,
                        'queued_at': self._now(), 'first_batch_at': self._now() if starting_groups else None,
                        'completed_at': None,
                        'direct_edit': direct_groups is not None,
@@ -252,7 +279,8 @@ class ExpansionJobs:
                        'target_after': payload['target_count'],
                        'added_terms': len(new - old), 'removed_terms': len(old - new),
                        'added_groups': len(new_labels - old_labels), 'removed_groups': len(old_labels - new_labels)}
-        return {'job_id': job_id, 'dialogue_session_id': meta[3], 'dialogue_version': meta[4],
+        return {'job_id': job_id, 'agent': state.get('agent', RetrievalTermsAgent.descriptor()),
+                'dialogue_session_id': meta[3], 'dialogue_version': meta[4],
                 'task_id': meta[3][5:] if meta[3].startswith('task:') else None,
                 'task_version': meta[4] if meta[3].startswith('task:') else None,
                 'revision': payload.get('source_revision'),
@@ -263,6 +291,9 @@ class ExpansionJobs:
                 'feedback_text': payload.get('feedback_text'),
                 'confirmation_feedback_text': payload.get('confirmation_feedback_text'),
                 'requested_terms_per_group': payload.get('requested_terms_per_group'),
+                'recall_feedback': ({'evidence_digest': payload['recall_context']['evidence_digest'],
+                                     'scope': payload['recall_context']['scope']}
+                                    if payload.get('recall_context') else None),
                 'source_groups': payload.get('current_groups') if payload.get('term_count_only') else None,
                 'status': state['status'], 'completed_terms': state['completed'],
                 'target_terms': state['total'], 'failed_batch': state['failed_batch'],
@@ -282,7 +313,7 @@ class ExpansionJobs:
                 business = getattr(self.runtime, 'business_scope', None)
                 with (settings.scope(identity[0], identity[1]) if settings else nullcontext()), (
                     scope(identity[0], identity[1], job_id,
-                          f'/v1/retrieval/projects/{identity[2]}/expansion-jobs') if scope else nullcontext()), (
+                          f'/v1/retrieval/projects/{identity[2]}/retrieval-agent/terms') if scope else nullcontext()), (
                     business(project_id=identity[2], **(
                         {'task_id': identity[3][5:], 'task_version': identity[4]}
                         if identity[3].startswith('task:') else
@@ -300,105 +331,56 @@ class ExpansionJobs:
                 with self.lock:
                     self.running.discard(job_id)
 
+    @measured('expansion_job')
     def _run_batches(self, job_id):
         from .models import Actor
-        batch_marker = None
-        try:
-                while True:
-                    with self.lock:
-                        payload, state, meta = self._load(job_id)
-                        if state['status'] not in ('queued', 'running'):
-                            return
-                        state['status'] = 'running'
-                        self._save(job_id, state)
-                    actor = Actor(meta[0], meta[1])
-                    self._current(actor, meta[2], meta[3], meta[4], payload.get('source_revision'))
-                    selection = payload['model_selection']
-                    if self.runtime.binding(selection['llm'], selection['vlm']) != state['model_binding']:
-                        raise ServiceError('MODEL_CONFIG_CHANGED', 'Model profile changed; restart expansion', 409)
-                    if state['groups'] is None:
-                        batch_marker = {'group': '初始分组', 'offset': 0, 'size': 8}
-                        small_initial = (payload['target_count'] <= 300 and not payload.get('current_groups')
-                                         and not state.get('initial_count') and not state.get('targets')
-                                         and not state.get('deferred_count_edits'))
-                        seed = self.runtime.expand_chunk(payload['raw_request'], selection['llm'], selection['vlm'],
-                            limit=3 if small_initial else 8, feedback_text=payload.get('feedback_text'), current_groups=payload.get('current_groups'))
-                        groups = seed['plan']['groups']
-                        groups = [{'primary_label': group['primary_label'], 'auxiliary_terms': group['auxiliary_terms']} for group in groups]
-                        if state.get('deferred_count_edits'):
-                            try:
-                                _, targets = resolve_count_edits(state['deferred_count_edits'],
-                                                                 payload['target_count'], groups)
-                            except ValueError as error:
-                                raise ServiceError('INVALID_SPEC', str(error), 422) from None
-                        else:
-                            targets = state['targets'] or {group['primary_label']: state.get('initial_count') or len(group['auxiliary_terms']) for group in groups}
-                        for group in groups:
-                            group['auxiliary_terms'] = group['auxiliary_terms'][:targets[group['primary_label']]]
-                        if set(targets) != {group['primary_label'] for group in groups}:
-                            raise ServiceError('MODEL_OUTPUT_INVALID', 'Generated group labels changed', 422)
-                        state['groups'] = groups
-                        state['first_batch_at'] = state.get('first_batch_at') or self._now()
-                        state['targets'] = targets
-                        state['total'] = sum(targets.values())
-                        state['completed'] = sum(len(group['auxiliary_terms']) for group in groups)
-                        with self.lock:
-                            self._save(job_id, state)
-                    else:
-                        groups = state['groups']
-                        targets = state['targets']
-                    next_group = next((group for group in groups if len(group['auxiliary_terms']) < targets[group['primary_label']]), None)
-                    if next_group is None:
-                        self._current(actor, meta[2], meta[3], meta[4], payload.get('source_revision'))
-                        current = payload.get('current_groups')
-                        if (current is not None and payload.get('current_target_count') in (None, payload['target_count'])
-                                and {group['primary_label']: set(group['auxiliary_terms']) for group in current}
-                                == {group['primary_label']: set(group['auxiliary_terms']) for group in groups}):
-                            raise ServiceError('EXPANSION_UNCHANGED', '新词表没有落实修改，旧词表已保留', 422)
-                        result = seal_explicit_targets(preview_edited_groups(None, groups),
-                                                       payload['raw_request'], payload['target_count'])
-                        state['result'] = self.runtime.bind(result, state['model_binding'],
-                                                            generated=not (payload.get('term_count_only') or state.get('direct_edit')))
-                        if payload.get('term_count_only'):
-                            state['result']['note'] = '仅按原词表顺序保留指定数量的检索词；未调用扩词模型。当前仍是待确认草稿。'
-                        if state.get('direct_edit'):
-                            state['result']['note'] = '按用户逐字指定的完整词表生成；未调用扩词模型。当前仍是待确认草稿。'
-                        state['status'] = 'completed'
-                        state['completed_at'] = self._now()
-                        state['completed'] = state['total']
-                        state['failed_batch'] = None
-                        with self.lock:
-                            self._save(job_id, state)
-                        return
-                    label = next_group['primary_label']
-                    missing = targets[label] - len(next_group['auxiliary_terms'])
-                    batch_marker = {'group': label, 'offset': len(next_group['auxiliary_terms']), 'size': min(10, missing)}
-                    try:
-                        addition = self.runtime.expand_chunk(payload['raw_request'], selection['llm'], selection['vlm'],
-                            limit=min(10, missing), label=label, existing_terms=next_group['auxiliary_terms'],
-                            feedback_text=payload.get('feedback_text'))
-                        extra = addition['plan']['groups'][0]['auxiliary_terms']
-                        next_group['auxiliary_terms'].extend(extra)
-                        state['completed'] = sum(min(len(group['auxiliary_terms']), targets[group['primary_label']]) for group in groups)
-                        state['failed_batch'] = None
-                        with self.lock:
-                            self._save(job_id, state)
-                    except Exception:
-                        # Keep the failing offset without persisting a partial result.
-                        state['failed_batch'] = batch_marker
-                        raise
-        except Exception as error:
+        while True:
             with self.lock:
-                _, state, _ = self._load(job_id)
-                state['failed_batch'] = batch_marker
+                payload, state, meta = self._load(job_id)
+                if meta[3].startswith('task:'):
+                    bind(task_id=meta[3][5:], task_version=meta[4], revision=payload.get('source_revision'))
+                if state['status'] not in ('queued', 'running'):
+                    return
+                state['status'] = 'running'
                 self._save(job_id, state)
-            raise
+            actor = Actor(meta[0], meta[1])
+            self._current(actor, meta[2], meta[3], meta[4], payload.get('source_revision'), payload.get('recall_context'))
+            try:
+                if state.get('agent', RetrievalTermsAgent.descriptor()) != self.terms_agent.descriptor():
+                    raise ServiceError('TERMS_AGENT_CHANGED', 'Term planner changed; create a new preview', 409)
+                self.terms_agent.advance(payload, state, now=self._now)
+                # Model calls can outlive the user's edit or a credential/config change.
+                # Recheck before checkpointing even a provisional preview batch.
+                self._current(actor, meta[2], meta[3], meta[4], payload.get('source_revision'), payload.get('recall_context'))
+                selection = payload['model_selection']
+                if self.runtime.binding(selection['llm'], selection['vlm']) != state['model_binding']:
+                    raise ServiceError('MODEL_CONFIG_CHANGED', 'Model profile changed; restart expansion', 409)
+                with self.lock:
+                    self._save(job_id, state)
+            except Exception:
+                with self.lock:
+                    _, saved, _ = self._load(job_id)
+                    saved['failed_batch'] = state.get('failed_batch')
+                    self._save(job_id, saved)
+                raise
+            if state['status'] == 'completed':
+                return
 
     @staticmethod
     def _now():
         return datetime.now(UTC).isoformat()
 
-    def _current(self, actor, project_id, session_id, version, revision):
+    def _recall(self, actor, task_id, expected_digest):
+        if not callable(self.recall_provider):
+            raise ServiceError('RECALL_UNAVAILABLE', '当前检索实现未提供召回分析', 503)
+        report = self.recall_provider(actor, task_id)
+        if report['evidence_digest'] != expected_digest:
+            raise ServiceError('RECALL_EVIDENCE_CHANGED', '召回记录已变化，请重新分析后再调整词表', 409)
+        if not report['can_refine']:
+            raise ServiceError('RECALL_NOT_READY', '召回记录待核对或没有可调整的辅助词，暂不据此自动改词', 409)
+        return report
+
+    def _current(self, actor, project_id, session_id, version, revision, recall_context=None):
         if session_id.startswith('task:'):
             if self.service is None:
                 raise ServiceError('EXPANSION_JOBS_UNAVAILABLE', 'Task expansion jobs are unavailable', 503)
@@ -406,6 +388,8 @@ class ExpansionJobs:
             if (task['project_id'] != project_id or task['task_version'] != version
                     or task['confirmed_revision'] != revision):
                 raise ServiceError('REVISION_CONFLICT', 'Task changed; job result discarded', 409)
+            if recall_context is not None:
+                self._recall(actor, session_id[5:], recall_context['evidence_digest'])
         else:
             snapshot = self.dialogue.snapshot(actor, project_id, session_id)
             if snapshot['version'] != version or snapshot['stage'] != 'terms':

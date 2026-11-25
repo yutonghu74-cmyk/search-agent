@@ -71,11 +71,61 @@ class ConfirmedRefillServiceTest(unittest.TestCase):
         self.runtime = Runtime(reservations, self.position)
         self.refill = ConfirmedRefillService(self.tasks, Results(), self.runtime)
 
+    def test_durable_empty_branch_switches_library_after_restart(self):
+        body = deepcopy(BODY)
+        body['query_spec']['target_count'] = 2
+        body['query_spec']['refill_policy'] = dict(mode='maintain_target', target_count=2,
+            approved_library_ids=['library-a', 'library-b'], progression='manual')
+        created, _ = self.service.create_task(self.actor, 'strategy-task',
+            confirmation(self.service, self.actor, key='strategy-draft', body=body))
+        task_id = created['task_id']
+        task = self.tasks.get(self.actor, task_id)
+        repository = self.runtime.reservations
+        reservation, _ = repository.reserve(self.actor, task_id, self.position,
+            expected_revision=task.confirmed_revision, expected_generation=task.run_generation,
+            expected_task_version=task.task_version)
+        repository.record_iteration_baseline(self.actor, reservation.reservation_id, 1)
+        repository.complete_empty_iteration(self.actor, reservation.reservation_id, 1)
+        continued = build_refill_position(library_id='library-a', index_version='index-v1',
+            query='原确认检索词', parameters={'plan_id': 'plan-1'}, cursor='cursor-3')
+        alternative = build_refill_position(library_id='library-b', index_version='index-v1',
+            query='原确认检索词', parameters={'plan_id': 'plan-2'}, cursor='cursor-1')
+        self.runtime.adapter.positions = (continued, alternative)
+        # Reopen the actual ledger: decisions must use persisted scope and outcomes.
+        reopened = SQLiteRefillReservationRepository(self.path,
+            projects=self.service.projects, authorization=Authority())
+        runtime = Runtime(reopened, continued)
+        runtime.adapter.positions = (continued, alternative)
+        planner = ConfirmedRefillService(SQLiteTaskRepository(self.path), Results(), runtime)
+        view = planner.preview(self.actor, task_id)
+        self.assertEqual(view['next_position']['library_id'], 'library-b')
+        self.assertEqual(view['next_position']['selection']['reason'], 'probe_approved_alternative')
+        # Caller/adapter cannot make an unapproved library executable.
+        runtime.adapter.positions = (build_refill_position(library_id='not-approved',
+            index_version='v1', query='dog', parameters={}, cursor='next'),)
+        with self.assertRaises(ServiceError) as error:
+            planner.preview(self.actor, task_id)
+        self.assertEqual(error.exception.code, 'REFILL_PLAN_INVALID')
+
+    def test_effective_yield_uses_completed_unique_output_not_raw_hits(self):
+        evidence = self.runtime.reservations.execution_evidence(self.actor, self.task_id)
+        evidence.update(issued_rounds=1, completed_rounds=1, vlm_calls=8,
+                        rounds=[{'outcome': 'result', 'candidate_count': 4,
+                                 'new_unique_accepted': 1, 'iteration': 1}])
+        self.runtime.reservations.execution_evidence = lambda *args: evidence
+        view = self.refill.preview(self.actor, self.task_id)
+        self.assertEqual(view['execution']['effective_yield'], .25)
+        self.assertEqual(view['execution']['new_unique_accepted'], 1)
+        self.assertEqual(view['gap'], 1)
+
     def test_preview_reuses_confirmed_query_and_confirmation_reserves_once(self):
         view = self.refill.preview(self.actor, self.task_id)
         self.assertEqual((view["action"], view["stop_reason"], view["gap"]),
                          ("await_owner", "NEED_USER_INPUT", 1))
         self.assertEqual(view["next_position"]["query"], "原确认检索词")
+        self.assertEqual(view['next_position']['progression'], 'approved_query_pagination')
+        self.assertIsNone(view['execution']['effective_yield'])
+        self.assertEqual(view['execution']['new_unique_accepted'], 0)
         args = dict(expected_revision=view["revision"],
                     expected_generation=view["generation"],
                     expected_task_version=view["task_version"],

@@ -6,6 +6,7 @@ from .multi_rule_contracts import (ApprovedCleaningJob, CleaningJobResult,
                                    require_complete_cleaning_result)
 from .query_spec import digest
 from .refill_planning import decide_refill
+from .historical_dedup import merge_rows
 from .near_duplicates import (NearDuplicateDecision, NearDuplicatePair,
                               PerceptualFingerprint,
                               build_near_duplicate_clusters)
@@ -121,6 +122,27 @@ class ExactResultSetPreview:
     # the publication mutation count. New exclusion-aware lineages record it
     # explicitly so inherited decisions do not inflate a later batch version.
     publication_mutation_count: int | None = None
+    historical_reference_digest: str | None = None
+    historical_exclusions: tuple = ()
+
+    def __post_init__(self):
+        import re
+        if self.historical_reference_digest is None:
+            if self.historical_exclusions:
+                raise ValueError('historical exclusions require a reference binding')
+            return
+        if (not isinstance(self.historical_reference_digest, str)
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', self.historical_reference_digest)
+                or type(self.historical_exclusions) is not tuple):
+            raise ValueError('invalid historical reference binding')
+        for content, ids, refs in self.historical_exclusions:
+            if (not re.fullmatch(r'sha256:[0-9a-f]{64}', content)
+                    or type(ids) is not tuple or not ids or type(refs) is not tuple or not refs
+                    or any(not isinstance(v, str) or not v for v in ids + refs)
+                    or ids != tuple(sorted(set(ids))) or refs != tuple(sorted(set(refs)))):
+                raise ValueError('invalid historical exclusion evidence')
+        if self.historical_exclusions != merge_rows(self.historical_exclusions):
+            raise ValueError('noncanonical historical exclusions')
 
     @property
     def accepted_count(self):
@@ -132,6 +154,12 @@ class ExactResultSetPreview:
 
     @property
     def result_set_digest(self):
+        if self.historical_reference_digest is not None:
+            return digest({'schema_version': 'exact-result-preview@9',
+                'base_digest': replace(self, historical_reference_digest=None,
+                                       historical_exclusions=()).result_set_digest,
+                'historical_reference_digest': self.historical_reference_digest,
+                'historical_exclusions': self.historical_exclusions})
         if self.manual_review_decisions:
             return digest({
                 "schema_version": "exact-result-preview@8",
@@ -407,8 +435,8 @@ def build_exact_result_set(job: ApprovedCleaningJob, result: CleaningJobResult,
                            refill_policy=None, node_mode: str = "manual",
                            legacy_lineage: bool = False,
                            source_evidence_by_candidate=None,
-                           group_targets=None) -> ExactResultSetPreview:
-    """Count only fully passing, exact-content-unique image candidates.
+                           group_targets=None, whole_video_media_by_candidate=None) -> ExactResultSetPreview:
+    """Count only fully passing, exact-content-unique image or whole-video candidates.
 
     This is a deterministic preview for one fixed batch. It does not substitute
     for current authorization, near-duplicate policy, ranking, cumulative merge,
@@ -416,8 +444,15 @@ def build_exact_result_set(job: ApprovedCleaningJob, result: CleaningJobResult,
     """
 
     require_complete_cleaning_result(job, result)
-    if job.recipe.media_type != "image":
-        raise ValueError("exact preview currently supports images only")
+    if job.recipe.media_type == "video":
+        from .whole_video import require_video_candidate_mapping
+        require_video_candidate_mapping(job.candidates, whole_video_media_by_candidate)
+        if group_targets is not None or any(c.group_ids for c in job.candidates):
+            raise ValueError("video quotas are not enabled")
+        if result.fingerprints:
+            raise ValueError("image fingerprints cannot validate whole-video duplicates")
+    elif job.recipe.media_type != "image" or whole_video_media_by_candidate is not None:
+        raise ValueError("unsupported result media mapping")
     if type(target_count) is not int or target_count < 1:
         raise ValueError("target_count must be a positive integer")
     source_evidence_by_candidate = ({} if source_evidence_by_candidate is None
@@ -496,7 +531,8 @@ def merge_exact_result_sets(parent_result_set_id: str,
             or parent.target_count != current.target_count
             or parent.task_version >= current.task_version
             or current.parent_result_set_id is not None
-            or _group_targets(parent) != _group_targets(current)):
+            or _group_targets(parent) != _group_targets(current)
+            or parent.historical_reference_digest != current.historical_reference_digest):
         raise ValueError("incompatible exact result lineage")
     parent_sources = parent.source_operation_ids or (parent.operation_id,)
     current_sources = current.source_operation_ids or (current.operation_id,)
@@ -550,6 +586,8 @@ def merge_exact_result_sets(parent_result_set_id: str,
         group_quotas=group_quotas,
         exclusion_decisions=parent.exclusion_decisions,
         manual_review_decisions=parent.manual_review_decisions,
+        historical_reference_digest=current.historical_reference_digest,
+        historical_exclusions=merge_rows(parent.historical_exclusions, current.historical_exclusions),
         publication_mutation_count=0)
 
 
@@ -604,6 +642,8 @@ def apply_near_duplicate_decision(preview: ExactResultSetPreview,
         preview.cleaning_result_digest, preview.target_count, accepted, reserve,
         duplicate_count, preview.fail_count, preview.unknown_count, gap,
         _stop_reason(preview.target_count, len(accepted), refill_policy, node_mode),
+        historical_reference_digest=preview.historical_reference_digest,
+        historical_exclusions=preview.historical_exclusions,
         parent_result_set_id=preview.parent_result_set_id,
         parent_result_set_digest=preview.parent_result_set_digest,
         source_operation_ids=preview.source_operation_ids,
@@ -656,6 +696,8 @@ def apply_result_exclusion(preview: ExactResultSetPreview,
         preview.cleaning_result_digest, preview.target_count, accepted, reserve,
         preview.duplicate_count, preview.fail_count, preview.unknown_count, gap,
         _stop_reason(preview.target_count, len(accepted), refill_policy, node_mode),
+        historical_reference_digest=preview.historical_reference_digest,
+        historical_exclusions=preview.historical_exclusions,
         parent_result_set_id=preview.parent_result_set_id,
         parent_result_set_digest=preview.parent_result_set_digest,
         source_operation_ids=preview.source_operation_ids,
@@ -722,6 +764,8 @@ def apply_manual_review_decision(preview: ExactResultSetPreview,
         preview.cleaning_result_digest, preview.target_count, accepted, reserve,
         duplicate_count, fail_count, preview.unknown_count - 1, gap,
         _stop_reason(preview.target_count, len(accepted), refill_policy, node_mode),
+        historical_reference_digest=preview.historical_reference_digest,
+        historical_exclusions=preview.historical_exclusions,
         parent_result_set_id=preview.parent_result_set_id,
         parent_result_set_digest=preview.parent_result_set_digest,
         source_operation_ids=preview.source_operation_ids,

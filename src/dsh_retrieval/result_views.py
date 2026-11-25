@@ -10,7 +10,7 @@ import json
 import math
 
 
-VIEWS = {"accepted", "reserve", "failed", "review", "user_excluded"}
+VIEWS = {"accepted", "reserve", "failed", "review", "user_excluded", "duplicate", "historical"}
 
 
 class ResultCursorError(ValueError):
@@ -32,7 +32,9 @@ class ResultItem:
                 "source_count": len(self.sources), "sources": list(self.sources),
                 "near_duplicate_matches": list(near_duplicate_matches),
                 "cleaning_status": (assessment or {}).get("cleaning_status", "pass"),
-                "reasons": list((assessment or {}).get("reasons", ()))}
+                "reasons": list((assessment or {}).get("reasons", ())),
+                "disposition": (assessment or {}).get('disposition', 'accepted'),
+                "elimination_stage": (assessment or {}).get('elimination_stage')}
 
 
 def _positive(value, name):
@@ -157,7 +159,7 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
     """Return a frozen page without inventing results, previews, or authorization."""
     task_id, revision, task_version, generation, target = _binding(task, proposal)
     if view_type not in VIEWS:
-        raise ValueError("view must be accepted, reserve, failed, review or user_excluded")
+        raise ValueError("invalid result view")
     if type(limit) is not int or limit < 1 or limit > (1_000_000 if _projection else 100):
         raise ValueError("limit must be between 1 and 100")
     base = {"schema_version": "task-results@1", "task_id": task_id,
@@ -260,7 +262,8 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
             or not isinstance(decisions, (tuple, list))):
         raise ValueError("near-duplicate review summary is invalid")
     audit_field = {"failed": "failed_items", "review": "review_items",
-                   "user_excluded": "user_excluded_items"}.get(view_type)
+                   "user_excluded": "user_excluded_items",
+                   "duplicate": "duplicate_items", 'historical': 'historical_items'}.get(view_type)
     if audit_field is None:
         rows = accepted if view_type == "accepted" else reserve
     else:
@@ -269,14 +272,17 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
                 not isinstance(item, dict)
                 or not isinstance(item.get("candidate_id"), str)
                 or not isinstance(item.get("asset_version"), str)
-                or item.get("cleaning_status") not in {
-                    "fail", "unknown", "user_excluded"}
+                or item.get("cleaning_status") not in (
+                    {'pass'} if view_type in {'duplicate', 'historical'} else {'fail', 'unknown', 'user_excluded'})
                 or not isinstance(item.get("reasons"), (tuple, list))
                 for item in rows):
             raise ValueError("result audit items are invalid")
         expected_count = {"failed": result_set["failed_count"],
                           "review": result_set["pending_review_count"],
-                          "user_excluded": user_excluded_count}[view_type]
+                          "user_excluded": user_excluded_count,
+                          'historical': result_set.get('historical_audit_count', 0),
+                          "duplicate": result_set.get('duplicate_audit_count',
+                                                       result_set['duplicate_count'])}[view_type]
         if len(rows) != expected_count:
             raise ValueError("result audit count is inconsistent")
     offset = 0 if cursor is None else _decode_cursor(cursor, result_digest, view_type)
@@ -288,6 +294,8 @@ def build_result_page(task: dict, proposal: dict, result_set: dict | None, *,
     return {**base, "available": True, "result_set_id": result_set_id,
             "publication_kind": result_set.get("kind", "preview"),
             "result_set_digest": result_digest, "counts": {
+                **({'historical_duplicate': result_set['historical_exclusion_count']}
+                   if 'historical_exclusion_count' in result_set else {}),
                 "eligible_unique": expected["eligible_unique_count"],
                 "accepted": expected["accepted_count"], "reserve": expected["reserve_count"],
                 "duplicate": result_set["duplicate_count"], "failed": result_set["failed_count"],

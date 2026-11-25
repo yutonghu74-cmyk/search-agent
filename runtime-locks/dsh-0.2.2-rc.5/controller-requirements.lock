@@ -1,0 +1,9 @@
+# Python control client only. The selected Harness is npm @deepseek-ai/dsh@0.2.2-rc.5.
+# DshAdapter MUST supply dsh_bin; the SDK's required bundled carrier is not launched.
+annotated-types==0.8.0
+deepseek-harness-runtime-bin==0.2.2rc2
+deepseek-harness-sdk==0.2.2rc2
+pydantic==2.14.4
+pydantic_core==2.50.5
+typing-inspection==0.4.5
+typing_extensions==4.16.0

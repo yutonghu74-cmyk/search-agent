@@ -14,6 +14,15 @@ from ..errors import ServiceError
 from ..models import Actor
 
 
+def single_header(headers, name, *, required=False):
+    """Reject ambiguous identity headers before consulting any credential source."""
+    values = (headers.get_all(name, []) if hasattr(headers, 'get_all')
+              else [value for key, value in headers.items() if key.lower() == name.lower()])
+    if len(values) > 1 or (required and not values):
+        raise ServiceError('UNAUTHENTICATED', 'unambiguous authentication headers required', 401)
+    return values[0] if values else ''
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -111,7 +120,7 @@ class PlatformIdentity:
         self.extract_user_id = extract_user_id
 
     def authenticate(self, headers):
-        scheme, _, token = headers.get('Authorization', '').partition(' ')
+        scheme, _, token = single_header(headers, 'Authorization', required=True).partition(' ')
         if scheme.lower() != 'bearer' or not token:
             raise ServiceError('UNAUTHENTICATED', 'personal bearer credential required', 401)
         data = self.client.get('/user/info', token)

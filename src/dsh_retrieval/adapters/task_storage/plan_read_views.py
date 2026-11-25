@@ -1,5 +1,6 @@
 """Transactional per-task search read views; the original ledger remains authoritative."""
 import hashlib
+from . import ledger_rows
 
 from ...errors import ServiceError
 
@@ -13,9 +14,8 @@ def create(db):
     if db.execute('SELECT version FROM plan_task_read_meta WHERE id=1').fetchone() != (1,):
         raise ServiceError('STORAGE_FORMAT_UNSUPPORTED', 'Unsupported task search read view', 500)
     for event in ('INSERT', 'UPDATE', 'DELETE'):
-        db.execute(f'''CREATE TRIGGER IF NOT EXISTS plan_task_read_dirty_{event.lower()}
-            AFTER {event} ON plan_set_ledger BEGIN
-            UPDATE plan_task_read_meta SET dirty=1 WHERE id=1; END''')
+        ledger_rows.watch(db, 'plan_set_ledger', 'plan_task_read_dirty_' + event.lower(), event,
+                          'UPDATE plan_task_read_meta SET dirty=1 WHERE id=1;')
 
 
 def sync(db, state, *, task_ids=None):
@@ -71,6 +71,8 @@ def sync(db, state, *, task_ids=None):
     for task_id, task_state in views.items():
         payload = serialize(task_state)
         checksum = hashlib.sha256(payload.encode()).hexdigest()
+        if db.execute('SELECT checksum FROM plan_task_read_views WHERE task_id=?', (task_id,)).fetchone() == (checksum,):
+            continue
         db.execute('''INSERT INTO plan_task_read_views VALUES(?,?,?)
             ON CONFLICT(task_id) DO UPDATE SET payload=excluded.payload, checksum=excluded.checksum
             WHERE plan_task_read_views.checksum != excluded.checksum''', (task_id, payload, checksum))

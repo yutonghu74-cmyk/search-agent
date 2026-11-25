@@ -67,6 +67,42 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.addCleanup(local.close)
         return local
 
+    def test_auto_window_routes_one_index_and_keeps_alternative_for_refill(self):
+        from dsh_retrieval.refill_clip import LocalCLIPRefillAdapter
+        body = json.loads(json.dumps(BODY))
+        body['query_spec']['raw_request'] = '找动物图片'
+        body['query_spec']['target_count'] = 1
+        body['query_spec']['refill_policy'] = dict(mode='maintain_target', target_count=1,
+            approved_library_ids=['dogs', 'cats'], progression='auto')
+        body['node_modes']['refill'] = 'auto'
+        created, _ = self.tasks.create_task(self.actor, 'routed-auto',
+            confirmation(self.tasks, self.actor, key='routed-draft', body=body))
+        task_id = created['task_id']
+        self.local.auto_start(self.actor, task_id, key='routed-start')
+        deadline = time.monotonic() + 3
+        while not self.local.progress(self.actor, task_id)['initial_window_complete']:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.02)
+        progress = self.local.progress(self.actor, task_id)
+        self.assertEqual(sum(m['committed_pages'] for m in progress['members']), 1)
+        self.assertEqual(sum(m['initial_deferred'] for m in progress['members']), 1)
+        self.assertFalse(progress['pagination_stopped'])
+        # Fixing the first window must not wait on intentionally deferred indexes.
+        self.assertGreater(self.local._candidate_manifest_proposal(self.actor, task_id).view()['candidate_count'], 0)
+        # Both approved sources remain in the durable plan; unqueried alternative
+        # precedes deeper pagination, without constructing a new plan/approval.
+        original_mode = self.local.mode
+        self.local.mode = 'LOCAL_CLIP'
+        positions = LocalCLIPRefillAdapter(self.local).list_refill_positions(
+            self.actor, task_id, revision=1, generation=1)
+        self.local.mode = original_mode
+        self.assertEqual(positions[0].library_id, 'cats')
+        self.local.close()
+        restarted = self.make_local()
+        self.assertTrue(restarted._first_window_committed(self.actor, task_id))
+        self.assertEqual(sum(m['committed_pages'] for m in restarted.progress(
+            self.actor, task_id)['members']), 1)
+
     def test_browse_only_adapter_does_not_recover_or_start_worker(self):
         from unittest.mock import patch
         with patch('dsh_retrieval.first_search_local.SQLitePlanSetApprovalRepository.recoverable',
@@ -84,6 +120,14 @@ class FirstSearchLocalTest(unittest.TestCase):
             with self.assertRaises(ServiceError) as error:
                 authority.require_access(context, resource, action)
             self.assertEqual(error.exception.code, 'ACCESS_DENIED')
+
+    def test_fixture_accepts_search_metadata_without_inventing_missing_captions(self):
+        fixture = json.loads(self.fixture_path.read_text())
+        fixture['records'][0]['search_text'] = '动物 dog SKU-Ab12'
+        self.fixture_path.write_text(json.dumps(fixture))
+        records = self.local._fixture()[2]
+        self.assertEqual(records[0].search_text, '动物 dog SKU-Ab12')
+        self.assertTrue(all(r.search_text == '' for r in records[1:]))
 
     def test_clip_mode_uses_dynamic_text_encoder_not_fixed_word_rules(self):
         self.local.close()
@@ -140,7 +184,7 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.fail('background search did not finish')
 
     def advance_task_for_refill(self):
-        with self.local.repository.tasks._connect() as db, db:
+        with closing(self.local.repository.tasks._connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')
             memory = self.local.repository.tasks._load(db.execute(
                 'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())

@@ -104,7 +104,7 @@ class RetrievalStorageTest(unittest.TestCase):
 
     def test_confirmation_failure_rolls_back_task_and_plan(self):
         before = self.tasks.get(self.actor, self.tid)
-        with patch("dsh_retrieval.adapters.task_storage.retrieval.dump_state", side_effect=RuntimeError("fault")):
+        with patch("dsh_retrieval.adapters.task_storage.ledger_rows.prepare_state", side_effect=RuntimeError("fault")):
             with self.assertRaises(RuntimeError):
                 self.confirm()
         self.assertEqual(self.tasks.get(self.actor, self.tid), before)
@@ -172,7 +172,7 @@ class RetrievalStorageTest(unittest.TestCase):
         self.assert_code("INVALID_SEARCH_PAGE", lambda: self.repo.commit_page(
             self.actor, operation, plan, plan.request, replace(self.first, snapshot_ref=None)))
         self.assertIsNone(self.state()["operations"][operation][2])
-        with patch("dsh_retrieval.adapters.task_storage.retrieval.dump_state", side_effect=RuntimeError("fault")):
+        with patch("dsh_retrieval.adapters.task_storage.ledger_rows.prepare_state", side_effect=RuntimeError("fault")):
             with self.assertRaises(RuntimeError):
                 self.repo.commit_page(self.actor, operation, plan, plan.request, self.first)
         self.assertEqual(len(self.state()["events"]), 1)

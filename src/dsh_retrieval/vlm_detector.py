@@ -13,6 +13,7 @@ from .query_spec import digest
 
 
 class VLMRequirementDetector:
+    usage_instrumentation = 'model-http@1'
     backend_ref = "vlm.requirement@1"
     validator_ref = "vlm.boolean@1"
     evidence_ref = "vlm.observation@1"

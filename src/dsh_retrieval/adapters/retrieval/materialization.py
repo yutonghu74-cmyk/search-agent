@@ -23,10 +23,13 @@ class LocalCandidateMaterializer:
     def __init__(self, *, ledger: RetrievalPlanRepository, media: MediaRepository,
                  gateway: MediaAccessGateway, authorization: AuthorizationService,
                  workspace_root: Path, max_item_bytes=10_000_000,
-                 max_total_bytes=100_000_000):
+                 max_total_bytes=100_000_000, media_type="image"):
         for value, ceiling in ((max_item_bytes, 10_000_000), (max_total_bytes, 100_000_000)):
             if type(value) is not int or not 0 < value <= ceiling:
                 raise ValueError("Invalid materialization byte limit")
+        if media_type not in ("image", "video"):
+            raise ValueError("Unsupported materialization target")
+        self.media_type = media_type
         self.ledger, self.media, self.gateway, self.authorization = ledger, media, gateway, authorization
         self.root = Path(workspace_root).resolve()
         self.item_limit, self.total_limit = max_item_bytes, max_total_bytes
@@ -65,6 +68,12 @@ class LocalCandidateMaterializer:
                 groups[identity][1].append(hit)
             else:
                 groups[identity] = (media, [hit])
+        if self.media_type == "video":
+            from ...whole_video import require_whole_video_records
+            try:
+                require_whole_video_records(tuple(media for media, _ in groups.values()))
+            except ValueError:
+                reject("MEDIA_MAPPING_CONFLICT")
         self.root.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix="materialized-", dir=self.root) as directory:
             items, total = [], 0

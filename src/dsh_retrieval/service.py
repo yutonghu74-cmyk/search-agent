@@ -27,6 +27,7 @@ def _revision_changes(previous: dict[str, Any], current: dict[str, Any]) -> tupl
     paths = (
         ("target_count", "目标数量"),
         ("grouped_expansion", "分组与配额"),
+        ("retrieval_execution", "检索执行范围"),
         ("conditions", "清洗条件"),
         ("cleaning_conditions", "清洗检测条件"),
         ("constraints", "清洗约束"),
@@ -67,10 +68,12 @@ def require_positive(value: Any, field: str) -> None:
 
 class TaskService:
     def __init__(self, repository: TaskRepository, projects: ProjectContextProvider | None = None,
-                 query_images=None) -> None:
+                 query_images=None, video_execution=None, agent_execution=None) -> None:
         self.repository = repository
         self.projects = projects if projects is not None else LocalProjectAccess()
         self.query_images = query_images
+        self.video_execution = video_execution
+        self.agent_execution = agent_execution
 
     def save_draft(self, actor: Actor, project_id: str, key: str, body: dict,
                    draft_id: str | None = None) -> tuple[dict, bool]:
@@ -85,6 +88,9 @@ class TaskService:
             if existing.project_id != project_id:
                 raise ServiceError("NOT_FOUND", "draft was not found", 404)
         proposal = normalize_proposal(raw)
+        if proposal['query_spec']['cross_batch_dedup']['scope'] != 'none' and not callable(
+                getattr(self.repository, 'historical_options', None)):
+            raise ServiceError('FEATURE_NOT_SUPPORTED', 'Persistent historical resolver required', 422)
         self.projects.require_access(actor, project_id, proposal["dimension_id"], "create")
         query_input = proposal["query_spec"].get("query_input")
         if query_input is not None and query_input.get("type") == "reference_image":
@@ -110,14 +116,26 @@ class TaskService:
         )
         stored, replayed = self.repository.save_draft(
             actor, key, draft, version, conversation_message=message)
-        return stored.to_summary(), replayed
+        return self._draft_view(actor, stored), replayed
+
+    def _draft_view(self, actor, draft):
+        view = draft.to_summary()
+        if "video_summary" in view and self.video_execution is not None:
+            view["video_summary"]["execution"] = self.video_execution.describe(
+                actor, draft.project_id, view["proposal"]["query_spec"])
+        return view
+
+    def video_capabilities(self, actor, project_id):
+        self.projects.require_access(actor, project_id, "default", "read")
+        return (self.video_execution.describe(actor, project_id) if self.video_execution is not None else
+                {"available": False, "reason_code": "VIDEO_EXECUTION_UNAVAILABLE"})
 
     def get_draft(self, actor: Actor, project_id: str, draft_id: str) -> dict:
         draft = self.repository.get_draft(actor, draft_id)
         if draft.project_id != project_id:
             raise ServiceError("NOT_FOUND", "draft was not found", 404)
         self.projects.require_access(actor, draft.project_id, draft.dimension_id, "read")
-        return draft.to_summary()
+        return self._draft_view(actor, draft)
 
     def create_task(self, actor: Actor, idempotency_key: str, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         require_key(idempotency_key)
@@ -133,13 +151,45 @@ class TaskService:
         self.projects.require_access(actor, draft.project_id, draft.dimension_id, "approve")
         from .video_query import require_video_execution
         query_spec = json.loads(draft.proposal_json)["query_spec"]
+        from .processing_requirements import require_agent_execution_available
+        agent_mode = 'agent_requirements' in query_spec
+        execution = None
+        if 'retrieval_execution' in query_spec:
+            execution = getattr(self.agent_execution, 'confirmed_terms', None)
+            if execution is None:
+                raise ServiceError('AGENT_EXECUTION_UNAVAILABLE', 'Confirmed terms execution Agent is not installed', 503)
+            if draft.draft_version != body['expected_draft_version'] or draft.proposal_digest != body['proposal_digest']:
+                raise ServiceError('DRAFT_VERSION_CONFLICT', 'Draft changed before execution delegation', 409)
+            if not draft.confirmed_task_id:
+                execution.require(actor, draft.project_id, json.loads(draft.proposal_json))
+        if agent_mode and self.agent_execution is not None:
+            if draft.draft_version != body['expected_draft_version'] or draft.proposal_digest != body['proposal_digest']:
+                raise ServiceError('DRAFT_VERSION_CONFLICT', 'Draft changed before admission', 409)
+            if not draft.confirmed_task_id:
+                self.agent_execution.require(actor, draft.project_id, json.loads(draft.proposal_json))
+        else:
+            require_agent_execution_available(query_spec)
         if query_spec.get("media_type") == "video" and (
                 draft.draft_version != body["expected_draft_version"]
                 or draft.proposal_digest != body["proposal_digest"]):
             raise ServiceError("DRAFT_VERSION_CONFLICT", "draft version or proposal digest is stale", 409)
-        require_video_execution(query_spec)
+        if query_spec.get("media_type") == "video" and self.video_execution is not None:
+            self.video_execution.require(actor, draft.project_id, query_spec)
+        else:
+            require_video_execution(query_spec)
+        guard = {}
+        if execution is not None:
+            def execution_guard(task, replayed):
+                if not replayed:
+                    execution.require(actor, task.project_id, json.loads(task.confirmed_proposal_json), task=task)
+            guard['confirmation_guard'] = execution_guard
+        if agent_mode and self.agent_execution is not None:
+            def confirm_guard(task, replayed):
+                if not replayed:
+                    self.agent_execution.require(actor, task.project_id, json.loads(task.confirmed_proposal_json), task=task)
+            guard['confirmation_guard'] = confirm_guard
         stored, replayed = self.repository.confirm_draft(actor, idempotency_key, body["draft_id"],
-                                                        body["expected_draft_version"], body["proposal_digest"])
+                                                        body["expected_draft_version"], body["proposal_digest"], **guard)
         return stored.to_summary(), replayed
 
     def get_task(self, actor: Actor, task_id: str) -> dict[str, Any]:
@@ -147,6 +197,10 @@ class TaskService:
         self.projects.require_access(actor, task.project_id, task.dimension_id, "read")
         result = task.to_summary()
         result["pending_draft"] = self.repository.get_pending_feedback(actor, task_id)
+        if task.media_type == "video" and callable(getattr(self.repository, "search_dispatch_result", None)):
+            receipt = self.repository.search_dispatch_result(task_id)
+            if receipt and receipt.get("result"):
+                result["video_intake"] = receipt["result"].get("video_intake")
         return result
 
     def current_read_binding(self, actor: Actor, task_id: str) -> tuple[dict, dict]:
@@ -175,7 +229,7 @@ class TaskService:
         fields = {"text", "scope", "expected_revision", "expected_task_version"}
         update_fields = fields | {"expected_draft_version"}
         required = update_fields if draft_id else fields
-        optional = {"grouped_expansion", "target_count", "cleaning_feedback", "cleaning_changes", "requirement_changes"}
+        optional = {"grouped_expansion", "target_count", "cleaning_feedback", "cleaning_changes", "requirement_changes", "cross_batch_dedup"}
         if (not isinstance(body, dict) or not required <= set(body)
                 or set(body) - required - optional
                 or ("target_count" in body) != ("grouped_expansion" in body)):
@@ -236,7 +290,12 @@ class TaskService:
             proposal["query_spec"]["grouped_expansion"] = body["grouped_expansion"]
             proposal["query_spec"]["target_count"] = body["target_count"]
             proposal["query_spec"]["refill_policy"]["target_count"] = body["target_count"]
+        if 'cross_batch_dedup' in body:
+            proposal['query_spec']['cross_batch_dedup'] = body['cross_batch_dedup']
         normalized = normalize_proposal(proposal)
+        if normalized['query_spec']['cross_batch_dedup']['scope'] != 'none' and not callable(
+                getattr(self.repository, 'historical_options', None)):
+            raise ServiceError('FEATURE_NOT_SUPPORTED', 'Persistent historical resolver required', 422)
         proposal_json = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
         feedback_draft_id = draft_id
         message = None
@@ -296,11 +355,32 @@ class TaskService:
             raise invalid("proposal_digest must be a SHA-256 digest", "$.proposal_digest")
         task = self.repository.get(actor, task_id)
         self.projects.require_access(actor, task.project_id, task.dimension_id, "approve")
+        guard = {}
+        if body['action'] == 'confirm':
+            feedback = self.repository.get_feedback_draft(actor, task_id, body['draft_id'])
+            before = json.loads(task.confirmed_proposal_json)['query_spec']
+            after = feedback['proposal']['query_spec']
+            if 'agent_requirements' in before or 'agent_requirements' in after:
+                raise ServiceError('AGENT_REVISION_UNAVAILABLE',
+                    'Agent retrieval revisions are not enabled; prepare a new reviewed request', 422)
+            if 'retrieval_execution' in before and 'retrieval_execution' not in after:
+                raise ServiceError('AGENT_EXECUTION_POLICY_CHANGED', 'Keep the confirmed execution delegation when editing terms', 409)
+            execution_changed = any(before.get(k) != after.get(k) for k in
+                ('retrieval_execution','grouped_expansion','target_count','cross_batch_dedup'))
+            if 'retrieval_execution' in after and execution_changed:
+                execution = getattr(self.agent_execution, 'confirmed_terms', None)
+                if execution is None: raise ServiceError('AGENT_EXECUTION_UNAVAILABLE', 'Execution Agent is unavailable', 503)
+                execution.require(actor, task.project_id, feedback['proposal'])
+                def execution_guard(current, replayed):
+                    if not replayed:
+                        execution.require(actor, current.project_id, json.loads(current.confirmed_proposal_json), task=current)
+                guard['confirmation_guard'] = execution_guard
         return self.repository.confirm_feedback_draft(
             actor, key, task_id, draft_id=body["draft_id"],
             expected_draft_version=body["expected_draft_version"],
             proposal_digest=body["proposal_digest"],
             expected_task_version=body["expected_task_version"], action=body["action"],
+            **guard,
         )
 
     def list_revisions(self, actor: Actor, task_id: str) -> tuple[dict[str, Any], ...]:

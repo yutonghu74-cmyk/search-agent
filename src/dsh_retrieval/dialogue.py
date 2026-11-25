@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .errors import ServiceError
+from .requirement_draft import (apply_edits, project_draft, render_draft, check_clarification, draft_from_state)
 from .image_quantities import NUMBER, number_value, relative_image_count, is_agreement
 from .expansion_models import MAX_EXPANSIONS, preview_edited_groups
 
@@ -23,8 +24,19 @@ PROMPT = '''你是图片检索对话助手。结合最新需求、当前词表�
 例如“想找树下的小猫，不要水印”已有主体和约束：先用工具保存 subject、media_type=image、constraints，再在 reply 问张数；不要只发一条追问却不保存已有信息。“为什么要张数？”则直接文字解释。
 current_request/effective_request 是当前草稿；raw_request 仅为原话资料，可能包含已撤销的旧要求。指代和“其他不变”结合当前草稿及对话理解。reference_request 属于另一需求，只继承用户明确引用的条件；新主体替换旧主体，旧数量不自动继承。
 stage=terms 表示用户正在审阅检索词，未说明“图片”时有关组和词数的修改针对词表。解释为什么选词时结合 current_groups。current_term_counts 是现有词数。
-允许虚构或不常见画面，不推断图片是否存在。一只动物、两个人等是画面内容数量，不是目标图片数；“一些”没有指定图片数量。当前只支持图片。无执行事实不声称已检索、已找到、已批准或已交付。
+允许虚构或不常见画面，不推断图片是否存在。“每个类型要20张”指每类图片20张，结合当前列举的类别计算总数，保留各类配额，不要再问总张数；类别无法确定时只问具体类别。
+一只动物、两个人等是画面内容数量，不是目标图片数；“一些”没有指定图片数量。当前只支持图片。无执行事实不声称已检索、已找到、已批准或已交付。
 例如 execution_context.search_started=false 且 stage=terms 时，用户问“为什么还没开始检索？”：直接说明词表仍待用户点击确认，确认后才会检索；不要重新保存需求、修改词表或扩词。
+理解完整语义后再保存。多类需求以 requirement_draft.categories 为权威；每个类别分别保存 label、scene、target_count、conditions，category_id 稳定。逐图对象数量保留在 scene 中，不用于图片张数。共同条件用 constraints，类别专属条件用下列操作，不能提升成共同条件。
+多类别首次输入、类别数量/画面/专属条件的后续修改必须用 requirement_edits；仅改变本轮明确提到的字段，未提及项保留，已有类别专属条件不能复制到共同 constraints；没有修改共同条件时 constraints=null。不要为多类修改同时重写 subject/target_count；总数由后端根据各类数量计算。用户只给总数时可用 target_count，不平均分配。无依据不补动作、环境、品种或条件。
+requirement_edits: 操作数组，每项含 op、targets、source_text 和该操作需要的字段；省略无关字段，不能把原话填入无关字段。targets 不用时为 []。
+- add_category: targets=[]，label 为原话中的类别短名，scene 为原话中的完整画面，count 可为明确图片数量，否则 null。
+- update_category: targets=[已有 category_id]，只给变化的 label/scene，不传其他字段。remove_category: targets=[已有 category_id]，不传其他字段。
+- set_count: targets 显式列出作用类别的 category_id（同轮新类别可用 label），count 为每类张数，不传其他字段。“各20张”对所有当前类别用一项操作，不能把20当总数。
+- add_condition/remove_condition: targets 列出适用类别，text 为条件；删除引用已有条件，不删除其他条件。
+所有操作 source_text 逐字引用本轮原话。仅迁移尚未结构化的旧主体时，add_category 可引用 current_request.subject 的原文片段；随后用本轮原话补数量。不修改已有草稿的字段不要重新生成。
+例如用户“毛驴奔跑、狗吃饭、兔子睡觉的图，每类20张”：新增三个类别，scene 分别是“毛驴奔跑”“狗吃饭”“兔子睡觉”，再 set_count targets=[毛驴,狗,兔子] count=20 source_text=“每类20张”，media_type=image，不再问总数。后续“狗改为30张”只对狗 set_count。后续“兔子不要了”只 remove_category。后续“狗不要水印”只对狗 add_condition。
+保存前检查本轮每个类别、动作、否定和数量作用范围是否已覆盖。没有依据的具体细节不追问。clarification 可为 {field:media_type|subject|target_count|scope|conflict,source_text:本轮原话,question:具体问题}；只在缺项或影响检索的歧义/冲突时给出，否则 null。已知张数不得再次问张数。能保存的非歧义信息先保存，用 action=update 配合 clarification，只追问未决部分。
 工具 proposal 字段（仅修改工具需要这些字段，未改变项省略或 null）：
 action: update 补充/修改需求；revise_terms 修改已有词表或其图片目标；replace 另起完全不同需求；clarify 记录修改歧义；confirm/confirm_terms 仅表达对已有摘要/词表的同意，实际批准仍须本人点击确认按钮。
 subject: 完整主体或场景，不混入图片张数。target_count: 新指定的图片总数 1–10000，不能用词数或画面物体数量。
@@ -47,8 +59,22 @@ _LABEL_FIRST_COUNT = re.compile(r'(?:^|(?<=[，,、；;\s和及与]))'
                                 r'(?P<count>[1-9][0-9]{0,4})\s*(?:只|张)')
 
 
-def explicit_category_targets(message):
+def explicit_category_targets(message, subject=None):
     """Read explicit animal-category quantities, not an inferred search result count."""
+    # Resolve an explicit equal allocation only against an enumerated subject.
+    each_type = re.fullmatch(
+        rf'\s*(?:(?P<subject>.+?)[，,；;]\s*)?(?:每(?:个)?(?:类型|类别|种类)|每类|每种)'
+        rf'\s*(?:都)?(?:要|需要)?\s*(?P<count>{NUMBER})\s*张(?:图片|照片)?[。.!！]?\s*', message)
+    if each_type:
+        source = each_type['subject'] or subject or ''
+        source = re.sub(r'的?(?:图片|照片|图像|图)$', '', source.strip())
+        labels = [label.strip() for label in re.split(r'[、，,；;]|和|与|及', source)]
+        count = number_value(each_type['count'])
+        if (2 <= len(labels) <= 20 and len(set(labels)) == len(labels)
+                and all(re.fullmatch(r'[一-鿿A-Za-z0-9 ]{1,32}', label) for label in labels)
+                and 1 <= count and count * len(labels) <= 10000):
+            return [{'label': label, 'count': count} for label in labels]
+        return []
     # A per-image scene or an explicit overall total is never a category list.
     if re.search(r'每(?:张|幅|个)|一共|总共|总计|合计', message):
         return []
@@ -110,15 +136,20 @@ def explicit_simple_image_request(message):
     """Read only a fully explicit, unqualified first request; keep subjects literal."""
     subject = r'(?P<subject>[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9、· &+\-]{0,79}?)'
     opening = r'\s*(?:我)?(?:想要|需要|帮我找|请找|找)\s*'
+    object_opening = r'\s*(?=[一二两三四五六七八九十百]+(?:只|头|条|匹|位|个|辆|棵|朵|座))'
     count = r'(?P<count>[1-9][0-9]{0,4})\s*张'
     for pattern in (opening + subject + r'(?:的)?(?:照片|图片)[，,\s]+' + count + r'[。！!.]?\s*',
+                    object_opening + subject + r'(?:的)?(?:照片|图片)[，,\s]+' + count + r'[。！!.]?\s*',
                     opening + count + r'\s*' + subject + r'(?:的)?(?:照片|图片)[。！!.]?\s*'):
         match = re.fullmatch(pattern, message)
         if not match:
             continue
         value = match['subject'].strip()
+        # A literal object count (一只骆驼) belongs to the scene. It is not
+        # the restrictive word 只, nor the requested number of images.
+        unqualified = re.sub(r'^[一二两三四五六七八九十百]+(?:只|头|条|匹|位|个|辆|棵|朵|座)', '', value)
         if (not value or value in {'素材', '这些', '那些', '它们', '图片', '照片'}
-                or re.search(r'不|无|没|别|非|除|仅|只|的|每|各|分别|条件|同样|一样|相同|之前|刚才|上述|至少|最多|最少|至多', value)):
+                or not unqualified or re.search(r'不|无|没|别|非|除|仅|只|的|每|各|分别|条件|同样|一样|相同|之前|刚才|上述|至少|最多|最少|至多|为什么|怎么|多少|能否|是否|吗|呢|什么', unqualified)):
             return None
         quantity = int(match['count'])
         if quantity <= 10000:
@@ -531,12 +562,16 @@ class DialogueCoordinator:
             if phase != 'terms' or type(count) is not int or not 1 <= count <= 10000:
                 raise ServiceError('INVALID_SPEC', 'Invalid current draft image count', 422)
             prior['target_count'] = count
-        category_targets = explicit_category_targets(message) if phase == 'request' else []
+        structured = prior.get('requirement_draft') is not None
+        category_targets = (explicit_category_targets(message, prior.get('subject'))
+                            if phase == 'request' and not structured else [])
         term_target = explicit_group_term_target(message, prior.get('current_groups')) if phase == 'terms' else None
         image_target = (explicit_image_count_update(message, prior.get('target_count'))
                         if prior.get('media_type') == 'image' else None)
         if image_target is None and prior.get('media_type') == 'image':
             image_target = relative_image_count(message, prior.get('target_count'))
+        if structured and phase == 'request':
+            image_target = None
         if count_hint is not None and count_hint != image_target:
             image_target = None
         simple_request = (explicit_simple_image_request(message)
@@ -550,7 +585,7 @@ class DialogueCoordinator:
             if simple_request is not None and count_hint is not None:
                 simple_request['target_count'] = count_hint
         if (body.get('generate_terms_when_complete', False) and phase == 'request'
-                and prior.get('question') == 'target_count' and prior.get('subject')
+                and not structured and prior.get('question') == 'target_count' and prior.get('subject')
                 and prior.get('media_type') == 'image'):
             answer = re.fullmatch(r'\s*(?:要|需要|共|总共)?\s*([1-9][0-9]{0,4})\s*(?:张(?:图片|照片)?)?[。.!！]?\s*', message)
             if answer and int(answer[1]) <= 10000:
@@ -590,7 +625,8 @@ class DialogueCoordinator:
             proposal = {'action': 'update', **simple_request,
                         'media_type': 'image', 'constraints': None, 'question': None,
                         'reply': None, 'count_edits': [], 'expansion_instruction': None}
-        elif category_targets and count_hint is None:
+        elif (category_targets and count_hint is None
+              and all(re.fullmatch(r'[一-鿿A-Za-z]{1,4}', item['label']) for item in category_targets)):
             # A bounded list of explicit per-category image quantities is already
             # authoritative. Avoid a slow model round trip merely to restate it;
             # the user still reviews the generated summary and term table.
@@ -612,6 +648,8 @@ class DialogueCoordinator:
                 proposal = {'action': 'clarify', 'subject': None, 'target_count': None,
                             'media_type': None, 'constraints': None,
                             'question': '这次生成的修改未通过校验，之前的需求保持不变。请重试这条消息。'}
+        if proposal.get('requirement_edits'):
+            category_targets = []
         action = proposal['action']
         model_action = action
         if (phase == 'request' and prior.get('question') == 'confirm_summary'
@@ -642,7 +680,7 @@ class DialogueCoordinator:
             next_state.update(subject=None, target_count=None, media_type=None, constraints=[],
                               question=None, stage='request', context_start=len(prior['messages']),
                               raw_request='', effective_request=None, reference_request=None,
-                              category_targets=[], current_groups=[])
+                              category_targets=[], current_groups=[], requirement_draft=None)
         if action in ('replace', 'update'):
             for field in ('subject', 'target_count', 'media_type'):
                 if proposal[field] is not None:
@@ -662,6 +700,32 @@ class DialogueCoordinator:
                 next_state['constraints'] = [proposal['constraints']] if proposal['constraints'] else []
             if next_state['target_count'] != prior['target_count'] or next_state['subject'] != prior['subject']:
                 next_state['category_targets'] = []
+        if category_targets and count_hint is None and action == 'update':
+            next_state['requirement_draft'] = draft_from_state({
+                'category_targets': category_targets})
+        semantic_edits = proposal.get('requirement_edits', [])
+        if semantic_edits:
+            if action not in ('replace', 'update', 'revise_terms'):
+                raise ServiceError('MODEL_OUTPUT_INVALID', 'Category edits require a request update', 502)
+            try:
+                base = {} if action == 'replace' else prior
+                draft = apply_edits(base, semantic_edits, message)
+                projected = project_draft(next_state, draft, proposal.get('target_count'))
+                next_state.update(projected)
+            except ValueError as error:
+                raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None
+        elif next_state.get('requirement_draft') is not None and action == 'update':
+            try:
+                next_state.update(project_draft(next_state, next_state['requirement_draft'],
+                                                proposal.get('target_count')))
+            except ValueError as error:
+                raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None
+        try:
+            check_clarification(proposal, next_state, message)
+        except ValueError as error:
+            raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None
+        if next_state.get('requirement_draft') is not None:
+            next_state['effective_request'] = render_draft(next_state)
         if action == 'clarify':
             # Rejected edits remain auditable, but cannot become effective via
             # the legacy raw-text fallback. Freeze the previous accepted draft.
@@ -681,6 +745,8 @@ class DialogueCoordinator:
                 next_state['effective_request'] = self._summary(next_state)
             else:
                 next_state['effective_request'] = None
+            if next_state.get('requirement_draft') is not None:
+                next_state['effective_request'] = render_draft(next_state)
         if action == 'confirm' and (phase != 'request' or prior.get('question') != 'confirm_summary'):
             action = 'clarify'
         if action == 'confirm_terms' and (phase != 'terms' or prior.get('question') not in (None, 'review_terms')):
@@ -715,8 +781,17 @@ class DialogueCoordinator:
                 next_state['question'] = 'target_count'
             else:
                 next_state['question'] = 'confirm_summary'
-            if action == 'clarify' and proposal['question']:
+            if (action == 'clarify' or proposal.get('clarification')) and proposal['question']:
                 next_state['question'] = 'custom_clarification'
+        if semantic_edits:
+            if (next_state['media_type'] == 'image' and next_state['subject']
+                    and next_state['target_count'] is not None and proposal.get('question') is None
+                    and (phase == 'terms' or body.get('generate_terms_when_complete', False))):
+                next_state['stage'], next_state['question'] = 'terms', 'review_terms'
+            elif not next_state['subject'] or next_state['target_count'] is None or proposal.get('clarification'):
+                next_state['stage'] = 'request'
+                next_state['question'] = ('custom_clarification' if proposal.get('clarification') else
+                    'subject' if not next_state['subject'] else 'target_count')
         messages = prior['messages'] + [{'role': 'user', 'text': message}]
         dropped = max(0, len(messages) - 29)
         next_state['messages'] = messages[-29:]
@@ -739,9 +814,11 @@ class DialogueCoordinator:
                   'review_terms': ('需求信息已齐，正在生成检索词供你确认。' if direct_terms
                                    else '我会按你的反馈重新调整检索词。')}
                  .get(question, '收到，我会继续处理。'))
-        if action == 'clarify' and proposal['question']:
+        if (action == 'clarify' or proposal.get('clarification')) and proposal['question']:
             reply = proposal['question']
         natural = _safe_natural_reply(proposal.get('reply'))
+        if proposal.get('clarification'):
+            natural = None
         if natural:
             if action == 'answer' and not body.get('generate_terms_when_complete', False):
                 reply = ('视频草稿可以保存；内网视频检索、验证和交付链路接通前暂不能执行。'
@@ -771,13 +848,15 @@ class DialogueCoordinator:
         result = {'schema_version': 'dialogue-turn@1', 'session_id': session_id, 'version': new_version,
                 'action': action, 'stage': next_state['stage'], 'question': question,
                 'count_edits': proposal.get('count_edits', []),
+                'requirement_edits': semantic_edits,
                 'expansion_instruction': proposal.get('expansion_instruction'),
                 'reply': reply, 'reply_source': 'model' if model_interpreted and reply == natural else 'system',
                 'summary': summary, 'request': {
                     'raw_request': self._request(next_state),
                     'effective_request': self._effective_request(next_state),
                     'target_count': next_state['target_count'],
-                    'media_type': next_state['media_type'], 'subject': next_state['subject']}}
+                    'media_type': next_state['media_type'], 'subject': next_state['subject'],
+                    'requirement_draft': next_state.get('requirement_draft')}}
         if receipt is not None:
             receipt.checkpoint({'kind': 'dialogue', 'project_id': project_id,
                 'session_id': original_session_id, 'expected_version': version,
@@ -793,11 +872,16 @@ class DialogueCoordinator:
                 'request': {'raw_request': self._request(state),
                             'effective_request': self._effective_request(state),
                             'target_count': state['target_count'],
-                            'media_type': state['media_type'], 'subject': state['subject']},
+                            'media_type': state['media_type'], 'subject': state['subject'],
+                            'requirement_draft': state.get('requirement_draft')},
                 'messages': state['_transcript']}
 
     @staticmethod
     def _summary(state):
+        if state.get('requirement_draft') is not None and any(
+                c['scene'] != c['label'] or c['conditions']
+                for c in state['requirement_draft']['categories']):
+            return render_draft(state)
         suffix = '；' + '；'.join(state['constraints']) if state['constraints'] else ''
         targets = state.get('category_targets') or []
         if targets and sum(item['count'] for item in targets) == state['target_count']:

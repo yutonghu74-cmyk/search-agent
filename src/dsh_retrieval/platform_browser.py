@@ -3,7 +3,7 @@ from email.message import Message
 from http.cookies import SimpleCookie, CookieError
 
 from .errors import ServiceError
-from .adapters.platform_access import canonical_project_id
+from .adapters.platform_access import canonical_project_id, single_header
 
 
 class PlatformBrowser:
@@ -22,18 +22,26 @@ class PlatformBrowser:
     def cookie(self, headers):
         value = SimpleCookie()
         try:
-            value.load(headers.get('Cookie', ''))
+            raw = single_header(headers, 'Cookie', required=True)
+            # Cookie parsers silently choose the last duplicate; never accept that ambiguity.
+            if sum(part.strip().split('=', 1)[0] == self.cookie_name for part in raw.split(';')) != 1:
+                raise ServiceError('UNAUTHENTICATED', 'unambiguous application session required', 401)
+            value.load(raw)
             return value[self.cookie_name].value
         except (KeyError, ValueError, CookieError):
             raise ServiceError('UNAUTHENTICATED', 'platform application session required', 401) from None
 
     def request_headers(self, headers, method):
+        # Reject ambiguous page identity before any authentication or CSRF processing.
+        for name in ('Authorization', 'Cookie', 'X-Agent-User', 'X-CSRF-Token'):
+            single_header(headers, name)
         # Explicit Bearer is for trusted service clients; browser session needs CSRF for mutations.
-        if headers.get('Authorization'):
+        if single_header(headers, 'Authorization'):
             return headers
         actor, token, _ = self.credentials.session(self.cookie(headers),
-            csrf=headers.get('X-CSRF-Token'), mutation=method not in ('GET', 'HEAD'))
-        if headers.get('X-Agent-User') and headers.get('X-Agent-User') != actor.user_id:
+            csrf=single_header(headers, 'X-CSRF-Token'), mutation=method not in ('GET', 'HEAD'))
+        expected_user = single_header(headers, 'X-Agent-User')
+        if expected_user and expected_user != actor.user_id:
             raise ServiceError('UNAUTHENTICATED', 'application user changed; reload required', 401)
         result = Message()
         for key, value in headers.items():
@@ -45,23 +53,27 @@ class PlatformBrowser:
         from urllib.parse import urlsplit
         if urlsplit(handler.path).query:
             raise ServiceError('INVALID_SPEC', 'platform session routes do not accept query parameters', 422)
+        authorization = single_header(handler.headers, 'Authorization')
         if path == '/v1/platform/session' and handler.command == 'POST':
             # Platform/gateway delivers verified personal credentials via HTTPS POST.
             # No login secrets in URLs, logs or page scripts.
-            if not handler.headers.get('Authorization', '').startswith('Bearer '):
+            if not authorization.startswith('Bearer '):
                 raise ServiceError('UNAUTHENTICATED', 'personal bearer credential required', 401)
             body = handler._body()
             if set(body) - {'refresh_key', 'expires_in'}:
                 raise ServiceError('INVALID_SPEC', 'invalid session payload', 422)
-            actor = self.credentials.register(handler.headers['Authorization'][7:], body.get('refresh_key'),
+            actor = self.credentials.register(authorization[7:], body.get('refresh_key'),
                                               ttl=body.get('expires_in', 3600))
             cookie, _ = self.credentials.create_session(actor)
             handler._json(200, {'user_id': actor.user_id}, extra_headers={
                 'Set-Cookie': self.cookie_name + '=' + cookie + '; Path=/; Secure; HttpOnly; SameSite=Lax'})
             return
         cookie = self.cookie(handler.headers)
-        actor, token, csrf = self.credentials.session(cookie, csrf=handler.headers.get('X-CSRF-Token'),
+        actor, token, csrf = self.credentials.session(cookie, csrf=single_header(handler.headers, 'X-CSRF-Token'),
                                                       mutation=handler.command != 'GET')
+        expected_user = single_header(handler.headers, 'X-Agent-User')
+        if expected_user and expected_user != actor.user_id:
+            raise ServiceError('UNAUTHENTICATED', 'application user changed; reload required', 401)
         if path == '/v1/platform/context' and handler.command == 'GET':
             items = tuple(self.list_projects(actor, token))
             seen = set()

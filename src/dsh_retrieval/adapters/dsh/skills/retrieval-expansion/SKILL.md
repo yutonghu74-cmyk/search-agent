@@ -2,7 +2,7 @@
 name: retrieval-expansion
 description: Generate or revise versioned image-retrieval keyword groups from an authorized request or an existing draft; use for natural-language term feedback, not for approving or executing search.
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
 ---
 
 # Retrieval expansion
@@ -29,6 +29,8 @@ Tool writes are provisional. They do not confirm a term list, create a search ru
 - Preserve subjects, proper nouns, negations, source constraints, and hard conditions. Do not turn excluded concepts into positive search terms.
 
 ## Expansion output
+
+When semantically justified, include synonyms, established aliases, full names and abbreviations as complementary variants; never invent aliases, change identifiers, or turn a negation into a positive query. All variants remain provisional until owner confirmation.
 
 Create one group per explicit retrieval category. Keep the original core query path and add useful, non-duplicated visual attributes, scenes, compositions, or business-related variants. Do not use generic headings as search terms or invent category quantities.
 

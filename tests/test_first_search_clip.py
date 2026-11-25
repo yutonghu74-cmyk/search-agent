@@ -108,6 +108,169 @@ class FirstSearchCLIPTest(unittest.TestCase):
             time.sleep(.01)
         self.fail("combined CLIP search did not finish")
 
+    def test_candidate_preview_is_stable_read_only_and_requires_mapping(self):
+        self.clip.auto_start(self.actor, self.task_id, key='candidate-input')
+        self.wait_complete()
+        before = self.tasks.repository.get(self.actor, self.task_id)
+        view = self.clip.preview_manifest(self.actor, self.task_id)
+        self.assertEqual(view['candidate_count'], 1)
+        self.assertFalse(view['confirmation_supported'])
+        self.assertFalse(view['confirmed'])
+        self.assertIsNone(view['accepted_count'])
+        self.assertEqual(self.clip.preview_manifest(self.actor, self.task_id), view)
+        self.assertEqual(self.tasks.repository.get(self.actor, self.task_id).task_version, before.task_version)
+        from copy import deepcopy
+        from dsh_retrieval.clip_candidate_input import build_clip_input
+        from dsh_retrieval.retrieval_contracts import RetrievalScope
+        job_id = self.clip.jobs.current_for_browse(RetrievalScope.from_task(before))
+        job = self.clip.jobs.job(job_id)
+        rows = deepcopy(self.clip.jobs.view(job_id)['items'])
+        rows[0]['plan_id'] = 'unapproved-plan'
+        with self.assertRaises(ServiceError) as invalid:
+            build_clip_input(before, job, rows, self.clip.media_mappings)
+        self.assertEqual(invalid.exception.code, 'INPUT_SNAPSHOT_CHANGED')
+        self.clip.media_mappings = None
+        with self.assertRaises(ServiceError) as caught:
+            self.clip.preview_manifest(self.actor, self.task_id)
+        self.assertEqual(caught.exception.code, 'MEDIA_MAPPING_REQUIRED')
+
+    def test_combined_candidate_confirmation_persists_and_reaches_cleaning_reader(self):
+        from dsh_retrieval.adapters.task_storage.multi_rule import SQLiteMultiRuleApprovalRepository
+        class MediaAuthority:
+            def require_access(self, context, resource_ref, action):
+                if resource_ref != 'media:asset-1@asset-v1' or action != 'read':
+                    raise ServiceError('ACCESS_DENIED', 'not authorized', 403)
+        repository = SQLiteMultiRuleApprovalRepository(self.tasks.repository.path,
+            projects=self.tasks.projects, authorization=MediaAuthority())
+        from copy import deepcopy
+        body = deepcopy(BODY)
+        body['query_spec']['rules'] = [dict(rule_id='no-text', predicate_ref='text.present@1',
+            operator='eq', value=False, hardness='hard', origin='user_explicit')]
+        created, _ = self.tasks.create_task(self.actor, 'cleanable-combined',
+            confirmation(self.tasks, self.actor, key='cleanable-draft', body=body))
+        self.task_id = created['task_id']
+        self.clip.configure_cleaning_reader(repository)
+        self.clip.auto_start(self.actor, self.task_id, key='persistent-input')
+        self.wait_complete()
+        preview = self.clip.preview_manifest(self.actor, self.task_id)
+        self.assertTrue(preview['confirmation_supported'])
+        args = dict(proposal_digest=preview['proposal_digest'],
+            expected_task_version=preview['expected_task_version'], key='confirm-input', action='confirm')
+        first, replayed = self.clip.confirm_manifest(self.actor, self.task_id, **args)
+        self.assertFalse(replayed)
+        repeated, replayed = self.clip.confirm_manifest(self.actor, self.task_id, **args)
+        self.assertTrue(replayed); self.assertEqual(first, repeated)
+        manifest = repository.get_manifest(self.actor, self.task_id, first['manifest_ref'])
+        self.assertEqual(len(manifest.proposal.items), 1)
+        from dsh_retrieval.multi_rule_contracts import CleaningRecipe, CleaningRule, DetectionStep
+        from dsh_retrieval.query_spec import digest
+        from dsh_retrieval.recipe_bridge import confirmed_rules_digest
+        task = self.tasks.repository.get(self.actor, self.task_id)
+        recipe = CleaningRecipe('image', confirmed_rules_digest(task), digest('test-registry'),
+            (DetectionStep('features', 'test.detector', 'test.validator', 'test.evidence'),),
+            (CleaningRule('no-text', 'features', 'text.present@1', 'eq', False),))
+        cleaning = repository.prepare(self.actor, self.task_id, first['manifest_ref'], recipe,
+            detector_release_digest=digest('test-release'))
+        approval, replayed = repository.confirm(self.actor, self.task_id, cleaning.proposal_digest,
+            key='cleaning-approval', expected_task_version=cleaning.expected_task_version, action='confirm')
+        self.assertFalse(replayed)
+        paused = self.clip.tick(self.actor, self.task_id, max_requests=1)
+        self.assertEqual(paused['pause_reason'], 'CLEANING_IN_PROGRESS')
+        self.assertEqual(paused['network_attempts'], 0)
+        again, replayed = self.clip.confirm_manifest(self.actor, self.task_id, **args)
+        self.assertTrue(replayed); self.assertEqual(again, first)
+        self.assertEqual(repository.get_manifest(self.actor, self.task_id, first['manifest_ref']), manifest)
+        # Reopen business ledger and reattach trusted source validator after restart.
+        reopened = SQLiteMultiRuleApprovalRepository(self.tasks.repository.path,
+            projects=self.tasks.projects, authorization=MediaAuthority())
+        self.clip.configure_cleaning_reader(reopened)
+        self.assertEqual(reopened.get_manifest(self.actor, self.task_id, first['manifest_ref']), manifest)
+        class Denied:
+            def require_access(self, *args):
+                raise ServiceError('ACCESS_DENIED', 'revoked', 403)
+        reopened.manifests.authorization = Denied()
+        with self.assertRaises(ServiceError):
+            reopened.get_manifest(self.actor, self.task_id, first['manifest_ref'])
+
+    def test_dispatch_uses_effective_counts_and_rejects_stale_generation(self):
+        from types import SimpleNamespace
+        task = self.tasks.repository.get(self.actor, self.task_id)
+        value = dict(generation=task.run_generation, target_count=task.target_count,
+                     accepted_count=task.target_count)
+        self.clip.cleaning_reader = SimpleNamespace(get_current_result_set=lambda *args: value)
+        self.assertEqual(self.clip._dispatch_pause(task, 'initial'), 'TARGET_MET')
+        self.assertEqual(self.clip._dispatch_pause(task, 'refill'), 'TARGET_MET')
+        value['accepted_count'] = 1
+        value['raw_hit_count'] = 50000
+        self.assertEqual(self.clip._dispatch_pause(task, 'initial'), 'AWAIT_REFILL')
+        self.assertIsNone(self.clip._dispatch_pause(task, 'refill'))
+        value['generation'] += 1
+        with self.assertRaises(ServiceError) as caught:
+            self.clip._dispatch_pause(task, 'initial')
+        self.assertEqual(caught.exception.code, 'RESULT_SCOPE_CHANGED')
+
+    def test_window_pauses_before_page_two_and_refill_input_excludes_confirmed(self):
+        from copy import deepcopy
+        from dataclasses import replace
+        from dsh_retrieval.adapters.task_storage.multi_rule import SQLiteMultiRuleApprovalRepository
+        from dsh_retrieval.clip_media_mapping import CLIPMediaMappings
+        from dsh_retrieval.retrieval_contracts import RetrievalScope
+        class Authority:
+            def require_access(self, context, ref, action):
+                if action != 'read' or ref not in ('media:asset-1@asset-v1', 'media:asset-2@asset-v1'):
+                    raise ServiceError('ACCESS_DENIED', 'denied', 403)
+        class Pages(Transport):
+            def open(this, request, timeout):
+                value = json.loads(super(Pages, this).open(request, timeout).read())
+                page = len(this.requests)
+                value.update(current_page=page, has_next=page == 1)
+                if page == 2:
+                    value['matches'][0].update(id=2, filename='two.jpg', full_path='/mock/two.jpg')
+                return Response(json.dumps(value).encode())
+        body = deepcopy(BODY)
+        body['query_spec']['refill_policy'] = dict(mode='maintain_target', target_count=10,
+            approved_library_ids=['clip-images'], progression='auto')
+        body['node_modes']['refill'] = 'auto'
+        created, _ = self.tasks.create_task(self.actor, 'window-task',
+            confirmation(self.tasks, self.actor, key='window-draft', body=body))
+        self.task_id = created['task_id']
+        repo = SQLiteMultiRuleApprovalRepository(self.tasks.repository.path,
+            projects=self.tasks.projects, authorization=Authority())
+        self.clip.configure_cleaning_reader(repo)
+        transport = Pages(); self.clip.client.opener = transport
+        entries = tuple(self.clip.media_mappings._entries.items())
+        old_key, old_media = entries[0]
+        self.clip.media_mappings = CLIPMediaMappings(self.clip.client.registry, entries + ((
+            (*old_key[:-1], '/mock/two.jpg'), replace(old_media, media_unit_id='unit-2',
+                source_asset_id='asset-2', authorized_media_ref='media:asset-2@asset-v1',
+                content_digest='sha256:'+'2'*64)),))
+        queued = self.clip.auto_start(self.actor, self.task_id, key='window-start')
+        deadline = time.monotonic()+3
+        while not self.clip.progress(self.actor, self.task_id)['initial_window_complete']:
+            self.assertLess(time.monotonic(), deadline); time.sleep(.01)
+        self.assertEqual(len(transport.requests), 1)
+        self.assertFalse(self.clip.progress(self.actor, self.task_id)['pagination_stopped'])
+        self.assertEqual(self.clip.tick(self.actor, self.task_id, max_requests=2)['pause_reason'],
+                         'CANDIDATE_WINDOW_READY')
+        preview = self.clip.preview_manifest(self.actor, self.task_id)
+        first, _ = self.clip.confirm_manifest(self.actor, self.task_id,
+            proposal_digest=preview['proposal_digest'], expected_task_version=preview['expected_task_version'],
+            key='window-input', action='confirm')
+        job = self.clip.jobs.job(queued['job_id'])
+        self.assertTrue(all(m.windowed for m in job.members))
+        pending = self.clip.jobs.pending_requests(job.job_id)[0][1]
+        self.clip.executor.tick_refill(job.job_id, plan_id=pending.plan_id, expected_cursor=pending.cursor)
+        second = self.clip.preview_manifest(self.actor, self.task_id)
+        self.assertEqual(second['candidate_count'], 1)
+        self.assertNotEqual(second['candidates'][0]['candidate_id'], first['candidates'][0]['candidate_id'])
+        self.assertEqual(repo.get_manifest(self.actor, self.task_id, first['manifest_ref']).proposal.items[0].media,
+                         old_media)
+        del self.clip.cleaning_reader
+        with self.assertRaises(ServiceError) as caught:
+            self.clip.tick(self.actor, self.task_id, max_requests=1)
+        self.assertEqual(caught.exception.code, 'SEARCH_GATE_NOT_CONFIGURED')
+        self.assertEqual(len(transport.requests), 2)
+
     def test_refill_authority_only_allows_library_search(self):
         authority = self.clip._authority()
         context = AccessContext(self.actor, self.task_id, "refill", "current")

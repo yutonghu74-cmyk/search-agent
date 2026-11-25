@@ -32,6 +32,27 @@ class FakeRuntime:
 
 
 class DialogueTest(unittest.TestCase):
+    def test_each_type_quantity_initial_and_followup(self):
+        subject = '一只毛驴在奔跑、一只狗在吃饭、一个兔子在睡觉'
+        expected = [{'label': label, 'count': 20} for label in subject.split('、')]
+        self.assertEqual(explicit_category_targets(subject + '的图，每个类型要20张'), expected)
+        self.assertEqual(explicit_category_targets('每个类型要20张', subject), expected)
+        self.assertEqual(explicit_category_targets('每张图20只狗'), [])
+        self.assertEqual(explicit_category_targets('每个类型要20张'), [])
+        for initial in (True, False):
+            model = FakeRuntime(proposal('update', subject=subject, media_type='image'),
+                                proposal('update', target_count=60))
+            coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
+            if initial:
+                result = self.turn(coordinator, None, 0, subject + '的图，每个类型要20张')
+            else:
+                first = self.turn(coordinator, None, 0, subject + '的图')
+                result = self.turn(coordinator, first['session_id'], first['version'], '每个类型要20张')
+            self.assertEqual(result['request']['target_count'], 60)
+            state = coordinator.store.read(self.actor, 'demo', result['session_id'])
+            self.assertEqual(state['category_targets'], expected)
+            self.assertNotEqual(result['question'], 'target_count')
+
     def test_transcript_failure_rolls_back_draft_and_version(self):
         store = DialogueStore(self.path)
         coordinator = DialogueCoordinator(store, FakeRuntime(proposal('update', subject='猫', media_type='image')),
@@ -141,6 +162,25 @@ class DialogueTest(unittest.TestCase):
                         '想要兔子照片，20000张'):
             with self.subTest(message=message):
                 self.assertIsNone(explicit_simple_image_request(message))
+
+    def test_literal_object_scene_and_explicit_image_count_skip_redundant_inference(self):
+        for text, subject, count in [('一只骆驼的照片，5张', '一只骆驼', 5),
+                                     ('找一只骆驼的照片，5张', '一只骆驼', 5),
+                                     ('两个人的图片，12张', '两个人', 12)]:
+            model = FakeRuntime()
+            coordinator = DialogueCoordinator(DialogueStore(self.path), model, self.projects)
+            value = coordinator.turn(self.actor, 'demo', {'session_id': None, 'expected_version': 0,
+                'phase': 'request', 'llm_id': 'chat-llm', 'message': text,
+                'generate_terms_when_complete': True})
+            self.assertEqual(value['request']['subject'], subject)
+            self.assertEqual(value['request']['target_count'], count)
+            self.assertEqual(value['request']['raw_request'], text)
+            self.assertEqual(value['stage'], 'terms'); self.assertNotIn('task_id', value)
+            self.assertEqual(model.calls, [])
+        for text in ['一只骆驼的照片', '一只骆驼的照片，至少5张', '一只没有水印的骆驼照片，5张',
+                     '只要骆驼的照片，5张', '一只骆驼和一只狗的照片，各5张', '一个什么人的照片，5张',
+                     '一只骆驼的照片，5张，不要水印', '一只骆驼的照片，20000张']:
+            self.assertIsNone(explicit_simple_image_request(text), text)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

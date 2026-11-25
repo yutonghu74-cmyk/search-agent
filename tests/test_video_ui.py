@@ -58,14 +58,15 @@ class VideoUITest(unittest.TestCase):
     def test_legacy_or_complex_draft_is_not_silently_flattened(self):
         self.run_js(r"""
 (async()=>{
- const assert=require('assert/strict');const fields={};const $=id=>fields[id]??={value:'',textContent:'',disabled:false};let calls=0;
- const f=new Function('$','api','key',process.env.SOURCE+';return {saveVideoDraft,showVideoDraft,videoDraftBody}')($,async()=>{calls++},()=> 'k');
+ const assert=require('assert/strict');const fields={};const $=id=>fields[id]??={value:'',textContent:'',disabled:false};let calls=0,saved;
+ const f=new Function('$','api','key',process.env.SOURCE+';return {saveVideoDraft,showVideoDraft,videoDraftBody}')($,async(path,options)=>{calls++;saved=options.body;return {...draft,proposal:saved,draft_version:2}},()=> 'k');
  const proposal=f.videoDraftBody('有人喝水',5);
  const draft={draft_id:'draft_'+ 'b'.repeat(32),draft_version:1,proposal,video_summary:{requires_scope_update:true}};
  f.showVideoDraft(draft);await f.saveVideoDraft();assert.equal(calls,0);assert.equal($('video-draft-save').disabled,true);
  draft.video_summary.requires_scope_update=false;
  proposal.query_spec.video_conditions.clauses.push({id:'visual_2',channel:'visual',predicate:'有杯子'});
- f.showVideoDraft(draft);await f.saveVideoDraft();assert.equal(calls,0);
+ f.showVideoDraft(draft);await f.saveVideoDraft();assert.equal(calls,1);
+ assert.deepEqual(saved.query_spec.video_conditions.clauses.map(c=>c.predicate),['有人喝水','有杯子']);
  assert.equal(proposal.query_spec.video_conditions.clauses.length,2);
 })().catch(error=>{console.error(error);process.exit(1)});
 """)

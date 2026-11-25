@@ -85,6 +85,17 @@ class ConfirmedRefillService:
         policy, node_mode = self._policy(task)
         limits = self._limits(task)
         evidence = self.runtime.reservations.execution_evidence(actor, task_id)
+        # Expose measured effective output, not raw file counts or an estimated
+        # recall percentage. Call budgets are an execution cost proxy.
+        completed = [row for row in evidence['rounds'] if row['outcome'] in {'empty', 'result'}]
+        seen = sum(row.get('candidate_count') or 0 for row in completed)
+        gained = sum(row.get('new_unique_accepted') or 0 for row in completed)
+        evidence = {**evidence, 'effective_yield': gained / seen if seen else None,
+                    'new_unique_accepted': gained,
+                    'remaining_vlm_calls': (None if limits['max_vlm_calls'] is None else
+                        max(0, limits['max_vlm_calls'] - evidence['vlm_calls'])),
+                    'remaining_rounds': (None if limits['max_rounds'] is None else
+                        max(0, limits['max_rounds'] - evidence['issued_rounds']))}
         positions = self.runtime.adapter.list_refill_positions(
             actor, task_id, revision=task.confirmed_revision,
             generation=task.run_generation)
@@ -102,7 +113,7 @@ class ConfirmedRefillService:
             active = next((item for item in reservations
                            if item.position_fingerprint in {
                                p.fingerprint for p in positions}), None)
-        if active is not None:
+        if active is not None and evidence["stop_reason"] is None:
             return {
                 "task_id": task_id, "revision": task.confirmed_revision,
                 "generation": task.run_generation, "task_version": task.task_version,
@@ -126,6 +137,12 @@ class ConfirmedRefillService:
         remaining_batches = (None if limits["max_rounds"] is None else
                              max(0, limits["max_rounds"] - evidence["issued_rounds"]))
         focused, group_gaps, position_groups = self._quota_focus(task, result, positions)
+        from .recall_strategy import rank_refill_positions
+        focused, strategy_reasons = rank_refill_positions(focused, reservations, evidence['rounds'])
+        if group_gaps:
+            needs = {r['label']: r['gap'] for r in group_gaps}
+            focused = tuple(sorted(focused, key=lambda p: -max(
+                (needs[label] for label in position_groups.get(p.fingerprint, ())), default=0)))
         try:
             decision = decide_refill(
                 target_count=task.target_count,
@@ -142,12 +159,19 @@ class ConfirmedRefillService:
         if decision.next_position is not None:
             binding = parse_refill_position(decision.next_position)
             next_view = {
+                'selection': strategy_reasons[decision.next_position.fingerprint],
                 "library_id": decision.next_position.library_id,
                 "position_fingerprint": decision.next_position.fingerprint,
                 "query": binding["query"],
                 "index_version": binding["index_version"],
                 "position": binding["position"],
+                "candidate_window_cap": binding['parameters'].get('batch_size'),
+                "progression": "approved_query_pagination",
             }
+            spec = json.loads(task.confirmed_proposal_json)['query_spec']
+            next_view['query_origins'] = [origin
+                for branch in compile_query_branches(spec)['branches']
+                if branch['query_text'] == binding['query'] for origin in branch['origins']]
             if group_gaps:
                 next_view["group_labels"] = position_groups.get(
                     decision.next_position.fingerprint, [])

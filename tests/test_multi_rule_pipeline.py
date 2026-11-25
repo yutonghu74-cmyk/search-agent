@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from dataclasses import replace
 from hashlib import sha256
 from io import BytesIO
@@ -240,9 +240,30 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.assertEqual(representative.sources[0].candidate_id,
                          representative.candidate_id)
         self.assertEqual((self.gateway.reads, self.detector.calls), (1, 1))
+        with closing(sqlite3.connect(self.repo.tasks.path)) as db, db:
+            usage_before = db.execute('SELECT COUNT(*) FROM cleaning_usage_steps').fetchone()[0]
         self.assertEqual(self.run_pipeline(), (view, True))
+        with closing(sqlite3.connect(self.repo.tasks.path)) as db, db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM cleaning_usage_steps').fetchone()[0], usage_before)
         self.assertEqual((self.gateway.reads, self.detector.calls), (1, 1))
         self.assertEqual(len(self.f.state()["result_sets"]), 1)
+
+    def test_approved_pipeline_persists_actual_http_observations(self):
+        import test_model_runtime as runtime_fixture
+        from dsh_retrieval.cleaning_usage import read_usage
+        f = runtime_fixture.ModelRuntimeTest()
+        runtime = f.runtime([{'verdict': 'pass', 'reason': 'visible'}])
+        self.detector.usage_instrumentation = 'model-http@1'
+        self.detector.after_detect = lambda: runtime.assess(
+            'synthetic requirement', b'\xff\xd8\xfffixture', 'image/jpeg', runtime.binding('text', 'vision'))
+        self.run_pipeline()
+        with closing(sqlite3.connect(self.repo.tasks.path)) as db, db:
+            rows = read_usage(db, {self.operation_id: self.approval})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['http_attempts'], rows[0]['status']), (1, 'completed'))
+        self.run_pipeline()
+        with closing(sqlite3.connect(self.repo.tasks.path)) as db, db:
+            self.assertEqual(read_usage(db, {self.operation_id: self.approval}), rows)
 
     def test_indexed_result_page_preserves_current_refill_stop(self):
         from dsh_retrieval.result_views import build_result_page
@@ -356,7 +377,7 @@ class MultiRulePipelineTests(unittest.TestCase):
         self.assertEqual(reopened.get_current_preview_candidate(
             self.actor, self.task_id, candidate.candidate_id),
             (candidate, 'trusted:ref'))
-        with reopened.tasks._connect() as db:
+        with closing(reopened.tasks._connect()) as db, db:
             db.execute('DELETE FROM task_asset_read_bindings WHERE task_id=?',
                        (self.task_id,))
             db.execute('DELETE FROM task_asset_read_heads WHERE task_id=?',
@@ -392,7 +413,7 @@ class MultiRulePipelineTests(unittest.TestCase):
             copy = Path(directory) / 'migrated.sqlite'
             self.assertEqual(migrate(self.repo.tasks.path, copy), 1)
             self.assertTrue(copy.is_file())
-            with sqlite3.connect(copy) as db:
+            with closing(sqlite3.connect(copy)) as db, db:
                 self.assertEqual(db.execute(
                     'SELECT COUNT(*) FROM task_asset_read_bindings').fetchone()[0], 1)
                 self.assertEqual(db.execute(
@@ -417,7 +438,7 @@ class MultiRulePipelineTests(unittest.TestCase):
             self.assertEqual(migrate(self.repo.tasks.path, target, resume=True), 1)
             self.assertEqual(source_digest(self.repo.tasks.path), original)
             copied = type(self.repo)(target, projects=None, authorization=None)
-            with sqlite3.connect(target) as db:
+            with closing(sqlite3.connect(target)) as db, db:
                 db.execute("UPDATE task_result_read_items SET item_json='{}' WHERE view_type='accepted'")
             with self.assertRaisesRegex(ValueError, 'semantic mismatch'):
                 verify(copied)
@@ -431,7 +452,7 @@ class MultiRulePipelineTests(unittest.TestCase):
 
     def test_result_page_missing_row_fails_closed(self):
         self.run_pipeline()
-        with self.repo.tasks._connect() as db:
+        with closing(self.repo.tasks._connect()) as db, db:
             db.execute("DELETE FROM task_result_read_items WHERE task_id=? "
                        "AND view_type='accepted'", (self.task_id,))
         self.assert_code('STORAGE_CORRUPT', lambda:

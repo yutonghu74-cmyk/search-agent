@@ -16,7 +16,9 @@ from dsh_retrieval.models import Actor, RunStatus
 from dsh_retrieval.result_views import build_result_page
 
 
-IMAGE = b'\xff\xd8\xffsynthetic-jpeg-test'
+from image_fixtures import image_bytes
+
+IMAGE = image_bytes()
 
 
 class DeliveryTest(unittest.TestCase):

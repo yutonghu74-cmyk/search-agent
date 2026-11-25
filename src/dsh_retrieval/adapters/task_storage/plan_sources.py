@@ -1,6 +1,7 @@
-"""Task headers and plan-scoped page sources, transactionally mirrored for legacy readers."""
+"""Rebuildable task headers and plan-scoped page projections of the row ledger."""
 import hashlib
 import json
+from . import ledger_rows
 from ...errors import ServiceError
 
 
@@ -12,8 +13,8 @@ def create(db):
     db.execute('CREATE TABLE IF NOT EXISTS plan_task_sources (task_id TEXT PRIMARY KEY,payload TEXT NOT NULL,checksum TEXT NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS plan_page_sources (task_id TEXT NOT NULL,plan_digest TEXT NOT NULL,payload TEXT NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(task_id,plan_digest))')
     for event in ('INSERT', 'UPDATE', 'DELETE'):
-        db.execute(f'''CREATE TRIGGER IF NOT EXISTS plan_source_dirty_{event.lower()} AFTER {event} ON plan_set_ledger
-            BEGIN UPDATE plan_source_meta SET dirty=1 WHERE id=1; END''')
+        ledger_rows.watch(db, 'plan_set_ledger', 'plan_source_dirty_' + event.lower(), event,
+                          'UPDATE plan_source_meta SET dirty=1 WHERE id=1;')
 
 
 def _check(row):
@@ -25,6 +26,9 @@ def _check(row):
 
 def _put(db, table, keys, payload):
     checksum = hashlib.sha256(payload.encode()).hexdigest()
+    where = 'task_id=?' if table == 'plan_task_sources' else 'task_id=? AND plan_digest=?'
+    if db.execute(f'SELECT payload,checksum FROM {table} WHERE {where}', keys).fetchone() == (payload,checksum):
+        return
     if table == 'plan_task_sources':
         db.execute('INSERT OR REPLACE INTO plan_task_sources VALUES(?,?,?)', (*keys, payload, checksum))
     else:
@@ -50,17 +54,24 @@ def prepare(state):
     return serialize(header), {key: serialize(value) for key, value in pages.items()}
 
 
-def sync(db, state):
-    """Full migration/recovery; normal page writes update just one task/plan."""
+def sync(db, state, *, task_ids=None):
+    """Rebuild all sources, or only targets observed clean before this mutation.
+
+    The caller must capture cleanliness before changing the authoritative rows:
+    their triggers deliberately mark this projection dirty within the transaction.
+    """
     from .plan_sets import empty_state
+    targets = None if task_ids is None else frozenset(task_ids)
     partitions = {}
     def target(task_id):
         if task_id not in partitions:
             partitions[task_id] = empty_state()
         return partitions[task_id]
     operation_tasks = {key: record[0].scope.task_id for key, record in state['operations'].items()}
-    plan_tasks = {approved.proposal_digest: approved.scope.task_id for approved in state['approved'].values()}
-    plan_tasks.update({record[0].proposal_digest: record[0].scope.task_id for record in state['operations'].values()})
+    plan_tasks = {approved.proposal_digest: approved.scope.task_id for approved in state['approved'].values()
+                  if targets is None or approved.scope.task_id in targets}
+    plan_tasks.update({record[0].proposal_digest: record[0].scope.task_id for record in state['operations'].values()
+                       if targets is None or record[0].scope.task_id in targets})
     proposal_tasks = {key: proposal.scope.task_id for key, proposal in state['candidate_proposals'].items()}
     for name, section in state.items():
         entries = section.items() if isinstance(section, dict) else enumerate(section)
@@ -79,12 +90,21 @@ def sync(db, state):
                 task_id = (value['plan_set'].scope.task_id if value.get('kind') == 'plan_set_approved'
                            else operation_tasks.get(value.get('operation_id'), ''))
             else: raise ValueError('unknown plan source section')
+            if targets is not None and task_id not in targets:
+                continue
             if isinstance(section, dict): target(task_id)[name][key] = value
             else: target(task_id)[name].append(value)
-    db.execute('DELETE FROM plan_task_sources')
-    db.execute('DELETE FROM plan_page_sources')
+    existing = (targets if targets is not None else
+                {row[0] for row in db.execute('SELECT task_id FROM plan_task_sources')})
+    for task_id in existing - partitions.keys():
+        db.execute('DELETE FROM plan_task_sources WHERE task_id=?', (task_id,))
+        db.execute('DELETE FROM plan_page_sources WHERE task_id=?', (task_id,))
     for task_id, partition in partitions.items():
-        save(db, task_id, prepare(partition))
+        prepared = prepare(partition)
+        previous = {row[0] for row in db.execute('SELECT plan_digest FROM plan_page_sources WHERE task_id=?', (task_id,))}
+        for key in previous - prepared[1].keys():
+            db.execute('DELETE FROM plan_page_sources WHERE task_id=? AND plan_digest=?', (task_id,key))
+        save(db, task_id, prepared)
     db.execute('UPDATE plan_source_meta SET dirty=0 WHERE id=1')
 
 
@@ -103,6 +123,62 @@ def load_task(db, task_id):
     for name in ('operations', 'requests', 'cursors'):
         state[name].update(pages[name])
     return state
+
+
+def load_current(db, task_id, *, pages=False):
+    """Decode only the current pointer and its page partition in a read snapshot.
+
+    Dirty/missing projections use the caller's legacy fallback. A present but
+    damaged current partition fails closed; old plan partitions stay unread.
+    """
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='plan_source_meta'").fetchone():
+        return None
+    meta = db.execute('SELECT version,dirty FROM plan_source_meta WHERE id=1').fetchone()
+    if meta is not None and meta[0] != 1:
+        raise ServiceError('STORAGE_FORMAT_UNSUPPORTED', 'Unsupported plan source version', 500)
+    if meta != (1, 0):
+        return None
+    row = db.execute('SELECT payload,checksum FROM plan_task_sources WHERE task_id=?', (task_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        from .sqlite import decode, MAX_BYTES
+        from .plan_sets import empty_state
+        from ...multi_branch_contracts import RetrievalPlanSet
+        if (type(row[0]) is not str or len(row[0].encode()) > MAX_BYTES
+                or hashlib.sha256(row[0].encode()).hexdigest() != row[1]):
+            raise ValueError('header checksum')
+        tagged = json.loads(row[0])
+        if (type(tagged) is not dict or set(tagged) != {'type', 'value'}
+                or tagged['type'] != 'dict' or type(tagged['value']) is not list):
+            raise ValueError('header root')
+        sections = dict(tagged['value'])
+        template = empty_state()
+        if len(sections) != len(tagged['value']) or set(sections) != set(template):
+            raise ValueError('header sections')
+        for name, value in sections.items():
+            if (type(value) is not dict or set(value) != {'type', 'value'}
+                    or value['type'] != type(template[name]).__name__ or type(value['value']) is not list):
+                raise ValueError('header container')
+        current = decode(sections['current'])
+        if (type(current) is not dict or set(current) - {task_id}
+                or any(type(value) is not RetrievalPlanSet or value.scope.task_id != task_id
+                       for value in current.values())):
+            raise ValueError('current task binding')
+        state = {'current': current, 'operations': {}, 'requests': {}, 'cursors': {}}
+        approved = current.get(task_id)
+        if pages and approved is not None:
+            partition = _check(db.execute('SELECT payload,checksum FROM plan_page_sources WHERE task_id=? AND plan_digest=?',
+                                          (task_id, approved.proposal_digest)).fetchone())
+            page_names = ('operations', 'requests', 'cursors')
+            if (any(value for name, value in partition.items() if name not in page_names)
+                    or any(type(record) is not tuple or len(record) != 4 or record[0] != approved
+                           for record in partition['operations'].values())):
+                raise ValueError('page plan binding')
+            state.update({name: partition[name] for name in page_names})
+        return state
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError) as error:
+        raise ServiceError('STORAGE_CORRUPT', 'Invalid current plan source', 500) from error
 
 
 def save(db, task_id, prepared):

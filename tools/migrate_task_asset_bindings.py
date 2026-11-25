@@ -14,9 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dsh_retrieval.adapters.task_storage.multi_rule import SQLiteMultiRuleApprovalRepository
 from dsh_retrieval.errors import ServiceError
+from dsh_retrieval.result_views import VIEWS as RESULT_VIEWS
 
 
 SOURCE_TABLES = ('local_ledger', 'retrieval_ledger', 'candidate_ledger',
+    'cleaning_usage_steps', 'cleaning_usage_http', 'retrieval_execution_budgets',
     'multi_rule_cleaning_ledger', 'plan_set_ledger', 'image_deliveries',
     'cleaning_checkpoints', 'refill_reservations', 'refill_iteration_metrics',
     'refill_execution_stops')
@@ -26,13 +28,14 @@ def source_digest(path):
     digest = hashlib.sha256()
     with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
         db.execute('BEGIN')
-        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {r[0]: r[1] for r in db.execute("SELECT name,type FROM sqlite_master WHERE type IN ('table','view')")}
         for table in SOURCE_TABLES:
             if table not in tables:
                 continue
             digest.update(table.encode())
             columns = 'package_id,metadata' if table == 'image_deliveries' else '*'
-            for row in db.execute(f'SELECT {columns} FROM {table} ORDER BY rowid'):
+            order = 'id' if tables[table] == 'view' else 'rowid'
+            for row in db.execute(f'SELECT {columns} FROM {table} ORDER BY {order}'):
                 digest.update(json.dumps(row,ensure_ascii=False,separators=(',', ':')).encode())
     return digest.hexdigest()
 
@@ -97,8 +100,13 @@ def migrate(source: Path, target: Path, *, resume=False) -> int:
         if (summaries != task_count or summary_meta != (1, task_count, 0)
                 or missing_bindings
                 or heads != count or snapshots != count
-                or views != (count * 5, items)):
+                or views != (count * len(RESULT_VIEWS), items)):
             raise ValueError('migrated read projection count is inconsistent')
+        stored_views = {}
+        for task_id, view_type in db.execute('SELECT task_id,view_type FROM task_result_read_views'):
+            stored_views.setdefault(task_id, set()).add(view_type)
+        if any(names != RESULT_VIEWS for names in stored_views.values()):
+            raise ValueError('migrated result view types are inconsistent')
         for task_id, operation_id, summary_json in db.execute(
                 'SELECT task_id,operation_id,summary_json FROM task_step_read_runs'):
             run = json.loads(summary_json)

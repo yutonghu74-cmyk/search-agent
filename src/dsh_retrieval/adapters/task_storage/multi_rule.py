@@ -5,6 +5,9 @@ verdicts, or claim business-accepted counts.
 """
 
 from contextlib import closing
+from . import transactions
+from .transactions import checked_access
+from . import ledger_rows
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
@@ -351,7 +354,7 @@ class SQLiteMultiRuleApprovalRepository:
                 db.execute('''CREATE INDEX IF NOT EXISTS task_step_read_page_idx
                     ON task_step_read_items(task_id,operation_id,step_execution_id,
                                             status,position)''')
-                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='multi_rule_cleaning_ledger'").fetchone()
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='multi_rule_cleaning_ledger'").fetchone()
                 if exists:
                     row = db.execute("SELECT format,payload FROM multi_rule_cleaning_ledger WHERE id=1").fetchone()
                     migrated = load_state(row)
@@ -362,10 +365,12 @@ class SQLiteMultiRuleApprovalRepository:
                     db.execute("CREATE TABLE multi_rule_cleaning_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)")
                     db.execute("INSERT INTO multi_rule_cleaning_ledger VALUES (1,?,?)",
                                (FORMAT, dump_state(empty_state())))
+                ledger_rows.migrate(db, 'multi_rule_cleaning_ledger', load_state)
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "Multi-rule approval ledger unavailable", 503,
                                retryable=True) from exc
 
+    @transactions.staged()
     def _transaction(self, write, operation, *, with_connection=False,
                      project_step_operation=None):
         try:
@@ -403,10 +408,9 @@ class SQLiteMultiRuleApprovalRepository:
                     self._sync_step_read_summaries(db, memory, state,
                                                    step_operations)
                     state.pop('_deliveries')
-                    db.execute("UPDATE local_ledger SET payload=? WHERE id=1", (dump(memory),))
+                    ledger_rows.write_memory(db, memory)
                     self.tasks._sync_task_read_summaries(db, memory)
-                    db.execute("UPDATE multi_rule_cleaning_ledger SET format=?,payload=? WHERE id=1",
-                               (FORMAT, dump_state(state)))
+                    ledger_rows.write_state(db, 'multi_rule_cleaning_ledger', FORMAT, state)
                 return result
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "Multi-rule approval transaction failed", 503,
@@ -652,7 +656,7 @@ class SQLiteMultiRuleApprovalRepository:
                 raise ServiceError('REVISION_CONFLICT', 'Recompute manifest scope changed', 409)
             context = AccessContext(actor, task.task_id, 'cleaning_input', 'current')
             for item in manifest.proposal.items:
-                self.manifests.authorization.require_access(
+                checked_access(self.manifests.authorization,
                     context, item.media.authorized_media_ref, 'read')
 
     def get_manifest(self, actor, task_id, manifest_ref):
@@ -704,7 +708,7 @@ class SQLiteMultiRuleApprovalRepository:
                     raise ServiceError('STORAGE_CORRUPT',
                                        'Historical candidate manifest is unavailable', 500)
                 for item in manifest.proposal.items:
-                    self.manifests.authorization.require_access(
+                    checked_access(self.manifests.authorization,
                         context, item.media.authorized_media_ref, 'read')
                 planned = plan_incremental_recompute(
                     approval, result, recipe, detector_release_digest)
@@ -820,7 +824,7 @@ class SQLiteMultiRuleApprovalRepository:
                         raise ServiceError('INPUT_LIMIT', 'At most 100 historical candidates are supported', 422)
                     if current_groups and not set(item.group_ids) <= current_groups:
                         raise ServiceError('RECOMPUTE_RETRIEVAL_REQUIRED', 'Changed groups require retrieval', 409)
-                    self.manifests.authorization.require_access(context, item.media.authorized_media_ref, 'read')
+                    checked_access(self.manifests.authorization, context, item.media.authorized_media_ref, 'read')
                     seen.add(item.candidate_id)
                     items.append(ManifestItem(item.media, item.hits, item.group_ids))
             for approval, result in sources:
@@ -843,7 +847,7 @@ class SQLiteMultiRuleApprovalRepository:
                     if current_groups and not set(item.group_ids) <= current_groups:
                         raise ServiceError('RECOMPUTE_RETRIEVAL_REQUIRED',
                                            'Changed quota groups require a new retrieval plan', 409)
-                    self.manifests.authorization.require_access(
+                    checked_access(self.manifests.authorization,
                         context, item.media.authorized_media_ref, 'read')
                     seen.add(item.candidate_id)
                     items.append(ManifestItem(item.media, item.hits, item.group_ids))
@@ -914,34 +918,38 @@ class SQLiteMultiRuleApprovalRepository:
                 or _RELEASE_DIGEST.fullmatch(detector_release_digest) is None):
             raise ServiceError("DETECTOR_RELEASE_INVALID",
                                "Trusted detector release digest required", 422)
-        def prepare(memory, retrieval, candidates, state):
-            task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
-                                            manifest_ref, "approve")
-            if task.run_status not in {RunStatus.PLANNING, RunStatus.RUNNING} or task.active_cleaning_operation_id:
-                raise ServiceError("INVALID_STATE_TRANSITION", "Task cannot prepare cleaning", 409)
-            require_confirmed_rules(task, recipe)
-            if not 1 <= len(manifest.proposal.items) <= 100:
-                raise ServiceError("INPUT_LIMIT", "Cleaning requires 1..100 candidates", 422)
-            if (self._group_targets(task) is not None
-                    and any(not item.group_ids for item in manifest.proposal.items)):
-                # e.g. a manifest from a path that cannot attribute hits to groups.
-                raise ServiceError("MANIFEST_INVALID",
-                                   "Quota task requires candidates with origin groups", 422)
-            proposal = CleaningApprovalProposal(task.tenant_id, task.owner_user_id,
-                task.project_id, task.task_id, task.confirmed_revision, task.run_generation,
-                task.task_version, task.request_digest, manifest_ref, recipe,
-                tuple(CleaningCandidateRef(item.candidate_id, item.media.asset_version,
-                                           item.media.content_digest, item.group_ids)
-                      for item in manifest.proposal.items),
-                detector_release_digest)
-            self._same_inputs(task, manifest, proposal)
-            self._check_manifest(memory, retrieval, candidates, actor, manifest)
-            old = state["proposals"].get(proposal.proposal_digest)
-            if old is not None and old != proposal:
-                raise ServiceError("PROPOSAL_CONFLICT", "Cleaning proposal digest collision", 409)
-            state["proposals"][proposal.proposal_digest] = proposal
-            return proposal
-        return self._transaction(True, prepare)
+        return self._transaction(True, lambda memory, retrieval, candidates, state:
+            self._prepare(memory, retrieval, candidates, state, actor, task_id,
+                          manifest_ref, recipe, detector_release_digest))
+
+    def _prepare(self, memory, retrieval, candidates, state, actor, task_id,
+                 manifest_ref, recipe, detector_release_digest):
+        task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
+                                        manifest_ref, "approve")
+        if task.run_status not in {RunStatus.PLANNING, RunStatus.RUNNING} or task.active_cleaning_operation_id:
+            raise ServiceError("INVALID_STATE_TRANSITION", "Task cannot prepare cleaning", 409)
+        require_confirmed_rules(task, recipe)
+        if not 1 <= len(manifest.proposal.items) <= 100:
+            raise ServiceError("INPUT_LIMIT", "Cleaning requires 1..100 candidates", 422)
+        if (self._group_targets(task) is not None
+                and any(not item.group_ids for item in manifest.proposal.items)):
+            # e.g. a manifest from a path that cannot attribute hits to groups.
+            raise ServiceError("MANIFEST_INVALID",
+                               "Quota task requires candidates with origin groups", 422)
+        proposal = CleaningApprovalProposal(task.tenant_id, task.owner_user_id,
+            task.project_id, task.task_id, task.confirmed_revision, task.run_generation,
+            task.task_version, task.request_digest, manifest_ref, recipe,
+            tuple(CleaningCandidateRef(item.candidate_id, item.media.asset_version,
+                                       item.media.content_digest, item.group_ids)
+                  for item in manifest.proposal.items),
+            detector_release_digest)
+        self._same_inputs(task, manifest, proposal)
+        self._check_manifest(memory, retrieval, candidates, actor, manifest)
+        old = state["proposals"].get(proposal.proposal_digest)
+        if old is not None and old != proposal:
+            raise ServiceError("PROPOSAL_CONFLICT", "Cleaning proposal digest collision", 409)
+        state["proposals"][proposal.proposal_digest] = proposal
+        return proposal
 
     @staticmethod
     def _current(task, approval):
@@ -958,7 +966,7 @@ class SQLiteMultiRuleApprovalRepository:
         require_version(expected_task_version)
         fingerprint = digest({"proposal_digest": proposal_digest,
                               "expected_task_version": expected_task_version, "action": action})
-        def confirm(memory, retrieval, candidates, state):
+        def confirm(memory, retrieval, candidates, state, db):
             self.manifests.retrieval._authorize(memory, actor, task_id, action="approve")
             scoped = (actor.tenant_id, actor.user_id, task_id, key)
             old = state["keys"].get(scoped)
@@ -992,6 +1000,8 @@ class SQLiteMultiRuleApprovalRepository:
             self._check_manifest(memory, retrieval, candidates, actor, manifest)
             # _authorize returns a detached Task; mutate the transaction's
             # authoritative object so the task and approval commit together.
+            from .agent_processing import require_processing_handoff
+            require_processing_handoff(db, task, proposal)
             task = memory._tasks[task_id]
             task.task_version += 1
             task.run_status = RunStatus.RUNNING
@@ -1006,7 +1016,7 @@ class SQLiteMultiRuleApprovalRepository:
                                     "kind": "multi_rule_cleaning_approved",
                                     "operation_id": approval.operation_id})
             return approval, False
-        return self._transaction(True, confirm)
+        return self._transaction(True, confirm, with_connection=True)
 
     def get_current(self, actor, task_id, operation_id):
         def get(memory, retrieval, candidates, state):
@@ -1014,7 +1024,7 @@ class SQLiteMultiRuleApprovalRepository:
             if approval is None or approval.proposal.task_id != task_id:
                 raise ServiceError("NOT_FOUND", "Cleaning approval not found", 404)
             task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
-                                            approval.proposal.manifest_ref, "read")
+                                            approval.proposal.manifest_ref, "read", state=state)
             self._same_inputs(task, manifest, approval.proposal)
             self._current(task, approval)
             require_confirmed_rules(task, approval.proposal.recipe)
@@ -1247,7 +1257,8 @@ class SQLiteMultiRuleApprovalRepository:
         if (type(execution) is not dict
                 or set(execution) not in ({'backend_refs'},
                     {'backend_ref', 'instruction', 'prompt_version', 'config_digest', 'model'},
-                    {'backend_ref', 'instruction', 'prompt_version', 'config_digest', 'model', 'nodes'})
+                    {'backend_ref', 'instruction', 'prompt_version', 'config_digest', 'model', 'nodes'},
+                    {'backend_ref', 'media_type', 'estimated_calls_per_candidate', 'nodes', 'conditions'})
                 or len(json.dumps(execution, ensure_ascii=False)) > 12000):
             raise ValueError('Invalid execution snapshot')
         if 'model' in execution and (type(execution['model']) is not dict
@@ -1263,6 +1274,13 @@ class SQLiteMultiRuleApprovalRepository:
             raise ValueError('Invalid VLM node snapshot')
         def start(memory, retrieval, candidates, state, db):
             job = self._checkpoint_job(memory, retrieval, candidates, state, actor, task_id, operation_id)
+            if 'conditions' in execution:
+                from ...whole_video import confirmed_video_spec
+                spec = confirmed_video_spec(memory._tasks[task_id])
+                if (execution['media_type'] != 'video' or execution['conditions'] != spec['video_conditions']['clauses']
+                        or type(execution['estimated_calls_per_candidate']) is not int
+                        or execution['estimated_calls_per_candidate'] != len(execution['conditions'])):
+                    raise ServiceError('RECIPE_RULE_MISMATCH', 'Video execution differs from confirmed conditions', 409)
             record = self._checkpoint_record(db, job)
             if record is not None:
                 if record['execution'] != execution:
@@ -1420,11 +1438,18 @@ class SQLiteMultiRuleApprovalRepository:
         if task is None:
             memory = self.tasks._load(db.execute(
                 'SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
-            return self.manifests.retrieval._authorize(memory, actor, task_id, action='read')
+            task = self.manifests.retrieval._authorize(memory, actor, task_id, action='read')
         authority = self.manifests.retrieval
         if authority.projects is None or authority.authorization is None:
             raise ServiceError('ACCESS_DENIED', 'retrieval authority not configured', 403)
-        authority.projects.require_access(actor, task.project_id, task.dimension_id, 'read')
+        checked_access(authority.projects, actor, task.project_id, task.dimension_id, 'read')
+        spec = json.loads(task.confirmed_proposal_json)['query_spec'] if task.confirmed_proposal_json else {}
+        history = spec.get('cross_batch_dedup', {'scope': 'none'})
+        if history['scope'] != 'none':
+            from ...historical_dedup import resolve
+            memory = self.tasks._load(db.execute('SELECT format,payload FROM local_ledger WHERE id=1').fetchone())
+            resolve(db, memory, actor, task.project_id, task.dimension_id, history,
+                    target_task_id=task.task_id, target_batch_id=task.batch_id)
         return task
 
     def step_results_summary(self, actor, task_id):
@@ -1728,7 +1753,7 @@ class SQLiteMultiRuleApprovalRepository:
             raise ServiceError('STORAGE_UNAVAILABLE', 'Preview binding unavailable', 503,
                                retryable=True) from exc
 
-    def get_published_candidates(self, actor, task_id, operation_id, candidate_ids):
+    def get_published_candidates(self, actor, task_id, operation_id, candidate_ids, *, include_media=False):
         """Resolve several candidates under one authorization and lineage rebuild.
 
         Same checks as the single lookup, done once per call instead of once per
@@ -1774,7 +1799,7 @@ class SQLiteMultiRuleApprovalRepository:
                             or media.content_digest != candidate.content_digest):
                         raise ServiceError('INPUT_SNAPSHOT_CHANGED',
                                            'Cleaning candidate binding changed', 409)
-                    matches[candidate_id].append((candidate, media.authorized_media_ref))
+                    matches[candidate_id].append((candidate, media if include_media else media.authorized_media_ref))
             resolved = []
             for candidate_id in candidate_ids:
                 found = matches[candidate_id]
@@ -1794,15 +1819,16 @@ class SQLiteMultiRuleApprovalRepository:
             node_mode = proposal["node_modes"]["refill"]
         except (TypeError, ValueError, KeyError) as exc:
             raise ServiceError("TASK_CORRUPT", "Confirmed query is unavailable", 500) from exc
-        if (query.get("media_type") != "image"
+        if (query.get("media_type") not in ("image", "video")
                 or query.get("intra_batch_dedup") != {"policy_ref": "exact-content",
                                                        "config_version": "1"}
-                or query.get("cross_batch_dedup") != {"scope": "none", "references": [],
-                                                       "comparison_methods": [],
-                                                       "reference_digest": None}
                 or query.get("target_count") != task.target_count):
             raise ServiceError("FEATURE_NOT_SUPPORTED",
-                               "Only image exact-content preview is supported", 422)
+                               "Only image/whole-video exact-content preview is supported", 422)
+        from ...historical_dedup import normalize_history
+        normalize_history(query['cross_batch_dedup'])
+        if query['media_type'] != 'image' and query['cross_batch_dedup']['scope'] != 'none':
+            raise ServiceError('FEATURE_NOT_SUPPORTED', 'Historical dedup supports images', 422)
         try:
             decide_refill(target_count=task.target_count, accepted_count=0,
                           policy=policy, node_mode=node_mode)
@@ -1810,6 +1836,17 @@ class SQLiteMultiRuleApprovalRepository:
             raise ServiceError("FEATURE_NOT_SUPPORTED",
                                "Confirmed refill policy is not supported", 422) from exc
         return task.target_count, policy, node_mode
+
+    @staticmethod
+    def _historical(memory, state, actor, task, preview, policy, node_mode):
+        from ...historical_dedup import resolve, filter_preview
+        history = json.loads(task.confirmed_proposal_json)['query_spec']['cross_batch_dedup']
+        if history['scope'] == 'none':
+            return preview
+        blocked = resolve(None, memory, actor, task.project_id, task.dimension_id, history,
+            target_task_id=task.task_id, target_batch_id=task.batch_id,
+            delivery_records=state.get('_deliveries', {}))
+        return filter_preview(preview, blocked, history['reference_digest'], policy=policy, node_mode=node_mode)
 
     @staticmethod
     def _group_targets(task):
@@ -1874,6 +1911,25 @@ class SQLiteMultiRuleApprovalRepository:
                             result_set_digest=delivery['manifest_digest'])
         return view
 
+    def _require_video_lineage(self, memory, retrieval, candidates, state, actor,
+                               task, parent, manifest):
+        if task.media_type != 'video':
+            return
+        from ...whole_video import require_whole_video_records
+        records = [item.media for item in manifest.proposal.items]
+        operations = parent.source_operation_ids or (parent.operation_id,)
+        for operation_id in operations:
+            approval = state['approvals'].get(operation_id)
+            if approval is None:
+                raise ServiceError('STORAGE_CORRUPT', 'Video lineage source missing', 500)
+            _, source = self._manifest(memory, retrieval, candidates, actor, task.task_id,
+                                      approval.proposal.manifest_ref, 'read', state=state)
+            records.extend(item.media for item in source.proposal.items)
+        try:
+            require_whole_video_records(tuple(records))
+        except ValueError as exc:
+            raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Original video version changed across batches', 409) from exc
+
     def _rebuild_result_set(self, memory, retrieval, candidates, state, actor, task_id,
                             result_set_id, target, policy, node_mode, seen=None):
         """Reauthorize and deterministically rebuild one cumulative lineage."""
@@ -1904,13 +1960,18 @@ class SQLiteMultiRuleApprovalRepository:
             legacy_lineage=not preview.source_operation_ids,
             source_evidence_by_candidate=(self._source_evidence(manifest)
                                           if enriched else None),
-            group_targets=self._group_targets(current))
+            group_targets=self._group_targets(current),
+            whole_video_media_by_candidate=({item.candidate_id: item.media for item in manifest.proposal.items}
+                                           if current.media_type == "video" else None))
+        rebuilt = self._historical(memory, state, actor, current, rebuilt, policy, node_mode)
         if preview.parent_result_set_id is not None:
             parent = self._rebuild_result_set(
                 memory, retrieval, candidates, state, actor, task_id,
                 preview.parent_result_set_id, target, policy, node_mode, seen)
             if parent.result_set_digest != preview.parent_result_set_digest:
                 raise ServiceError("STORAGE_CORRUPT", "Result set parent digest changed", 500)
+            self._require_video_lineage(memory, retrieval, candidates, state, actor,
+                                        current, parent, manifest)
             try:
                 rebuilt = merge_exact_result_sets(
                     preview.parent_result_set_id, parent, rebuilt,
@@ -1957,6 +2018,7 @@ class SQLiteMultiRuleApprovalRepository:
         except ValueError as exc:
             raise ServiceError("STORAGE_CORRUPT",
                                "Result review cannot be rebuilt", 500) from exc
+        rebuilt = self._historical(memory, state, actor, current, rebuilt, policy, node_mode)
         # Before explicit publication mutation counts, the count was implicit
         # in the near-duplicate decisions. Preserve that legacy representation
         # only when the reconstructed count agrees; business fields still have
@@ -1978,7 +2040,10 @@ class SQLiteMultiRuleApprovalRepository:
         clusters = near_duplicate_clusters(preview)
         merged_near_duplicates = any(
             decision.action == "merge" for decision in preview.near_duplicate_decisions)
-        return {"result_set_id": result_set_id, "kind": "preview", "status": "published",
+        return {**({'historical_reference_digest': preview.historical_reference_digest,
+                    'historical_exclusion_count': len(preview.historical_exclusions)}
+                   if preview.historical_reference_digest is not None else {}),
+                "result_set_id": result_set_id, "kind": "preview", "status": "published",
                 "as_of_task_version": published_version, "operation_id": preview.operation_id,
                 "generation": preview.generation, "result_set_digest": preview.result_set_digest,
                 "policy_ref": ("exact-content+owner-near-duplicate@1"
@@ -2048,6 +2113,37 @@ class SQLiteMultiRuleApprovalRepository:
         failed = []
         review = []
         excluded = []
+        duplicates = []
+        representatives = {}
+        operation_ids = set(preview.source_operation_ids or (preview.operation_id,))
+        # Reconstruct exact-content groups from this lineage's approved inputs,
+        # retaining evidence even after a representative is owner-excluded.
+        # Never scan unrelated tasks or use failed/unknown inputs as eligible.
+        content_groups = {}
+        for operation_id in operation_ids:
+            for candidate in state['approvals'][operation_id].proposal.candidates:
+                assessment = assessments.get(candidate.candidate_id)
+                manual = manual_reviews.get(candidate.candidate_id)
+                passed = (manual.action == 'accept' if manual is not None else
+                          assessment is not None and assessment['cleaning_status'] == 'pass')
+                if passed:
+                    content_groups.setdefault(candidate.content_digest, set()).add(candidate.candidate_id)
+        for members in content_groups.values():
+            representative = min(members)
+            representatives.update((candidate_id, representative) for candidate_id in members)
+        for item in preview.accepted + preview.reserve:
+            for candidate_id in (item.candidate_ids or (item.candidate_id,)):
+                representatives[candidate_id] = item.candidate_id
+        near_merged = {}
+        for decision in preview.near_duplicate_decisions:
+            if decision.action == 'merge':
+                for candidate_id in decision.candidate_ids:
+                    if candidate_id != decision.representative_candidate_id:
+                        near_merged[candidate_id] = decision.representative_candidate_id
+                        representatives[candidate_id] = decision.representative_candidate_id
+        accepted_ids = {item.candidate_id for item in preview.accepted}
+        historical_refs = {cid: refs for _, ids, refs in preview.historical_exclusions for cid in ids}
+        historical = []
         for candidate_id, assessment in assessments.items():
             manual = manual_reviews.get(candidate_id)
             if manual is not None:
@@ -2060,7 +2156,38 @@ class SQLiteMultiRuleApprovalRepository:
                                   "source_operation_id": manual.source_operation_id,
                                   "group_ids": manual.group_ids}}
                 assessments[candidate_id] = assessment
+            status = assessment['cleaning_status']
+            representative = representatives.get(candidate_id)
+            disposition, stage = ('accepted', None)
+            if candidate_id in user_exclusions:
+                disposition, stage = 'user_excluded', 'owner_review'
+            elif status in {'fail', 'unknown'}:
+                disposition, stage = ('failed' if status == 'fail' else 'review'), 'cleaning'
+            elif candidate_id in historical_refs:
+                disposition, stage = 'historical_duplicate', 'historical_deduplication'
+            elif representative is not None and representative != candidate_id:
+                disposition, stage = 'duplicate', 'deduplication'
+            elif candidate_id not in accepted_ids:
+                disposition, stage = 'reserve', 'selection'
+            assessment = {**assessment, 'disposition': disposition, 'elimination_stage': stage}
+            assessments[candidate_id] = assessment
             row = {**assessment, "preview_status": "available"}
+            if disposition == 'historical_duplicate':
+                historical.append({**row, 'historical_delivery_ids': list(historical_refs[candidate_id]),
+                    'reasons': tuple(row['reasons']) + ({'rule_id': None, 'verdict': 'pass',
+                        'reason_code': 'HISTORICAL_EXACT_DUPLICATE',
+                        'reason_summary': '与已确认历史交付内容相同',
+                        'reason_truncated': False, 'group_id': None},)})
+            if status == 'pass' and representative is not None and representative != candidate_id:
+                duplicates.append({**row, 'disposition': 'duplicate',
+                    'elimination_stage': 'deduplication',
+                    'representative_candidate_id': representative,
+                    'reasons': ({'rule_id': None, 'verdict': 'pass',
+                                 'reason_code': ('NEAR_DUPLICATE_OWNER_MERGE'
+                                                 if candidate_id in near_merged else 'EXACT_DUPLICATE'),
+                                 'reason_summary': ('发起人确认合并相似素材' if candidate_id in near_merged
+                                                    else '相同内容已合并到代表素材'),
+                                 'reason_truncated': False, 'group_id': None},)})
             if assessment["cleaning_status"] == "fail":
                 failed.append(row)
             elif assessment["cleaning_status"] == "unknown":
@@ -2070,10 +2197,15 @@ class SQLiteMultiRuleApprovalRepository:
                                  "cleaning_status": "user_excluded",
                                  "user_exclusion": user_exclusions[candidate_id]})
         key = lambda item: (item["candidate_id"], item["asset_version"])
-        return {"candidate_preview_available": True,
+        return {**({'historical_items': tuple(sorted(historical, key=key)),
+                   'historical_audit_count': len(historical)}
+                  if preview.historical_reference_digest is not None else {}),
+                "candidate_preview_available": True,
                 "candidate_assessments": assessments,
                 "failed_items": tuple(sorted(failed, key=key)),
                 "review_items": tuple(sorted(review, key=key)),
+                "duplicate_items": tuple(sorted(duplicates, key=key)),
+                "duplicate_audit_count": len(duplicates),
                 "user_excluded_items": tuple(sorted(excluded, key=key))}
 
     def publish_preview(self, actor, task_id, operation_id):
@@ -2097,7 +2229,10 @@ class SQLiteMultiRuleApprovalRepository:
             preview = build_exact_result_set(
                 approval.job, result, target, refill_policy=policy, node_mode=node_mode,
                 source_evidence_by_candidate=self._source_evidence(manifest),
-                group_targets=self._group_targets(task))
+                group_targets=self._group_targets(task),
+                whole_video_media_by_candidate=({item.candidate_id: item.media for item in manifest.proposal.items}
+                                               if task.media_type == "video" else None))
+            preview = self._historical(memory, state, actor, task, preview, policy, node_mode)
             parent_result_set_id = state["current_result_sets"].get(task_id)
             if parent_result_set_id is not None:
                 parent_record = state["result_sets"].get(parent_result_set_id)
@@ -2119,6 +2254,8 @@ class SQLiteMultiRuleApprovalRepository:
                     parent = self._rebuild_result_set(
                         memory, retrieval, candidates, state, actor, task_id,
                         parent_result_set_id, target, policy, node_mode)
+                    self._require_video_lineage(memory, retrieval, candidates, state, actor,
+                                                task, parent, manifest)
                     try:
                         preview = merge_exact_result_sets(
                             parent_result_set_id, parent, preview,
@@ -2126,6 +2263,7 @@ class SQLiteMultiRuleApprovalRepository:
                     except ValueError as exc:
                         raise ServiceError("REVISION_CONFLICT",
                                            "Prior result cannot be merged with this batch", 409) from exc
+            preview = self._historical(memory, state, actor, task, preview, policy, node_mode)
             # Final authority/fence check immediately before the atomic local write.
             task, manifest = self._manifest(memory, retrieval, candidates, actor, task_id,
                                             approval.proposal.manifest_ref, "write")
@@ -2137,6 +2275,21 @@ class SQLiteMultiRuleApprovalRepository:
             authoritative.stage = "refill"
             authoritative.active_cleaning_operation_id = None
             authoritative.active_plan_digest = None
+            if task.media_type == 'video' and policy['mode'] == 'input_only' and preview.gap > 0:
+                # The owner already fixed this input scope. Publish its exact
+                # shortfall and stop atomically; delivery still needs approval.
+                from .refill import ensure_execution_stops
+                ensure_execution_stops(db)
+                db.execute("""INSERT OR IGNORE INTO refill_execution_stops
+                    (task_id,revision,generation,stop_reason,created_at)
+                    VALUES (?,?,?,?,?)""", (task_id, authoritative.confirmed_revision,
+                    authoritative.run_generation, 'INPUT_SCOPE_COMPLETE', datetime.now(UTC).isoformat()))
+                saved_stop = db.execute("""SELECT stop_reason FROM refill_execution_stops
+                    WHERE task_id=? AND revision=? AND generation=?""",
+                    (task_id, authoritative.confirmed_revision, authoritative.run_generation)).fetchone()
+                if saved_stop[0] != 'INPUT_SCOPE_COMPLETE':
+                    raise ServiceError('RESULT_CONFLICT', 'Fixed video scope conflicts with existing stop', 409)
+                authoritative.run_status = RunStatus.AWAITING_INPUT
             result_set_id = "resultset_" + uuid.uuid4().hex
             state["result_sets"][result_set_id] = (preview, authoritative.task_version)
             state["current_result_sets"][task_id] = result_set_id
@@ -2336,6 +2489,7 @@ class SQLiteMultiRuleApprovalRepository:
                 cluster.cluster_id, cluster.candidate_ids, action, representative)
             reviewed = apply_near_duplicate_decision(
                 preview, decision, refill_policy=policy, node_mode=node_mode)
+            reviewed = self._historical(memory, state, actor, task, reviewed, policy, node_mode)
             authoritative = memory._tasks[task_id]
             authoritative.task_version += 1
             new_result_set_id = "resultset_" + uuid.uuid4().hex
@@ -2349,7 +2503,7 @@ class SQLiteMultiRuleApprovalRepository:
                 "result_set_id": new_result_set_id, "task_id": task_id,
                 "accepted_count": reviewed.accepted_count, "gap": reviewed.gap,
                 "stop_reason": reviewed.stop_reason})
-            stop_table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+            stop_table = db.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') "
                                     "AND name='refill_execution_stops'").fetchone()
             stop = (db.execute('''SELECT stop_reason FROM refill_execution_stops
                 WHERE task_id=? AND revision=? AND generation=?''',
@@ -2456,6 +2610,7 @@ class SQLiteMultiRuleApprovalRepository:
             except ValueError as exc:
                 raise ServiceError("REVISION_CONFLICT",
                                    "Result exclusion is no longer applicable", 409) from exc
+            reviewed = self._historical(memory, state, actor, task, reviewed, policy, node_mode)
             authoritative = memory._tasks[task_id]
             authoritative.task_version += 1
             new_result_set_id = "resultset_" + uuid.uuid4().hex
@@ -2471,7 +2626,7 @@ class SQLiteMultiRuleApprovalRepository:
                 "result_set_id": new_result_set_id, "task_id": task_id,
                 "accepted_count": reviewed.accepted_count, "gap": reviewed.gap,
                 "stop_reason": reviewed.stop_reason})
-            stop_table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+            stop_table = db.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') "
                                     "AND name='refill_execution_stops'").fetchone()
             stop = (db.execute('''SELECT stop_reason FROM refill_execution_stops
                 WHERE task_id=? AND revision=? AND generation=?''',
@@ -2593,6 +2748,7 @@ class SQLiteMultiRuleApprovalRepository:
             except ValueError as exc:
                 raise ServiceError("REVISION_CONFLICT",
                                    "Manual review is no longer applicable", 409) from exc
+            reviewed = self._historical(memory, state, actor, task, reviewed, policy, node_mode)
             authoritative = memory._tasks[task_id]
             authoritative.task_version += 1
             new_result_set_id = "resultset_" + uuid.uuid4().hex
@@ -2733,6 +2889,9 @@ class SQLiteMultiRuleApprovalRepository:
                 row = db.execute('''SELECT result_set_id,item_count,metadata_json
                     FROM task_result_read_views WHERE task_id=? AND view_type=?''',
                     (task_id, view_type)).fetchone()
+                if row is None and view_type in {'duplicate', 'historical'}:
+                    raise ServiceError('READ_PROJECTION_REQUIRED',
+                                       'Requested audit view requires projection migration', 503)
                 if row is None or row[0] != source_id:
                     raise ServiceError('STORAGE_CORRUPT', 'Result read page is missing', 500)
                 count = row[1]
@@ -2816,7 +2975,7 @@ class SQLiteMultiRuleApprovalRepository:
             view = self._read_result_set(memory, retrieval, candidates, state, actor,
                                          task_id, result_set_id)
             task = memory.get(actor, task_id)
-            exists = db.execute("""SELECT 1 FROM sqlite_master WHERE type='table'
+            exists = db.execute("""SELECT 1 FROM sqlite_master WHERE type IN ('table','view')
                 AND name='refill_execution_stops'""").fetchone()
             if exists:
                 row = db.execute("""SELECT stop_reason FROM refill_execution_stops

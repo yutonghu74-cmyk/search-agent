@@ -1,0 +1,186 @@
+openapi: 3.0.3
+info:
+  title: Agent planning stages
+  version: 1.0.0
+  description: >-
+    Opt-in planning API for already-confirmed agent requirements. Preparation creates only a review draft.
+    No endpoint here authorizes retrieval/DJ execution or silently upgrades a legacy task.
+paths:
+  /v1/retrieval/tasks/{task_id}/agent-capabilities:
+    parameters:
+      - {$ref: '#/components/parameters/TaskId'}
+    get:
+      operationId: getTaskAgentCapabilities
+      description: >-
+        Authorized backend project routes only. Does not probe a runtime, create a draft/run,
+        invoke a model, grant execution, or permit integration credentials to approve stages.
+      responses:
+        '200':
+          description: Configured planning roles; availability is not a successful runtime probe
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Capabilities'}
+        '404': {description: Task not visible to the actor}
+        '422': {description: Query parameters are not accepted}
+        '503': {description: Service or backend route configuration unavailable}
+  /v1/retrieval/tasks/{task_id}/agent-stages:
+    parameters:
+      - {$ref: '#/components/parameters/TaskId'}
+    get:
+      operationId: listAgentPlanningStages
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 32}}
+      responses:
+        '200': {description: Current task-version stage metadata without contexts or credentials}
+        '503': {description: Planning service not configured}
+  /v1/retrieval/tasks/{task_id}/agent-stages/prepare:
+    parameters:
+      - {$ref: '#/components/parameters/TaskId'}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+    post:
+      operationId: prepareAgentPlanningStage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PrepareStage'}
+      responses:
+        '201': {description: Review saved without a run or model call, content: {application/json: {schema: {$ref: '#/components/schemas/Stage'}}}}
+        '200': {description: Idempotent replay of the same preparation}
+        '409': {description: Stale task, missing confirmed agent requirements or allocation conflict}
+        '422': {description: Unknown fields or invalid bounds}
+        '503': {description: Planning service not configured}
+  /v1/retrieval/tasks/{task_id}/agent-stages/{stage_draft_id}:
+    parameters:
+      - {$ref: '#/components/parameters/TaskId'}
+      - {$ref: '#/components/parameters/StageDraftId'}
+    get:
+      operationId: getAgentPlanningStage
+      parameters:
+        - {name: after_cursor, in: query, schema: {type: integer, minimum: 0, maximum: 9223372036854775807, default: 0}}
+      responses:
+        '200': {description: Persisted current state and bounded event page, content: {application/json: {schema: {$ref: '#/components/schemas/Stage'}}}}
+        '404': {description: Stage not visible to current actor/task}
+        '409': {description: Task version or stage approval is no longer current}
+  /v1/retrieval/tasks/{task_id}/agent-stages/{stage_draft_id}/confirm:
+    parameters:
+      - {$ref: '#/components/parameters/TaskId'}
+      - {$ref: '#/components/parameters/StageDraftId'}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+    post:
+      operationId: confirmAgentPlanningStage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/StageAction'}
+                - {properties: {action: {enum: [confirm]}}}
+      responses:
+        '200': {description: Explicit owner approval persisted, no run dispatched}
+        '409': {description: Review/input/configuration/version changed or conflicting idempotency key}
+  /v1/retrieval/tasks/{task_id}/agent-stages/{stage_draft_id}/start:
+    parameters:
+      - {$ref: '#/components/parameters/TaskId'}
+      - {$ref: '#/components/parameters/StageDraftId'}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+    post:
+      operationId: startAgentPlanningStage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/StageAction'}
+                - {properties: {action: {enum: [start]}}}
+      responses:
+        '202': {description: One immutable attempt enqueued/dispatched; repeat does not start another run}
+        '409': {description: Confirmation required, changed review or insufficient budget}
+        '503': {description: Required runtime unavailable; no silent fallback}
+  /v1/retrieval/tasks/{task_id}/agent-stages/{stage_draft_id}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/TaskId'}
+      - {$ref: '#/components/parameters/StageDraftId'}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+    post:
+      operationId: cancelAgentPlanningStage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/StageAction'}
+                - {properties: {action: {enum: [cancel]}}}
+      responses:
+        '200': {description: Stage cancelled and lease fenced; reservations are retained}
+        '404': {description: Actor/task mismatch}
+components:
+  parameters:
+    TaskId: {name: task_id, in: path, required: true, schema: {type: string, minLength: 1}}
+    StageDraftId: {name: stage_draft_id, in: path, required: true, schema: {type: string, pattern: '^agentdraft_[a-f0-9]{32}$'}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1}}
+  schemas:
+    Capabilities:
+      type: object
+      additionalProperties: false
+      required: [schema_version, task_id, requirements_confirmed, roles]
+      properties:
+        schema_version: {type: string, enum: [agent-capabilities@1]}
+        task_id: {type: string}
+        requirements_confirmed: {type: boolean, description: Does not remove the formal task admission gate}
+        roles:
+          type: array
+          maxItems: 2
+          items:
+            type: object
+            additionalProperties: false
+            required: [role, role_release_ref, runtime_release_ref, output_contract, task_kind, availability, execution_allowed]
+            properties:
+              role: {type: string, enum: [retrieval, cleaning]}
+              role_release_ref: {type: string}
+              runtime_release_ref: {type: string}
+              output_contract: {type: string}
+              task_kind: {type: string, enum: [plan]}
+              availability: {type: string, enum: [configured_not_probed]}
+              execution_allowed: {type: boolean, enum: [false]}
+    PrepareStage:
+      type: object
+      additionalProperties: false
+      required: [role, model_profile_ref, model_calls, expected_revision, expected_generation, expected_task_version]
+      properties:
+        role: {type: string, enum: [retrieval, cleaning]}
+        model_profile_ref: {type: string, minLength: 1, description: Backend-registered immutable model profile, not a URL or credential}
+        model_calls: {type: integer, minimum: 1, maximum: 1000000}
+        expected_revision: {type: integer, minimum: 1}
+        expected_generation: {type: integer, minimum: 1}
+        expected_task_version: {type: integer, minimum: 1}
+    StageAction:
+      type: object
+      additionalProperties: false
+      required: [action, proposal_digest, expected_task_version]
+      properties:
+        action: {type: string, enum: [confirm, start, cancel]}
+        proposal_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        expected_task_version: {type: integer, minimum: 1}
+    Stage:
+      type: object
+      required: [schema_version, stage_draft_id, task_id, role, status, proposal_digest, execution_allowed]
+      properties:
+        schema_version: {type: string, enum: [agent-stage@1]}
+        stage_draft_id: {type: string}
+        task_id: {type: string}
+        role: {type: string, enum: [retrieval, cleaning]}
+        status: {type: string, enum: [prepared, confirmed, started, queued, running, finished, failed, unknown, cancelled, superseded]}
+        proposal_digest: {type: string}
+        expected_task_version: {type: integer}
+        input_digest: {type: string}
+        model_profile_ref: {type: string}
+        runtime_release_ref: {type: string}
+        model_calls: {type: integer}
+        max_seconds: {type: integer}
+        execution_allowed: {type: boolean, enum: [false], description: Business retrieval/cleaning execution is not granted by planning completion}
+        events: {type: array, maxItems: 100, items: {type: object}}
+        outputs: {type: array, items: {type: object}}

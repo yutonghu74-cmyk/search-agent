@@ -32,12 +32,17 @@ class PlatformApplication:
     def __init__(self, config, hooks, *, start_workers=True):
         required = {'api_base_url', 'tenant_id', 'task_ledger', 'dialogue_ledger',
                     'credential_store', 'credential_key', 'catalog_ledger', 'allowed_actions'}
-        if not required <= set(config) or set(config) - required - {'model_config', 'frame_origins', 'dsh_python', 'dsh_home', 'protocol_config'}:
+        if not required <= set(config) or set(config) - required - {'model_config', 'frame_origins', 'dsh_python', 'dsh_home', 'protocol_config', 'video_resources', 'search_limits'}:
             raise ValueError('invalid platform configuration keys')
         if any(not callable(hooks.get(key)) for key in REQUIRED_HOOKS):
             raise ValueError('verified platform protocol integration hooks are required')
         if 'encode_reference' in hooks and not callable(hooks['encode_reference']):
             raise ValueError('optional reference encoder must be callable')
+        if 'inspect_video' in hooks and not callable(hooks['inspect_video']):
+            raise ValueError('optional whole-video inspector must be callable')
+        for name in ('video_preflight', 'video_registry', 'whole_video_bindings', 'inspect_video_file'):
+            if name in hooks and not callable(hooks[name]):
+                raise ValueError('optional video integration hooks must be callable')
         paths = [Path(config[key]).expanduser().resolve() for key in
                  ('task_ledger', 'dialogue_ledger', 'credential_store', 'credential_key', 'catalog_ledger')]
         if len(set(paths)) != len(paths):
@@ -65,6 +70,12 @@ class PlatformApplication:
                 cursor_secret=hmac.digest(self.credentials.box.mac, b'platform-cursors/v1', 'sha256'),
                 **{key: (lambda *args, _key=key: hooks[_key](self, *args)) for key in
                    ('project_datasets', 'user_datasets', 'libraries', 'resolve_hits', 'search', 'open_media', 'media_version')})
+            from .video_media import VideoResourcePolicy
+            self.resources.video_policy = VideoResourcePolicy(**config.get('video_resources', {}))
+            self.resources.video_inspector = ((lambda content: hooks['inspect_video'](self, content)) if callable(hooks.get('inspect_video')) else None)
+            self.resources.video_file_inspector = ((lambda path: hooks['inspect_video_file'](self, path)) if callable(hooks.get('inspect_video_file')) else None)
+            self.resources.whole_video_bindings = ((lambda: hooks['whole_video_bindings'](self))
+                                                   if callable(hooks.get('whole_video_bindings')) else None)
             self.runtime = load_model_runtime(config['model_config']) if config.get('model_config') else ModelRuntime()
             if config.get('dsh_python'):
                 from .adapters.dsh.runtime import DshModelRuntime
@@ -85,10 +96,12 @@ class PlatformApplication:
                 frame_origins=config.get('frame_origins', ()), reference_search=bool(hooks.get('encode_reference')))
             images = QueryImageService(self.projects, Path(config['task_ledger']))
             self.service.query_images = images
+            first_limits = components['first_search'].search_limits
             self.handler = create_handler(self.service, model_runtime=self.runtime,
                 dialogue=self.dialogue, expansion_jobs=self.expansion, query_images=images,
                 identity_provider=self.identity, identity_mode='platform', platform_browser=browser,
-                build_info={'deployment_mode': 'platform', 'integration_status': 'REQUIRES_INTERNAL_ACCEPTANCE'},
+                build_info={'deployment_mode': 'platform', 'integration_status': 'REQUIRES_INTERNAL_ACCEPTANCE',
+                            'search_execution_limits': {name: getattr(first_limits, name) for name in ('workers', 'max_pending', 'max_calls', 'max_hit_slots', 'max_pending_per_user')}},
                 **components)
         except Exception:
             self.close()

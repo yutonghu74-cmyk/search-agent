@@ -80,6 +80,20 @@ class CandidateManifest:
                 "manifest_ref": self.manifest_ref}
 
 
+def merge_manifest_items(proposals):
+    """Aggregate existing page manifests without minting a synthetic source page."""
+    items = {}
+    for proposal in proposals:
+        for item in proposal.items:
+            previous = items.get(item.candidate_id)
+            if previous is not None:
+                if previous.media != item.media or previous.group_ids != item.group_ids:
+                    raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Candidate identity changed across pages', 409)
+                item = ManifestItem(item.media, previous.hits + item.hits, item.group_ids)
+            items[item.candidate_id] = item
+    return tuple(items.values())
+
+
 def validate_manifest(proposal: CandidateManifestProposal, operation: RetrievalOperation):
     """Validate trusted backend input against the authoritative committed page.
 

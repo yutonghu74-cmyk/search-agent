@@ -10,6 +10,7 @@ from .query_spec import normalize_query_spec, digest
 from .expansion_models import delivery_targets, normalize_grouped_expansion
 from .refill_planning import normalize_refill_limits
 from .video_query import VIDEO_FIELDS, normalize_video_fields, video_draft_summary
+from .historical_dedup import normalize_history
 
 NODES = ("expansion", "retrieval", "cleaning", "refill", "packaging")
 GROUP_QUOTAS_ENV = "DSH_GROUP_QUOTAS"
@@ -54,9 +55,9 @@ def normalize_proposal(body: dict) -> dict:
         raise invalid("explicit dedup and refill policies are required", "$.query_spec")
     if spec["intra_batch_dedup"] != {"policy_ref": "exact-content", "config_version": "1"}:
         raise ServiceError("FEATURE_NOT_SUPPORTED", "only exact-content@1 is enabled", 422)
-    if spec["cross_batch_dedup"] != {"scope": "none", "references": [],
-                                    "comparison_methods": [], "reference_digest": None}:
-        raise ServiceError("FEATURE_NOT_SUPPORTED", "historical dedup is not connected", 422)
+    normalize_history(spec['cross_batch_dedup'])
+    if spec.get('media_type') != 'image' and spec['cross_batch_dedup']['scope'] != 'none':
+        raise ServiceError('FEATURE_NOT_SUPPORTED', 'Historical dedup currently supports images', 422)
     refill = spec["refill_policy"]
     if not isinstance(refill, dict) or set(refill) != {"mode", "target_count", "approved_library_ids", "progression"}:
         raise invalid("invalid refill policy", "$.query_spec.refill_policy")
@@ -74,10 +75,18 @@ def normalize_proposal(body: dict) -> dict:
             or modes["expansion"] != "manual" or modes["packaging"] != "manual"):
         raise ServiceError("FEATURE_NOT_SUPPORTED",
                            "expansion and packaging remain manual in this slice", 422)
+    execution = None
+    if 'retrieval_execution' in spec:
+        from .confirmed_terms_contract import normalize_execution
+        execution = normalize_execution(spec['retrieval_execution'])
+    initial_auto = execution is not None and execution['schema_version'] == 'confirmed-terms-execution@2'
+    if initial_auto and (modes['retrieval'] != 'auto' or modes['cleaning'] != 'auto' or not spec.get('rules')):
+        raise invalid('automatic initial intake requires confirmed rules and automatic retrieval/cleaning',
+                      '$.query_spec.retrieval_execution')
     if refill["mode"] == "input_only":
         if (refill.get("progression") != "manual" or libraries
-                or any(modes[node] != "manual" for node in
-                       ("retrieval", "cleaning", "refill"))):
+                or modes["refill"] != "manual"
+                or not initial_auto and any(modes[node] != "manual" for node in ("retrieval", "cleaning"))):
             raise ServiceError("FEATURE_NOT_SUPPORTED",
                                "input_only requires manual progression and no refill libraries", 422)
     elif refill["mode"] == "maintain_target":
@@ -86,7 +95,7 @@ def normalize_proposal(body: dict) -> dict:
             raise ServiceError("FEATURE_NOT_SUPPORTED",
                                "maintain_target progression must match the confirmed refill node mode", 422)
         if ((modes["retrieval"] == "auto") != (modes["cleaning"] == "auto")
-                or modes["retrieval"] == "auto" and modes["refill"] != "auto"):
+                or modes["retrieval"] == "auto" and modes["refill"] != "auto" and not initial_auto):
             raise ServiceError(
                 "FEATURE_NOT_SUPPORTED",
                 "automatic candidate intake requires retrieval, cleaning and refill together", 422)
@@ -99,7 +108,7 @@ def normalize_proposal(body: dict) -> dict:
     grouped_expansion = spec.get("grouped_expansion")
     query_input = _normalize_query_input(spec.get("query_input")) if version == "query-spec@2" else None
     legacy = {k: v for k, v in spec.items()
-              if k not in required | {"grouped_expansion", "refill_limits", "query_input", "cleaning_conditions"}
+              if k not in required | {"grouped_expansion", "refill_limits", "query_input", "cleaning_conditions", "agent_requirements", "retrieval_execution"}
               | (VIDEO_FIELDS if version == "query-spec@3" else set())}
     legacy["schema_version"] = "query-spec@1"
     # Reuse field/rule validation, not the old wire contract or its defaults.
@@ -132,6 +141,14 @@ def normalize_proposal(body: dict) -> dict:
     if 'cleaning_conditions' in spec:
         from .requirement_changes import normalize_conditions
         normalized['cleaning_conditions'] = normalize_conditions(spec['cleaning_conditions'], normalized)
+    if 'agent_requirements' in spec:
+        from .processing_requirements import normalize_agent_requirements
+        normalized['agent_requirements'] = normalize_agent_requirements(spec['agent_requirements'], normalized)
+    if 'retrieval_execution' in spec:
+        from .confirmed_terms_contract import normalize_execution
+        if version != 'query-spec@2' or 'agent_requirements' in spec or not grouped_expansion:
+            raise invalid('confirmed grouped image terms required for delegated execution', '$.query_spec.retrieval_execution')
+        normalized['retrieval_execution'] = normalize_execution(spec['retrieval_execution'])
     return {"dimension_id": dimension, "query_spec": normalized, "node_modes": dict(modes)}
 
 

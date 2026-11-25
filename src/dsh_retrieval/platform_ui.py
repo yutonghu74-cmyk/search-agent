@@ -13,7 +13,7 @@ def platform_html(html):
 PLATFORM_JS = r'''(async()=>{
 'use strict';
 const nativeFetch=window.fetch.bind(window),nativeGet=Storage.prototype.getItem,nativeSet=Storage.prototype.setItem,nativeRemove=Storage.prototype.removeItem;
-let context,project,closed=false;const pending=new Set();
+let context,project,closed=false,checking=null;const pending=new Set();
 function unavailable(message){closed=true;for(const c of pending)c.abort();pending.clear();document.body.replaceChildren();const p=document.createElement('p');p.setAttribute('role','alert');p.textContent=message;document.body.append(p)}
 try{
  const response=await nativeFetch('/v1/platform/context',{credentials:'same-origin',cache:'no-store'});
@@ -36,18 +36,32 @@ try{
   const controller=new AbortController();pending.add(controller);
   const abort=()=>controller.abort();if(request.signal.aborted)abort();else request.signal.addEventListener('abort',abort,{once:true});
   try{const r=await nativeFetch(url,{method:request.method,headers,credentials:'same-origin',cache:'no-store',body:['GET','HEAD'].includes(request.method)?undefined:await request.blob(),signal:controller.signal});
-   if(r.status===401||r.status===403)unavailable('登录或项目授权已失效，请从数据平台重新进入。');return r;
+   if(r.status===401||r.status===403)unavailable('登录或项目授权已失效，请从数据平台重新进入。');if(closed)throw new Error('当前登录或项目上下文已失效');return r;
   }finally{pending.delete(controller);request.signal.removeEventListener('abort',abort)}
  };
  const bar=document.createElement('nav');bar.setAttribute('aria-label','当前项目');
  const label=document.createElement('label');label.textContent='当前项目 ';const select=document.createElement('select');
  for(const item of context.projects){const option=document.createElement('option');option.value=String(item.id);option.textContent=item.alias||item.name||String(item.id);select.append(option)}select.value=project;
  select.onchange=()=>{closed=true;for(const c of pending)c.abort();nativeSet.call(sessionStorage,'platform-project:'+context.user_id,select.value);location.replace(location.pathname+'?project='+encodeURIComponent(select.value))};label.append(select);bar.append(label);
- const logout=document.createElement('button');logout.textContent='退出本应用';logout.onclick=async()=>{await nativeFetch('/v1/platform/logout',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':context.csrf}});unavailable('已退出本应用。后台任务按项目授权继续管理。')};bar.append(logout);document.body.prepend(bar);
+ const user=document.createElement('span');user.textContent='当前用户 '+context.user_id;bar.append(user);
+ const logout=document.createElement('button');logout.textContent='退出本应用';logout.onclick=async()=>{await nativeFetch('/v1/platform/logout',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':context.csrf,'X-Agent-User':context.user_id}});unavailable('已退出本应用。后台任务按项目授权继续管理。')};bar.append(logout);document.body.prepend(bar);
  document.addEventListener('click',event=>{const a=event.target.closest('a[href]');if(!a)return;const url=new URL(a.href,location.href);if(url.origin===location.origin&&!url.pathname.startsWith('/v1/')){url.searchParams.set('project',project);a.href=url.href}});
- const timer=setInterval(async()=>{try{const r=await window.fetch('/v1/platform/check');if(!r.ok)unavailable('项目授权不可用，请重新进入。')}catch{unavailable('无法确认当前项目权限，请重新进入。')}},30000);
+ async function verifyContext(){
+  if(closed)return;if(checking)return checking;
+  checking=(async()=>{try{
+   const r=await nativeFetch('/v1/platform/context',{credentials:'same-origin',cache:'no-store',headers:{'X-Agent-User':context.user_id}});
+   if(!r.ok)throw new Error();const current=await r.json();if(closed)return;
+   if(current.tenant_id!==context.tenant_id||current.user_id!==context.user_id||current.csrf!==context.csrf||!current.projects?.some(p=>String(p.id)===project))throw new Error();
+   const access=await window.fetch('/v1/platform/check');if(!access.ok)throw new Error();
+  }catch{unavailable('登录或项目授权已变化，请重新进入。')}finally{checking=null}})();return checking;
+ }
+ const timer=setInterval(verifyContext,30000);
+ addEventListener('focus',verifyContext);
+ addEventListener('pageshow',event=>{if(event.persisted)verifyContext()});
+ document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')verifyContext()});
  addEventListener('pagehide',()=>{closed=true;clearInterval(timer);for(const c of pending)c.abort()},{once:true});
  const imageInput=document.getElementById('query-image-file');if(imageInput&&!context.capabilities?.reference_image_search){imageInput.disabled=true;imageInput.closest('.query-image-input').classList.add('hidden')}
+ window.dshPlatformSession=true;
  for(const placeholder of document.querySelectorAll('script[data-src]')){if(closed)break;await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=placeholder.dataset.src;script.onload=resolve;script.onerror=()=>reject(new Error('页面资源加载失败'));placeholder.replaceWith(script)})}
 }catch(error){unavailable(error.message||'平台接入暂不可用')}
 })();'''

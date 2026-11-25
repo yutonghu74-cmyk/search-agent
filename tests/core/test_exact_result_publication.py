@@ -83,7 +83,7 @@ class ExactResultPublicationTest(unittest.TestCase):
 
     def test_serialization_failure_rolls_back_task_pointer_and_event(self):
         before = self.f.f.f.tasks.get(self.actor, self.task_id)
-        with patch("dsh_retrieval.adapters.task_storage.multi_rule.dump_state",
+        with patch("dsh_retrieval.adapters.task_storage.ledger_rows.prepare_state",
                    side_effect=ServiceError("STORAGE_LIMIT", "full", 507)):
             self.assert_code("STORAGE_LIMIT", lambda: self.repo.publish_preview(
                 self.actor, self.task_id, self.operation_id))

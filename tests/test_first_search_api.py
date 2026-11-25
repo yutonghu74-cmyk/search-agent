@@ -20,6 +20,7 @@ class FirstSearchApiTest(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.handler = create_handler(self.fixture.tasks, first_search=self.fixture.local,
                                       plan_set_repository=self.fixture.local.repository)
+        self.addCleanup(self.handler.task_commands.store.connection.close)
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), self.handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -105,6 +106,42 @@ class FirstSearchApiTest(unittest.TestCase):
         self.fixture.local.media_gateway = None
         self.assertEqual(preview()[0], 404)
 
+    def test_budget_stop_workspace_and_sse_remain_readable(self):
+        from dsh_retrieval.search_budget import SearchBudget
+        from dsh_retrieval.search_scheduling import SearchLimits
+        self.fixture.local.close()
+        self.fixture.select_and_approve()
+        self.fixture.local.search_budget = SearchBudget(self.fixture.ledger, SearchLimits(max_calls=1))
+        self.assertEqual(self.request('/tick', method='POST', body={'max_requests': 1})[0], 200)
+        status, body, _ = self.request('/tick', method='POST', body={'max_requests': 1})
+        self.assertEqual(status, 409)
+        self.assertEqual(body['code'], 'SEARCH_BUDGET_EXHAUSTED')
+        task_url = self.base.removesuffix('/first-search')
+        headers = {'X-Tenant-Id': 'tenant-a', 'X-User-Id': 'user-a'}
+        with urlopen(Request(task_url + '/workspace', headers=headers)) as response:
+            workspace = json.load(response)
+        self.assertEqual(workspace['workflow']['state'], 'retrieval_budget_exhausted')
+        self.handler.event_stream_duration = 0
+        with urlopen(Request(task_url + '/events?after_sequence=0', headers=headers)) as response:
+            self.assertEqual(response.status, 200)
+            events = response.read()
+        self.assertIn(b'SEARCH_BUDGET_EXHAUSTED', events)
+
+    def test_concurrent_tick_returns_retryable_busy_without_spending_budget(self):
+        self.fixture.local.close()
+        self.fixture.select_and_approve()
+        approved = self.fixture.local.repository.get_current(self.fixture.actor, self.fixture.task_id)
+        budget = self.fixture.local.search_budget
+        with budget.execution(approved.scope):
+            status, body, _ = self.request('/tick', method='POST', body={'max_requests': 1})
+            self.assertEqual(status, 503)
+            self.assertEqual(body['code'], 'SEARCH_BUSY')
+            self.assertTrue(body['retryable'])
+            self.assertEqual(budget.snapshot(approved.scope)['calls_reserved'], 0)
+        status, body, _ = self.request('/tick', method='POST', body={'max_requests': 1})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['network_attempts'], 1)
+
     def test_explicit_choice_confirmation_execution_and_safe_candidates(self):
         self.assertEqual(self.request('/progress')[1]['status'], 'unapproved')
         status, preview, _ = self.request()
@@ -129,6 +166,9 @@ class FirstSearchApiTest(unittest.TestCase):
             'proposal_digest': proposal['proposal_digest'],
             'expected_task_version': proposal['expected_task_version'], 'action': 'confirm'})
         self.assertEqual(replay[2].get('Idempotent-Replayed'), 'true')
+        # Confirmation already dispatched background work. Test completed-page replay
+        # after that worker settles; concurrent execution is covered separately.
+        self.fixture.wait_stopped(self.fixture.local, self.fixture.task_id)
         status, batch, _ = self.request('/tick', method='POST', body={'max_requests': 2})
         self.assertEqual(status, 200)
         self.assertIn(batch['network_attempts'], (0, 1, 2))

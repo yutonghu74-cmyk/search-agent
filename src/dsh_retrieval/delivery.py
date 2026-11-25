@@ -1,4 +1,4 @@
-"""Bounded local image delivery: immutable ZIP, explicit publication, gated reads.
+"""Bounded local qualified-media delivery: immutable ZIP, explicit publication, gated reads.
 
 Media I/O happens outside ledger transactions. SQLite commits the staged object,
 task fence and event together. This is not a downstream training publication.
@@ -8,6 +8,7 @@ from hashlib import sha256
 from io import BytesIO
 import json
 import uuid
+import warnings
 from zipfile import ZipFile, ZipInfo, ZIP_STORED, BadZipFile
 
 from .errors import ServiceError
@@ -17,6 +18,33 @@ from .service import require_version
 
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_PIXELS = 50_000_000
+
+
+def validate_delivery_image(data):
+    """Verify structure and decode bounded static JPEG/PNG without changing bytes."""
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError as exc:
+        raise ServiceError('DEPENDENCY_UNAVAILABLE', 'Image decoder is unavailable', 503) from exc
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data), formats=('JPEG', 'PNG')) as image:
+                extension = {'JPEG': '.jpg', 'PNG': '.png'}[image.format]
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    raise ServiceError('MEDIA_LIMIT_EXCEEDED', 'Delivery image exceeds pixel limit', 413)
+                if getattr(image, 'n_frames', 1) != 1:
+                    raise ServiceError('FEATURE_NOT_SUPPORTED', 'Only static image delivery is supported', 422)
+                image.verify()
+            # verify() checks structure but does not decode the pixel stream.
+            with Image.open(BytesIO(data), formats=('JPEG', 'PNG')) as image:
+                image.load()
+        return extension
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError) as exc:
+        raise ServiceError('MEDIA_LIMIT_EXCEEDED', 'Delivery image exceeds safe decode limit', 413) from exc
+    except (OSError, ValueError, SyntaxError, UnidentifiedImageError) as exc:
+        raise ServiceError('MEDIA_READ_INVALID', 'Delivery image cannot be decoded', 422) from exc
 
 
 def canonical(value):
@@ -37,6 +65,11 @@ def _group_directory(index, label):
 def expected_member_files(manifest):
     """Allowed file name per member, in order, for both package layouts."""
     members = manifest['members']
+    if manifest.get('schema') == 'whole-video-delivery@2':
+        return [(f'videos/{index:04d}.json',) for index, _ in enumerate(members, 1)]
+    if manifest.get('schema') == 'whole-video-delivery@1':
+        return [(f'videos/{index:04d}.mp4', f'videos/{index:04d}.webm')
+                for index, _ in enumerate(members, 1)]
     if manifest.get('schema') != 'image-delivery@3':
         return [(f'images/{index:04d}.jpg', f'images/{index:04d}.png')
                 for index, _ in enumerate(members, 1)]
@@ -69,6 +102,13 @@ def load_delivery_records(db):
                     or record['manifest']['source_result_id'] != record['source_id']
                     or record['manifest']['source_result_digest'] != record['source_digest']):
                 raise ValueError('invalid delivery metadata')
+            if record['manifest'].get('schema') in ('whole-video-delivery@1', 'whole-video-delivery@2'):
+                manifest = record['manifest']
+                if (manifest.get('media_type') != 'video' or manifest.get('count_unit') != 'distinct_video'
+                        or 'groups' in manifest or not manifest.get('video_conditions')
+                        or manifest['packaged_file_count'] != len(manifest['members'])
+                        or manifest['accepted_count'] != len(manifest['members'])):
+                    raise ValueError('invalid whole-video delivery metadata')
             records[record['source_id']] = record
     except (KeyError, TypeError, ValueError) as exc:
         raise ServiceError('STORAGE_CORRUPT', 'Invalid delivery metadata', 500) from exc
@@ -95,6 +135,25 @@ def publication_is_current(task, state, source_id, source_version):
 
 
 class ImageDeliveryService:
+    media_type = 'image'
+    member_directory = 'images'
+
+    def _require_target(self, task):
+        if task.media_type != self.media_type:
+            raise ServiceError('FEATURE_NOT_SUPPORTED', 'Delivery service does not support the target media type', 422)
+
+    def _manifest_schema(self, group_rows):
+        return 'image-delivery@3' if group_rows else 'image-delivery@2'
+
+    def _extend_manifest(self, manifest, proposal):
+        return manifest
+
+    def _archive_member(self, member, data):
+        return member
+
+    def _read_member(self, actor, task_id, operation_id, item, binding):
+        return self._image(actor, task_id, operation_id, item, binding)
+
     def __init__(self, repository, gateway):
         self.repo, self.gateway = repository, gateway
         with closing(repository.tasks._connect()) as db, db:
@@ -112,6 +171,7 @@ class ImageDeliveryService:
 
     def _read(self, memory, retrieval, candidates, state, actor, task_id):
         task = self.repo.manifests.retrieval._authorize(memory, actor, task_id, action='read')
+        self._require_target(task)
         source_id = state['current_result_sets'].get(task_id)
         if not source_id:
             raise ServiceError('NOT_FOUND', 'No current qualified preview', 404)
@@ -125,6 +185,7 @@ class ImageDeliveryService:
     def status(self, actor, task_id):
         def read(memory, retrieval, candidates, state):
             task = self.repo.manifests.retrieval._authorize(memory, actor, task_id, action='read')
+            self._require_target(task)
             source_id = state['current_result_sets'].get(task_id)
             if not source_id or current_delivery(task, state, source_id) is None:
                 return {'available': False}
@@ -171,6 +232,7 @@ class ImageDeliveryService:
         extension = '.jpg' if data.startswith(b'\xff\xd8\xff') else '.png' if data.startswith(b'\x89PNG\r\n\x1a\n') else None
         if extension is None:
             raise ServiceError('FEATURE_NOT_SUPPORTED', 'Only JPEG/PNG delivery is supported', 422)
+        extension = validate_delivery_image(data)
         metadata = self.gateway.export_metadata(media_ref) if callable(getattr(self.gateway, 'export_metadata', None)) else {}
         return data, extension, metadata
 
@@ -183,6 +245,7 @@ class ImageDeliveryService:
                 raise ServiceError('REVISION_CONFLICT', 'Package belongs to another result', 409)
             return existing, True
         task = self.repo.tasks.get(actor, task_id)
+        self._require_target(task)
         if (task.task_version != expected_task_version or task.stage != 'refill'
                 or task.run_status not in (RunStatus.RUNNING, RunStatus.AWAITING_INPUT)):
             raise ServiceError('REVISION_CONFLICT', 'Task is not ready for packaging', 409)
@@ -251,7 +314,7 @@ class ImageDeliveryService:
             'action': decision.action,
             'representative_candidate_id': decision.representative_candidate_id,
         } for decision in result.get('near_duplicate_decisions', ())]
-        manifest = {'schema': 'image-delivery@3' if group_rows else 'image-delivery@2', 'task_id': task_id,
+        manifest = {'schema': self._manifest_schema(group_rows), 'task_id': task_id,
                     'revision': task.confirmed_revision, 'generation': task.run_generation,
                     'source_result_id': result['result_set_id'], 'source_result_digest': result_set_digest,
                     'request_digest': task.request_digest, 'operation_id': result['operation_id'],
@@ -269,26 +332,32 @@ class ImageDeliveryService:
                     'near_duplicate_pairs': near_duplicate_pairs,
                     'near_duplicate_decisions': near_duplicate_decisions,
                     'members': []}
+        manifest = self._extend_manifest(manifest, proposal)
         if group_rows:
             manifest['groups'] = group_rows
         directories = {row['group_id']: row['directory'] for row in group_rows}
         per_group = {}
         output = BytesIO()
         bindings = self._bindings(actor, task_id, result['operation_id'], accepted)
+        original_bytes = 0
         with ZipFile(output, 'w', compression=ZIP_STORED) as archive:
             for index, item in enumerate(accepted, 1):
-                data, extension, metadata = self._image(actor, task_id, result['operation_id'], item,
+                data, extension, metadata = self._read_member(actor, task_id, result['operation_id'], item,
                                                         bindings[item.candidate_id])
+                if self.media_type == 'video':
+                    original_bytes += metadata.get('byte_count', len(data))
+                    if original_bytes > self.policy.max_job_bytes:
+                        raise ServiceError('MEDIA_LIMIT_EXCEEDED', 'Video delivery job exceeds byte budget', 413)
                 if group_rows:
                     directory = directories[item.assigned_group_id]
                     per_group[directory] = per_group.get(directory, 0) + 1
                     filename = f'{directory}/{per_group[directory]:04d}' + extension
                 else:
-                    filename = f'images/{index:04d}' + extension
+                    filename = f'{self.member_directory}/{index:04d}' + extension
                 if output.tell() + len(data) > MAX_PACKAGE_BYTES - 1024 * 1024:
                     raise ServiceError('PACKAGE_LIMIT_EXCEEDED', 'Local package limit is 64 MiB', 413)
                 archive.writestr(ZipInfo(filename, date_time=(1980, 1, 1, 0, 0, 0)), data)
-                manifest['members'].append({'file': filename, 'candidate_id': item.candidate_id,
+                manifest['members'].append(self._archive_member({'file': filename, 'candidate_id': item.candidate_id,
                     **({'group_id': item.assigned_group_id} if group_rows else {}),
                     'asset_version': item.asset_version, 'content_digest': item.content_digest,
                     'candidate_ids': list(item.candidate_ids or (item.candidate_id,)),
@@ -300,7 +369,7 @@ class ImageDeliveryService:
                          'vector_id': source.vector_id,
                          'score': source.score}
                         for source in item.sources],
-                    'source': metadata})
+                    'source': metadata}, data))
             archive.writestr(ZipInfo('manifest.json', date_time=(1980, 1, 1, 0, 0, 0)), canonical(manifest))
         content = output.getvalue()
         if len(content) > MAX_PACKAGE_BYTES:
@@ -371,7 +440,9 @@ class ImageDeliveryService:
                             or any(item.compress_type != ZIP_STORED for item in archive.infolist())
                             or sum(item.file_size for item in archive.infolist()) > MAX_PACKAGE_BYTES
                             or archive.read('manifest.json') != canonical(record['manifest'])
-                            or any(digest(archive.read(item['file'])) != item['content_digest'] for item in members)):
+                            or any(digest(archive.read(item['file'])) !=
+                                   (item['packaged_content_digest'] if record['manifest'].get('schema') == 'whole-video-delivery@2'
+                                    else item['content_digest']) for item in members)):
                         raise ValueError('manifest mismatch')
             except (BadZipFile, KeyError, ValueError, RuntimeError) as exc:
                 raise ServiceError('STORAGE_CORRUPT', 'Package manifest or member mismatch', 500) from exc
@@ -381,7 +452,7 @@ class ImageDeliveryService:
     def _revalidate_media(self, actor, task_id, result):
         bindings = self._bindings(actor, task_id, result['operation_id'], result['accepted'])
         for item in result['accepted']:
-            self._image(actor, task_id, result['operation_id'], item, bindings[item.candidate_id])
+            self._read_member(actor, task_id, result['operation_id'], item, bindings[item.candidate_id])
 
     def publish(self, actor, task_id, *, package_id, manifest_digest, expected_task_version, action):
         require_version(expected_task_version)

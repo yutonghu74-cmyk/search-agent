@@ -30,7 +30,7 @@ class BrowserTest(unittest.TestCase):
         class Client:
             def get(_, path, token, **kwargs):
                 if path == '/user/info':
-                    return {'id': 'a'}
+                    return {'id': 'b' if token == 'token-b' else 'a'}
                 if not self.member:
                     from dsh_retrieval.errors import ServiceError
                     raise ServiceError('PROJECT_ACCESS_DENIED', 'removed', 403)
@@ -88,12 +88,85 @@ class BrowserTest(unittest.TestCase):
             {'Cookie': self.cookie, 'X-CSRF-Token': self.csrf})[0], 200)
         self.assertEqual(self.call('/v1/platform/context', headers={'Cookie': self.cookie})[0], 401)
 
+    def test_native_video_get_uses_cookie_and_project_scoped_authorization(self):
+        from unittest.mock import patch
+        self.login()
+        path='/v1/retrieval/projects/101/tasks/rt_'+('a'*32)+'/delivery/original/candidate_'+('b'*64)+'?source_digest=sha256:'+('c'*64)
+        with patch.object(self.handler.service, 'get_task', return_value={'project_id':'101'}):
+            # No client x-app-id is needed for an authenticated native media GET.
+            self.assertEqual(self.call(path, headers={'Cookie':self.cookie})[0],503)
+            self.assertEqual(self.call(path)[0],401)
+            self.assertEqual(self.call(path, headers={'Cookie':self.cookie,'x-app-id':'102'})[0],403)
+            self.assertEqual(self.call(path, 'POST', {'Cookie':self.cookie}, {})[0],403)
+            self.member=False
+            self.assertEqual(self.call(path, headers={'Cookie':self.cookie})[0],403)
+
     def test_cross_project_and_account_switch_rejected(self):
         self.login()
         headers = {'Cookie': self.cookie, 'x-app-id': '101', 'X-Agent-User': 'different-user'}
         self.assertEqual(self.call('/v1/platform/check', headers=headers)[0], 401)
         headers['X-Agent-User'] = 'a'
         self.assertEqual(self.call('/v1/retrieval/projects/102/drafts', headers=headers)[0], 403)
+
+    def test_duplicate_cookie_and_identity_headers_are_rejected(self):
+        from email.message import Message
+        from dsh_retrieval.errors import ServiceError
+        self.login()
+        browser = self.handler.platform_browser
+        for name, values in (
+            ('Cookie', [self.cookie, self.cookie]),
+            ('Authorization', ['Bearer token-a', 'Bearer token-b']),
+            ('X-Agent-User', ['a', 'b']),
+            ('X-CSRF-Token', [self.csrf, 'other']),
+        ):
+            headers = Message()
+            if name != 'Cookie':
+                headers['Cookie'] = self.cookie
+            for value in values:
+                headers[name] = value
+            with self.assertRaises(ServiceError) as caught:
+                browser.request_headers(headers, 'POST')
+            self.assertEqual(caught.exception.status, 401)
+        with self.assertRaises(ServiceError):
+            browser.cookie({'Cookie': self.cookie + '; ' + self.cookie})
+
+    def test_two_authenticated_users_cannot_read_or_confirm_each_others_drafts(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from draft_helpers import BODY
+        self.login()
+        a = {'Cookie': self.cookie, 'x-app-id': '101', 'X-Agent-User': 'a',
+             'X-CSRF-Token': self.csrf, 'Idempotency-Key': 'same-key'}
+        status, response, _ = self.call('/v1/platform/session', 'POST',
+            {'Authorization': 'Bearer token-b'}, {})
+        self.assertEqual(status, 200)
+        cookie_b = response['Set-Cookie'].split(';')[0]
+        status, _, raw = self.call('/v1/platform/context', headers={'Cookie': cookie_b})
+        self.assertEqual(status, 200)
+        context_b = json.loads(raw)
+        self.assertEqual(context_b['user_id'], 'b')
+        b = {'Cookie': cookie_b, 'x-app-id': '101', 'X-Agent-User': 'b',
+             'X-CSRF-Token': context_b['csrf'], 'Idempotency-Key': 'same-key'}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.call, '/v1/retrieval/projects/101/drafts', 'POST', h, BODY)
+                       for h in (a, b)]
+            results = [future.result() for future in futures]
+        self.assertEqual([r[0] for r in results], [200, 200])
+        drafts = [json.loads(r[2]) for r in results]
+        self.assertNotEqual(drafts[0]['draft_id'], drafts[1]['draft_id'])
+        for own, other, h in ((drafts[0], drafts[1], a), (drafts[1], drafts[0], b)):
+            base = '/v1/retrieval/projects/101/drafts/'
+            self.assertEqual(self.call(base + own['draft_id'], headers=h)[0], 200)
+            self.assertEqual(self.call(base + other['draft_id'], headers=h)[0], 404)
+            body = {key: other[key] for key in ('draft_id', 'proposal_digest')}
+            body.update(expected_draft_version=other['draft_version'], action='confirm')
+            self.assertEqual(self.call('/v1/retrieval/tasks', 'POST', h, body)[0], 404)
+        # A stale page cannot use the newly logged-in B cookie to act as A.
+        switched = {**a, 'Cookie': cookie_b}
+        self.assertEqual(self.call('/v1/platform/context', headers=switched)[0], 401)
+        self.assertEqual(self.call('/v1/platform/logout', 'POST', switched, {})[0], 403)
+        switched['X-CSRF-Token'] = context_b['csrf']
+        self.assertEqual(self.call('/v1/platform/logout', 'POST', switched, {})[0], 401)
+        self.assertEqual(self.call('/v1/platform/context', headers={'Cookie': cookie_b})[0], 200)
 
     def test_pages_bootstrap_before_business_scripts_and_allow_exact_frame_origin(self):
         status, headers, body = self.call('/chat')
@@ -135,5 +208,44 @@ context.window=context;vm.createContext(context);
  const select=body.children[0].children[0].children[0];select.value='102';select.onchange();assert.equal(location.replaced,'/chat?project=102');await assert.rejects(()=>context.fetch('/v1/retrieval/tasks/old'));
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''.replace('SOURCE', json.dumps(PLATFORM_JS))
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class PlatformAccountLifecycleTest(unittest.TestCase):
+    def test_switched_account_closes_old_page_and_discards_late_response(self):
+        script = r'''const vm=require('node:vm'),assert=require('node:assert/strict');
+class Storage{constructor(){this.map=new Map()}getItem(k){return this.map.get(k)||null}setItem(k,v){this.map.set(k,String(v))}removeItem(k){this.map.delete(k)}}
+class Element{constructor(){this.children=[];this.dataset={}}append(...a){this.children.push(...a)}prepend(...a){this.children.unshift(...a)}setAttribute(){}replaceChildren(...a){this.children=a}}
+(async()=>{
+for(const scenario of ['user','csrf','project','permission','late']){
+ class Storage{constructor(){this.map=new Map()}getItem(k){return this.map.get(k)||null}setItem(k,v){this.map.set(k,String(v))}removeItem(k){this.map.delete(k)}}
+ const body=new Element(),events={},requests=[];let changed=false,resolveLate;
+ const contextValue=()=>({tenant_id:'t',user_id:changed&&scenario==='user'?'b':'a',csrf:changed&&scenario==='csrf'?'new':'old',projects:changed&&scenario==='project'?[{id:102}]:[{id:101}],capabilities:{}});
+ const nativeFetch=async(input,options={})=>{requests.push({input,options});
+  if(input==='/v1/platform/context')return new Response(JSON.stringify(contextValue()));
+  if(input instanceof URL&&input.pathname.endsWith('/slow'))return new Promise(resolve=>{resolveLate=resolve});
+  return new Response('{}',{status:changed&&scenario==='permission'?403:200});
+ };
+ const ctx={URL,URLSearchParams,Headers,Request,Response,AbortController,Storage,sessionStorage:new Storage(),localStorage:new Storage(),
+ location:{href:'https://agent.invalid/chat',origin:'https://agent.invalid',pathname:'/chat',search:''},fetch:nativeFetch,
+ document:{body,createElement:()=>new Element(),addEventListener:(name,cb)=>{events[name]=cb},querySelectorAll:()=>[],getElementById:()=>null},
+ addEventListener:(name,cb)=>{events[name]=cb},setInterval:()=>1,clearInterval:()=>{},console};
+ ctx.window=ctx;vm.createContext(ctx);await vm.runInContext(SOURCE,ctx);
+ ctx.localStorage.setItem('dsh-task-id','private-a');
+ const late=ctx.fetch('/v1/retrieval/tasks/slow');
+ // Flush request construction; the transport intentionally ignores cancellation.
+ while(!resolveLate)await new Promise(resolve=>setImmediate(resolve));
+ if(scenario==='late'){
+  const select=body.children[0].children[0].children[0];ctx.location.replace=()=>{};select.value='102';select.onchange();
+ }else{changed=true;await events.focus();}
+ resolveLate(new Response(JSON.stringify({private:'old-account-result'})));
+ await assert.rejects(late,/失效/);
+ await assert.rejects(()=>ctx.fetch('/v1/retrieval/tasks/next'));
+ if(scenario!=='late')assert(body.children[0].textContent.includes('变化'));
+ assert.equal(ctx.localStorage.map.get('platform:t:a:101:dsh-task-id'),'private-a');
+ assert.equal(requests.find(r=>r.input==='/v1/platform/context'&&r.options.headers)?.options.headers['X-Agent-User'],scenario==='late'?undefined:'a');
+}
+})().catch(e=>{console.error(e);process.exitCode=1});'''.replace('SOURCE', json.dumps(PLATFORM_JS))
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)

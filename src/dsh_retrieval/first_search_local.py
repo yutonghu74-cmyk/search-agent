@@ -15,6 +15,8 @@ from .configured_catalog import build_configured_routing
 from .candidate_contracts import (CandidateManifestProposal, ManifestItem,
                                   candidate_identity)
 from .errors import ServiceError
+from .conversation_timing import timed_call
+from .pipeline_timing import measured, bind as bind_timing
 from .integration_models import AccessContext, MediaRecord, QueryVector
 from .local_catalog import LocalCatalogSource
 from .multi_branch_contracts import plan_origin_groups
@@ -34,7 +36,7 @@ class LocalFirstSearch:
     def __init__(self, service, configs, *, ledger_path, source_path,
                  capabilities_path, fixture_path, cursor_secret,
                  legacy_fixture_path=None, legacy_capabilities_path=None,
-                 clip_model_path=None, start=True):
+                 clip_model_path=None, start=True, search_limits=None):
         if not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32:
             raise ValueError('Local cursor secret must contain at least 32 bytes')
         self.service, self.configs = service, configs
@@ -58,14 +60,28 @@ class LocalFirstSearch:
             self._fixture(self.legacy_fixture_path, self.legacy_capabilities_path)
         self.repository = SQLitePlanSetApprovalRepository(ledger_path,
             projects=service.projects, authorization=self._authority())
-        self._condition = threading.Condition()
-        self._pending = set()
-        self._closed = False
-        self._worker = threading.Thread(target=self._work, name='local-first-search', daemon=True)
+        self._setup_search_execution(ledger_path, search_limits, start=start)
+
+    def _setup_search_execution(self, ledger_path, limits, *, start):
+        from .search_scheduling import SearchLimits, FairSearchQueue
+        from .search_budget import SearchBudget
+        self.search_limits = limits or SearchLimits()
+        self.search_budget = SearchBudget(ledger_path, self.search_limits)
+        self._retry_rounds = {}
+        self.scheduler = FairSearchQueue(self._activation, self.search_limits, start=start)
+        self._worker = self.scheduler.workers[0]  # compatibility for browse-only inspection
+        self._recovery_worker = None
         if start:
-            self._worker.start()
-            for actor, task_id in self.repository.recoverable():
-                self.enqueue(actor, task_id)
+            self._recovery_worker = threading.Thread(target=self._recover_searches,
+                daemon=True, name='search-recovery')
+            self._recovery_worker.start()
+
+    def _recover_searches(self):
+        try:
+            self.scheduler.recover(self.repository.recoverable())
+        except ServiceError:
+            # Shutdown/authorization failure leaves durable approvals unchanged.
+            return
 
     def encode_query(self, text, binding):
         if self.clip_encoder is None:
@@ -81,70 +97,45 @@ class LocalFirstSearch:
         return self.clip_encoder.encode_image_bytes(content, binding)
 
     def close(self):
-        with self._condition:
-            self._closed = True
-            self._condition.notify_all()
-        if self._worker.is_alive():
-            self._worker.join(timeout=5)
+        self.scheduler.close()
+        if self._recovery_worker is not None:
+            self._recovery_worker.join()
 
     def enqueue(self, actor, task_id):
-        with self._condition:
-            if self._closed:
-                raise ServiceError('SEARCH_EXECUTOR_STOPPED', 'Background search executor is stopped', 503)
-            self._pending.add((actor, task_id))
-            self._condition.notify()
+        self.scheduler.enqueue(actor, task_id)
 
-    def _work(self):
-        while True:
-            with self._condition:
-                while not self._pending and not self._closed:
-                    self._condition.wait()
-                if self._closed:
-                    return
-                actor, task_id = self._pending.pop()
-            try:
-                # The local fixture is finite. Bound every activation so one
-                # task cannot monopolize the executor, then yield by putting an
-                # unfinished task back on the queue. Persisted checkpoints make
-                # that continuation and process restart safe.
-                retry_rounds = 0
-                for _ in range(64):
-                    task = self.service.repository.get(actor, task_id)
-                    # Check before ticking, not only after: restart recovery
-                    # re-enqueues every current plan, and a tick here would
-                    # reserve page 2 that belongs to the refill coordinator.
-                    if self._automatic_refill(task) and self._first_window_committed(actor, task_id):
-                        break
-                    # One coordinator tick visits each member at most once.
-                    # Cover the whole approved set in the initial automatic
-                    # window; an 8-request chunk would give early members a
-                    # second page before members 9..64 received their first.
-                    result = self.tick(
-                        actor, task_id,
-                        max_requests=64 if self._automatic_refill(task) else 8)
-                    # Automatic maintain-target tasks must leave approved
-                    # continuation cursors for the refill coordinator. One
-                    # committed page per branch is the initial candidate
-                    # window; draining the whole depth here would make the
-                    # first gap look like strategy exhaustion.
-                    if result['pagination_stopped'] or (
-                            self._automatic_refill(task)
-                            and self._initial_window_complete(result)):
-                        break
-                    if any(row['status'] == 'retry_pending' for row in result['outcomes']):
-                        retry_rounds += 1
-                        if retry_rounds < 3:
-                            continue
-                        break
-                    retry_rounds = 0
-                    if not result['network_attempts']:
-                        break
-                else:
-                    self.enqueue(actor, task_id)
-            except ServiceError:
-                # Progress remains authoritative in the ledger. Reads expose the
-                # pending/stopped state and a later retry or restart can resume.
-                continue
+    def _activation(self, actor, task_id):
+        """One page per turn; yield between branches, tasks and users."""
+        task = self.service.repository.get(actor, task_id)
+        identity = (actor, task_id, task.confirmed_revision, task.run_generation)
+        if (self._automatic_refill(task) or task.media_type == 'video') and self._first_window_committed(actor, task_id):
+            self._retry_rounds.pop(identity, None)
+            return False
+        try:
+            result = self.tick(actor, task_id, max_requests=1)
+        except ServiceError as error:
+            if error.code == 'SEARCH_BUSY':
+                from .search_scheduling import SearchRetry
+                return SearchRetry()
+            self._retry_rounds.pop(identity, None)
+            raise
+        if any(row.get('code') == 'SEARCH_BUSY' for row in result['outcomes']):
+            from .search_scheduling import SearchRetry
+            return SearchRetry()
+        if result['pagination_stopped'] or ((self._automatic_refill(task) or task.media_type == 'video')
+                                           and self._initial_window_complete(result)):
+            self._retry_rounds.pop(identity, None)
+            return False
+        if any(row['status'] == 'retry_pending' for row in result['outcomes']):
+            retries = self._retry_rounds.get(identity, 0) + 1
+            if retries >= 3:
+                self._retry_rounds.pop(identity, None)
+                return False
+            self._retry_rounds[identity] = retries
+            from .search_scheduling import SearchRetry
+            return SearchRetry(0.25 * 2 ** retries)
+        self._retry_rounds.pop(identity, None)
+        return bool(result['network_attempts'])
 
     @staticmethod
     def _automatic_refill(task):
@@ -159,14 +150,32 @@ class LocalFirstSearch:
 
     @staticmethod
     def _initial_window_complete(progress):
-        members = progress.get('members', ())
+        members = [m for m in progress.get('members', ()) if not m.get('initial_deferred')]
         return bool(members) and all(
             member.get('committed_pages', 0) >= 1 and not member.get('pending')
             for member in members)
 
     def _first_window_committed(self, actor, task_id):
-        members = read_retrieval_progress(self.repository, actor, task_id)['members']
-        return bool(members) and all(member['committed_pages'] >= 1 for member in members)
+        members = self._mark_initial_members(actor, task_id,
+            read_retrieval_progress(self.repository, actor, task_id)['members'])
+        return self._initial_window_complete({'members': members})
+
+    def _initial_ids(self, actor, task_id, approved=None):
+        task = self.service.repository.get(actor, task_id)
+        if task.media_type != 'image' or not self._automatic_refill(task):
+            return None
+        approved = approved or self.repository.get_browse_current(actor, task_id)
+        if approved is None:
+            return None
+        from .recall_strategy import initial_plan_ids
+        return initial_plan_ids(approved)
+
+    def _mark_initial_members(self, actor, task_id, members):
+        selected = self._initial_ids(actor, task_id)
+        if selected is None:
+            return members
+        return [{**member, 'initial_deferred': member['plan_id'] not in selected}
+                for member in members]
 
     def _fixture(self, fixture_path=None, capabilities_path=None):
         try:
@@ -212,7 +221,7 @@ class LocalFirstSearch:
                 aliases[binding.library_id].update(tokens)
             records = []
             for item in value['records']:
-                if (set(item) != {'binding_id', 'vector_id', 'values', 'scope', 'media'}
+                if (set(item) - {'search_text'} != {'binding_id', 'vector_id', 'values', 'scope', 'media'}
                         or item['binding_id'] not in bindings or not isinstance(item['values'], list)
                         or not isinstance(item['media'], list) or len(item['media']) > 4):
                     raise ValueError('invalid record')
@@ -222,7 +231,8 @@ class LocalFirstSearch:
                         raise ValueError('invalid media mapping')
                     media.append(MediaRecord(**entry))
                 records.append(LocalVectorRecord(bindings[item['binding_id']], item['vector_id'],
-                                                 tuple(item['values']), item['scope'], tuple(media)))
+                                                 tuple(item['values']), item['scope'], tuple(media),
+                                                 item.get('search_text', '')))
             templates = {key: frozenset(scopes) for key, scopes in value['filter_templates'].items()
                          if isinstance(scopes, list) and len(scopes) <= 64}
             if len(templates) != len(value['filter_templates']):
@@ -353,17 +363,21 @@ class LocalFirstSearch:
         for route, row in zip(preview.routes, view['routes']):
             row['options'] = [option for option, capability in zip(row['options'], route.options)
                               if (adapter.can_encode_reference(context, query_input, capability.binding)
-                                  if query_input else
+                                  if query_input and query_input.get('type') == 'reference_image' else
                                   adapter.can_encode_query(context, route.query_text, capability.binding))]
             row['availability'] = ('available' if row['options'] else
                                    'query_encoding_unavailable' if route.options else
                                    'no_available_index')
         return {**view, 'execution_enabled': True, 'mode': self.mode,
+                'execution_limits': {'max_calls': self.search_limits.max_calls,
+                    'max_hit_slots': self.search_limits.max_hit_slots,
+                    'scope': 'task_revision_generation'},
                 'source_policy': 'smart_authorized',
                 'note': ('本地测试图片的真实 CLIP 向量召回；候选仍须授权读取及 VLM 复判。'
                          if self.clip_encoder else
                          '仅本地显式词规则和测试向量；未批准、未执行、未接真实 Milvus/模型/图片。')}
 
+    @measured('search_preparation')
     def prepare(self, actor, task_id, *, routing_digest, choices):
         router, _, preview = self._preview(actor, task_id)
         if routing_digest != preview.routing_digest or not isinstance(choices, list):
@@ -376,6 +390,17 @@ class LocalFirstSearch:
             raise ServiceError('BRANCH_SELECTION_INCOMPLETE', 'Select an index for every query term', 422)
         epoch = self.repository.next_epoch(actor, task_id)
         plan = router.prepare(actor, task_id, preview=preview, choices=selected, epoch=epoch)
+        task = self.service.repository.get(actor, task_id)
+        if task.media_type == 'video':
+            # Manual and automatic approvals share the same frozen input and
+            # call limits. Never approve a first window that cannot be fixed.
+            hits = sum(member.plan.request.batch_size for member in plan.members)
+            if hits > MANIFEST_HIT_LIMIT:
+                raise ServiceError('INPUT_LIMIT', 'Initial video window exceeds candidate manifest capacity', 422)
+            spec = json.loads(task.confirmed_proposal_json)['query_spec']
+            limit = spec.get('refill_limits', {}).get('max_vlm_calls')
+            if limit is not None and hits * len(spec['video_conditions']['clauses']) > limit:
+                raise ServiceError('VIDEO_CALL_BUDGET', 'Initial video window exceeds confirmed call budget', 422)
         self.repository.put_proposal(actor, plan)
         return {'schema_version': 'local-first-search-proposal@1', 'task_id': task_id,
                 'proposal_digest': plan.proposal_digest, 'expected_task_version': plan.scope.task_version,
@@ -387,7 +412,8 @@ class LocalFirstSearch:
                              'batch_size': member.plan.request.batch_size} for member in plan.members],
                 'note': '待发起人确认；确认后仍需显式点击执行。本地测试向量，不是合格素材数。'}
 
-    def auto_start(self, actor, task_id, *, key):
+    @measured('search_dispatch')
+    def auto_start(self, actor, task_id, *, key, allowed_bindings=None):
         """Prepare, approve and queue only an unambiguous authorized plan."""
         task = self.service.repository.get(actor, task_id)
         try:
@@ -398,6 +424,8 @@ class LocalFirstSearch:
             current = None
         if (current is not None and current.scope.revision == task.confirmed_revision
                 and current.scope.generation == task.run_generation):
+            if allowed_bindings is not None and any(m.plan.request.binding.binding_id not in allowed_bindings for m in current.members):
+                raise ServiceError('AGENT_SOURCE_NOT_APPROVED', 'Plan exceeds confirmed source scope', 409)
             self.enqueue(actor, task_id)
             return {'status': 'queued', 'replayed': True,
                     'source_policy': 'smart_authorized',
@@ -405,6 +433,9 @@ class LocalFirstSearch:
                                          for member in current.members}),
                     'set_digest': current.proposal_digest}
         preview = self.preview(actor, task_id)
+        if allowed_bindings is not None:
+            for route in preview['routes']:
+                route['options'] = [o for o in route['options'] if o['binding_id'] in allowed_bindings]
         unavailable = [route for route in preview['routes'] if not route['options']]
         if unavailable:
             return {'status': 'unavailable', 'queries': [route['query_text'] for route in unavailable]}
@@ -414,11 +445,27 @@ class LocalFirstSearch:
         batch_cap = (min(8, max(1, task.target_count * 2))
                      if self._automatic_refill(task) else 8)
         options = [(route, option) for route in preview['routes'] for option in route['options']]
+        if self._automatic_refill(task):
+            allowed = set(json.loads(task.confirmed_proposal_json)['query_spec']['refill_policy']['approved_library_ids'])
+            options = [(route, option) for route, option in options if option['library_id'] in allowed]
+            if any(not any(r['branch_id'] == route['branch_id'] for r, _ in options)
+                   for route in preview['routes']):
+                return {'status': 'unavailable', 'reason': 'approved_source_scope',
+                        'queries': [route['query_text'] for route in preview['routes']]}
+
         if self._automatic_refill(task) and options:
             # The automatic first window is fixed as one candidate manifest,
             # which holds at most 100 hits. Split that budget across members:
             # 19 branches x 8 per page once stranded a real task at INPUT_LIMIT.
             batch_cap = min(batch_cap, max(1, MANIFEST_HIT_LIMIT // len(options)))
+        if task.media_type == 'video' and options:
+            spec = json.loads(task.confirmed_proposal_json)['query_spec']
+            limit = spec.get('refill_limits', {}).get('max_vlm_calls')
+            if limit is not None:
+                per_candidate = len(spec['video_conditions']['clauses'])
+                if limit < len(options) * per_candidate:
+                    raise ServiceError('VIDEO_CALL_BUDGET', 'Initial video window exceeds confirmed call budget', 422)
+                batch_cap = min(batch_cap, max(1, limit // (len(options) * per_candidate)))
         choices = [{'branch_id': route['branch_id'], 'binding_id': option['binding_id'],
                     'batch_size': min(batch_cap, option['max_batch_size'])}
                    for route, option in options]
@@ -442,6 +489,8 @@ class LocalFirstSearch:
         return {'task_id': task_id, 'set_digest': approved.proposal_digest,
                 'epoch': approved.epoch, 'task_version': approved.scope.task_version,
                 'mode': self.mode, 'status': 'approved',
+                'execution_limits': {'max_calls': self.search_limits.max_calls,
+                                     'max_hit_slots': self.search_limits.max_hit_slots},
                 'note': '已确认整组计划；可由持久化后台执行器继续。'}, replay
 
     def _adapter_for_plan(self, actor, task_id, approved):
@@ -469,35 +518,66 @@ class LocalFirstSearch:
                             else depth * member_count)
         base_depth, remainder = divmod(candidate_budget, member_count)
         context = AccessContext(actor, task_id, 'retrieval', 'current')
+        from .query_branches import compile_query_branches
+        logical = compile_query_branches(spec)
+        branches = {b['branch_id']: b['query_text'] for b in logical['branches']}
+        # Existing approved cursors retain their original ranking/window policy.
+        # Only a plan prepared with this compiler preview opts into the new one.
+        current_policy = all(member.logical_preview_digest == logical['preview_digest']
+                             for member in approved.members)
         return LocalVectorRetrieval(self._authority(), libraries=libraries, query_vectors=vectors,
             approved=tuple(ApprovedFixture(context, member.plan.request, (), min(
                 depth, base_depth + (index < remainder)))
                 for index, member in enumerate(approved.members)), records=records,
             filter_templates=templates, cursor_secret=self.cursor_secret,
-            query_rules=rules, query_encoder=None if using_legacy else self)
+            query_rules=rules, query_encoder=None if using_legacy else self,
+            query_texts={member.plan.request.plan_id: branches[member.branch_id]
+                         for member in approved.members}
+            if current_policy and (spec.get('query_input') or {}).get('type') != 'reference_image' else {},
+            progressive=current_policy and automatic_refill and task.media_type == 'image')
 
+    @measured('search_activation')
     def tick(self, actor, task_id, *, max_requests):
         approved = self.repository.get_current(actor, task_id)
         if approved is None:
             raise ServiceError('PLAN_NOT_APPROVED', 'Explicit whole-set approval required', 409)
         gateway = self._adapter_for_plan(actor, task_id, approved)
-        result = RetrievalCoordinator(self.repository, gateway).tick(actor, task_id,
-            max_requests=max_requests)
+        task = self.service.repository.get(actor, task_id)
+        strict = 'retrieval_execution' in json.loads(task.confirmed_proposal_json)['query_spec']
+        result = RetrievalCoordinator(self.repository, gateway, budget=self.search_budget, strict_unknown=strict).tick(actor, task_id,
+            max_requests=max_requests, plan_ids=self._initial_ids(actor, task_id, approved))
         return {**result, 'mode': self.mode,
                 'note': '仅记录原始检索页；未清洗、未计算有效素材数。'}
 
     def progress(self, actor, task_id):
         reader = getattr(self.service.repository, 'get_task_read_binding', self.service.repository.get)
         task = reader(actor, task_id)
-        progress = read_retrieval_progress(self.repository, actor, task_id)
+        progress = read_retrieval_progress(self.repository, actor, task_id, browsing=task.media_type == 'video')
+        progress['members'] = self._mark_initial_members(actor, task_id, progress['members'])
+        if any('initial_deferred' in m for m in progress['members']):
+            progress['source_strategy'] = {
+                'policy': 'ranked_first_index_per_query@1',
+                'initial_indexes': sum(not m['initial_deferred'] for m in progress['members']),
+                'deferred_indexes': sum(m['initial_deferred'] for m in progress['members']),
+                'ranking_evidence': 'authorized_catalog_order'}
         progress['initial_window_complete'] = (
             progress['pagination_stopped'] or (
-                self._automatic_refill(task)
+                (self._automatic_refill(task) or task.media_type == 'video')
                 and bool(progress['members'])
                 and all(member['committed_pages'] >= 1
                         and member['status'] != 'pending'
-                        for member in progress['members'])))
+                        for member in progress['members'] if not member.get('initial_deferred'))))
+        approved = self.repository.get_browse_current(actor, task_id)
+        if approved is not None:
+            if any(progress.get(name) != value for name, value in (('revision', approved.scope.revision), ('generation', approved.scope.generation), ('task_version', approved.scope.task_version))):
+                raise ServiceError('PLAN_NOT_CURRENT', 'Search progress scope changed', 409)
+            progress['execution_budget'] = self.search_budget.snapshot(approved.scope)
+            progress['execution_queue'] = self.scheduler.status(actor, task_id)
         return progress
+
+    def recall(self, actor, task_id):
+        from .retrieval_recall import read_recall
+        return read_recall(self, actor, task_id)
 
     def candidates(self, actor, task_id, *, limit=200, cursor=None, query='', changes=False):
         approved = self.repository.get_browse_current(actor, task_id)
@@ -626,27 +706,32 @@ class LocalFirstSearch:
             return content_type, content
         raise ServiceError('PREVIEW_UNAVAILABLE', 'Candidate image bytes are unavailable', 404)
 
+    @measured('candidate_validation')
     def _candidate_manifest_proposal(self, actor, task_id):
         task = self.service.repository.get(actor, task_id)
+        bind_timing(task_id=task_id, revision=task.confirmed_revision,
+                    generation=task.run_generation, task_version=task.task_version)
         approved = self.repository.get_browse_current(actor, task_id)
         if approved is None:
             raise ServiceError('PLAN_NOT_APPROVED', 'Search plan is not approved', 409)
         downstream = task.task_version > approved.scope.task_version
         progress = (None if downstream else
                     read_retrieval_progress(self.repository, actor, task_id))
+        if progress is not None:
+            progress['members'] = self._mark_initial_members(actor, task_id, progress['members'])
         if (progress is not None and not progress['pagination_stopped']
-                and not (self._automatic_refill(task)
+                and not ((self._automatic_refill(task) or task.media_type == 'video')
                          and bool(progress['members'])
                          and all(member['committed_pages'] >= 1
                                  and member['status'] != 'pending'
-                                 for member in progress['members']))):
+                                 for member in progress['members'] if not member.get('initial_deferred')))):
             raise ServiceError('SEARCH_IN_PROGRESS', 'Search must finish before fixing candidates', 409)
         pages = self.repository.list_committed_pages(
             actor, approved, allow_downstream=downstream)
         sourced_hits = tuple(hit for _, page in pages for hit in page.hits)
         adapter = self._adapter_for_plan(actor, task_id, approved)
         context = AccessContext(actor, task_id, 'retrieval', 'current')
-        resolutions = adapter.resolve_hits(context, sourced_hits)
+        resolutions = timed_call('candidate_resolution', adapter.resolve_hits, context, sourced_hits)
         if len(resolutions) != len(sourced_hits):
             raise ServiceError('STORAGE_CORRUPT', 'Candidate resolution count changed', 500)
         seen = (self.repository.candidate_manifest_candidate_ids(actor, task_id, approved)
@@ -660,6 +745,7 @@ class LocalFirstSearch:
         quota_task = any(origin_groups.values())
         query_input = json.loads(task.confirmed_proposal_json)['query_spec'].get('query_input')
         excluded_digest = (query_input['digest'] if query_input
+                           and query_input.get('type') == 'reference_image'
                            and query_input['exclude_exact_content'] else None)
         for resolution in resolutions:
             media = resolution.media
@@ -677,6 +763,12 @@ class LocalFirstSearch:
                 raise ServiceError('MAPPING_CONFLICT', 'Candidate identity maps to multiple versions', 409)
             else:
                 old[1].append(resolution.hit)
+        if task.media_type == 'video':
+            from .whole_video import require_whole_video_records
+            try:
+                require_whole_video_records(tuple(media for media, _ in grouped.values()))
+            except ValueError as exc:
+                raise ServiceError('MEDIA_MAPPING_CONFLICT', 'Original video identities conflict', 409) from exc
         # Frozen here so every later check, count and rebuild sees the same groups.
         items = []
         for media, hits in grouped.values():

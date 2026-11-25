@@ -3,6 +3,8 @@ from dataclasses import asdict, dataclass
 import json
 
 from .errors import ServiceError
+from .conversation_timing import timed_call
+from .pipeline_timing import measured
 from .integration_models import AccessContext, IndexBinding, QueryVector, SearchRequest
 from .query_branches import compile_query_branches
 from .query_spec import digest
@@ -58,6 +60,7 @@ class PhysicalQueryPreparer:
                 raise ValueError('invalid text query capability registration')
             self.capabilities[capability.binding] = capability
 
+    @measured('query_preparation')
     def prepare(self, actor, task_id, *, expected_scope: RetrievalScope,
                 preview_digest: str, branch_id: str, binding_id: str,
                 epoch: int, batch_size: int, authorization_version: str) -> PreparedQuery:
@@ -107,9 +110,9 @@ class PhysicalQueryPreparer:
             encoder = getattr(self.embeddings, 'encode_reference', None)
             if not callable(encoder):
                 raise ServiceError('QUERY_UNSUPPORTED', 'No verified reference-image encoder', 422)
-            vector = encoder(context, query_input, binding)
+            vector = timed_call('query_encoding', encoder, context, query_input, binding)
         else:
-            vector = self.embeddings.encode_query(context, branch['query_text'], binding)
+            vector = timed_call('query_encoding', self.embeddings.encode_query, context, branch['query_text'], binding)
         if not isinstance(vector, QueryVector):
             raise ServiceError('ENCODER_MISMATCH', 'Invalid encoder response', 422)
         plan_id = 'plan_' + digest({

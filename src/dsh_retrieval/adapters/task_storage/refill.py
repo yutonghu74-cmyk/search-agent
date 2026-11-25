@@ -19,6 +19,18 @@ _ACTIVE_RUNS = {RunStatus.PLANNING, RunStatus.RUNNING, RunStatus.AWAITING_INPUT}
 _FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")
 
 
+def ensure_execution_stops(db):
+    """Shared stop ledger schema for refill and fixed-input publication."""
+    db.execute("""CREATE TABLE IF NOT EXISTS refill_execution_stops (
+        task_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        generation INTEGER NOT NULL,
+        stop_reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(task_id,revision,generation)
+    )""")
+
+
 class SQLiteRefillReservationRepository:
     """Atomically assigns one iteration to each current-scope query position.
 
@@ -122,14 +134,7 @@ class SQLiteRefillReservationRepository:
                     completed_at TEXT,
                     UNIQUE(task_id,revision,generation,iteration)
                 )""")
-                db.execute("""CREATE TABLE IF NOT EXISTS refill_execution_stops (
-                    task_id TEXT NOT NULL,
-                    revision INTEGER NOT NULL,
-                    generation INTEGER NOT NULL,
-                    stop_reason TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(task_id,revision,generation)
-                )""")
+                ensure_execution_stops(db)
                 # Upgrade reservations created by the previous slice without
                 # losing their commit-before-dispatch guarantee.
                 db.execute("""INSERT OR IGNORE INTO refill_dispatch_outbox
@@ -321,6 +326,11 @@ class SQLiteRefillReservationRepository:
                 used = db.execute("""SELECT COALESCE(SUM(vlm_calls),0)
                     FROM refill_iteration_metrics WHERE task_id=? AND revision=? AND generation=?""",
                     row[:3]).fetchone()[0]
+                if task.media_type == "video":
+                    from ...video_initial import initial_video_calls
+                    used += initial_video_calls(db, row[:3])
+                from ...confirmed_terms_contract import initial_cleaning_calls
+                used += initial_cleaning_calls(db, *row[:3])
                 if max_vlm_calls is not None and used + vlm_calls > max_vlm_calls:
                     now = datetime.now(UTC).isoformat()
                     db.execute("""UPDATE refill_iteration_metrics SET candidate_count=?,
@@ -416,9 +426,13 @@ class SQLiteRefillReservationRepository:
                            "new_unique_accepted": (None if row[2] is None else
                                                     max(0, row[2] - row[1]))}
                           for row in rows]
+                from ...video_initial import initial_video_calls
+                initial_calls = initial_video_calls(db, scope) if task.media_type == 'video' else 0
+                from ...confirmed_terms_contract import initial_cleaning_calls
+                initial_calls += initial_cleaning_calls(db, *scope)
                 return {"issued_rounds": issued,
                         "completed_rounds": sum(row[3] in {"empty", "result"} for row in rows),
-                        "vlm_calls": sum(row[5] for row in rows),
+                        "vlm_calls": sum(row[5] for row in rows) + initial_calls,
                         "stagnant_rounds": stagnant,
                         "stop_reason": stop[0] if stop else None,
                         "rounds": rounds}
@@ -426,7 +440,7 @@ class SQLiteRefillReservationRepository:
             raise ServiceError("STORAGE_UNAVAILABLE", "refill execution evidence unavailable", 503,
                                retryable=True) from exc
 
-    def record_execution_stop(self, actor, task_id, reason):
+    def record_execution_stop(self, actor, task_id, reason, *, expected_revision=None, expected_generation=None):
         if reason not in {"EXECUTION_LIMIT_REACHED", "VLM_CALL_LIMIT_REACHED",
                           "NO_PROGRESS", "SEARCH_STRATEGIES_EXHAUSTED"}:
             raise ValueError("invalid refill stop reason")
@@ -436,6 +450,10 @@ class SQLiteRefillReservationRepository:
                 memory = self.tasks._load(db.execute(
                     "SELECT format,payload FROM local_ledger WHERE id=1").fetchone())
                 task = self._authorize_task(memory, actor, task_id, "approve")
+                if ((expected_revision is not None or expected_generation is not None)
+                        and (task.confirmed_revision, task.run_generation) !=
+                            (expected_revision, expected_generation)):
+                    raise ServiceError('REVISION_CONFLICT', 'refill stop scope changed', 409)
                 db.execute("""INSERT OR IGNORE INTO refill_execution_stops
                     (task_id,revision,generation,stop_reason,created_at)
                     VALUES (?,?,?,?,?)""", (task_id, task.confirmed_revision,

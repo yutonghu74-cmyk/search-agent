@@ -8,6 +8,7 @@ from .adapters.cleaning import ApprovedManifestAccess, GenericCleaningExecutor
 from .errors import ServiceError
 from .multi_rule_contracts import require_released_cleaning_job
 from .released_detectors import ReleasedDetectorRegistry
+from .cleaning_usage import CleaningUsageRecorder
 
 
 def prepare_released_multi_rule(repo, actor, task_id, manifest_ref, recipe, *, registry):
@@ -63,8 +64,12 @@ def run_approved_multi_rule(repo, actor, task_id, operation_id, *, gateway, regi
         partial = (repo.get_cleaning_step_checkpoint(actor, task_id, operation_id)
                    if callable(getattr(repo, 'get_cleaning_step_checkpoint', None)) else None)
         save_step = getattr(repo, 'save_cleaning_step_checkpoint', None)
+        usage = (CleaningUsageRecorder(repo.tasks.path, job.binding,
+                    lambda: repo.get_current(actor, task_id, operation_id))
+                 if getattr(getattr(repo, 'tasks', None), 'path', None) is not None else None)
         result = GenericCleaningExecutor(guard=access, reader=access,
                                          detectors=detectors).run(job, completed=completed,
+            usage=usage,
             checkpoint=lambda item: repo.save_cleaning_checkpoint(actor, task_id, operation_id, item),
             partial=partial,
             step_checkpoint=(lambda candidate, step, verdicts: save_step(

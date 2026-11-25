@@ -6,7 +6,7 @@ All executable material is rebuilt from the current task and the server-owned
 released detector registry.
 """
 
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 
 from .adapters.cleaning.runner import MAX_CANDIDATE_BYTES
 from .errors import ServiceError
@@ -14,6 +14,7 @@ from .integration_models import AccessContext
 from .multi_rule_pipeline import prepare_released_multi_rule, run_approved_multi_rule
 from .recipe_bridge import compile_confirmed_recipe
 from .released_detectors import ReleasedDetectorRegistry
+from .whole_video import confirmed_video_spec
 
 
 class ConfirmedCleaningService:
@@ -108,6 +109,12 @@ class ConfirmedCleaningService:
             if execution and execution.get('model') and estimated_calls > 400:
                 raise ServiceError('VLM_CALL_BUDGET',
                                    'This cleaning batch exceeds 400 VLM checks; reduce the candidate batch or split the request', 422)
+            if task.media_type == 'video':
+                spec = confirmed_video_spec(task)
+                estimated_calls = len(manifest.proposal.items) * len(spec['video_conditions']['clauses'])
+                limit = spec.get('refill_limits', {}).get('max_vlm_calls')
+                if limit is not None and estimated_calls > limit:
+                    raise ServiceError('VIDEO_CALL_BUDGET', 'Video cleaning exceeds the confirmed call budget', 422)
             proposal = prepare_released_multi_rule(
                 self.repository, actor, task_id, manifest_ref, recipe,
                 registry=registry,
@@ -126,7 +133,7 @@ class ConfirmedCleaningService:
                                 if node['backend_ref'] == step.backend_ref), None)}
                            for step in proposal.recipe.steps),
             "unknown_policy": "hold_for_review",
-            "estimated_vlm_calls": estimated_calls if execution and execution.get('model') else None,
+            "estimated_vlm_calls": estimated_calls if task.media_type == 'video' or execution and execution.get('model') else None,
             "confirmation_note": (
                 "确认仅批准当前版本、候选清单与发布配方；模型配置或规则变化后"
                 "旧批准不能执行。未知和失败不计入有效素材。"
@@ -280,3 +287,22 @@ class ConfirmedCleaningService:
         if content_type is None:
             raise ServiceError('PREVIEW_UNAVAILABLE', 'Cleaning candidate is not an image', 404)
         return content_type, content
+
+
+    @contextmanager
+    def open_candidate_video(self, actor, task_id, candidate_id):
+        from .video_media import open_verified_video, inspect_video_file, VideoResourcePolicy
+        task = self.repository.tasks.get(actor, task_id)
+        if task.media_type != 'video':
+            raise ServiceError('FEATURE_NOT_SUPPORTED', 'Video task required', 422)
+        candidate, ref = self.repository.get_current_preview_candidate(actor, task_id, candidate_id)
+        context = AccessContext(actor, task_id, 'candidate_preview', 'current')
+        def guard():
+            if self.repository.get_current_preview_candidate(actor, task_id, candidate_id) != (candidate, ref):
+                raise ServiceError('REVISION_CONFLICT', 'Video result changed', 409)
+        policy = getattr(self.gateway, 'video_policy', VideoResourcePolicy())
+        with open_verified_video(self.gateway, context, ref, candidate.content_digest, policy=policy, guard=guard) as file:
+            metadata = inspect_video_file(file, inspector=getattr(self.gateway, 'video_inspector', None),
+                file_inspector=getattr(self.gateway, 'video_file_inspector', None), policy=policy)
+            guard()
+            yield file, metadata, guard

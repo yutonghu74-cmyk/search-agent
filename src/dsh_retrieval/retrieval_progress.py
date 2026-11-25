@@ -4,6 +4,7 @@ from .adapters.task_storage.plan_sets import SQLitePlanSetApprovalRepository
 from .errors import ServiceError
 from .local_catalog import LocalCatalogSource
 from .text_catalog_config import CatalogConfigScope
+from .conversation_timing import timed_call
 
 
 def build_local_demo_progress_repository(path, *, projects, source_path):
@@ -29,12 +30,25 @@ def build_local_demo_progress_repository(path, *, projects, source_path):
     return SQLitePlanSetApprovalRepository(path, projects=DemoProjects(), authorization=Authorization())
 
 
-def read_retrieval_progress(repository, actor, task_id):
-    approved = repository.get_current(actor, task_id)
+def read_retrieval_progress(repository, actor, task_id, *, browsing=False):
+    return timed_call('retrieval_progress_read', _read_retrieval_progress,
+                      repository, actor, task_id, browsing=browsing)
+
+
+def _read_retrieval_progress(repository, actor, task_id, *, browsing=False):
+    snapshot_reader = getattr(repository, 'get_progress_snapshot', None)
+    if callable(snapshot_reader):
+        approved, rows = snapshot_reader(actor, task_id, browsing=browsing)
+    else:
+        # Other storage adapters retain their existing two-read contract.
+        reader = repository.get_browse_current if browsing else repository.get_current
+        approved = reader(actor, task_id)
+        rows = (None if approved is None else
+                repository.get_progress(actor, approved, reading=True) if browsing else
+                repository.get_progress(actor, approved))
     if approved is None:
         return {'schema_version': 'retrieval-progress@1', 'task_id': task_id,
                 'status': 'unapproved', 'members': [], 'pagination_stopped': False}
-    rows = repository.get_progress(actor, approved)
     if (not isinstance(rows, tuple) or len(rows) != len(approved.members)
             or any(row.plan_id != member.plan.request.plan_id
                    for row, member in zip(rows, approved.members))):

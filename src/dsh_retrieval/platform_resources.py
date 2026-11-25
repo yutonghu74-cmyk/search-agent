@@ -26,7 +26,8 @@ class DatasetVersionRef:
 
 class PlatformResources:
     def __init__(self, *, tasks, projects, project_datasets, user_datasets,
-                 libraries, resolve_hits, search, open_media, media_version, cursor_secret=None):
+                 libraries, resolve_hits, search, open_media, media_version, cursor_secret=None, whole_video_bindings=None):
+        self.whole_video_bindings = whole_video_bindings
         self.cursor_secret = cursor_secret or os.urandom(32)
         if not isinstance(self.cursor_secret, bytes) or len(self.cursor_secret) < 32:
             raise ValueError("persistent cursor secret must contain at least 32 bytes")
@@ -101,7 +102,7 @@ class PlatformResources:
         fingerprint = digest({'tenant': context.actor.tenant_id, 'user': context.actor.user_id,
             'task': context.task_id, 'project': task.project_id,
             'revision': getattr(task, 'confirmed_revision', None), 'generation': getattr(task, 'run_generation', None),
-            'task_version': getattr(task, 'task_version', None), 'request': asdict(replace(request, cursor=None)),
+            'cursor_scope': 'approved-query@2', 'request': asdict(replace(request, cursor=None)),
             'versions': sorted(versions)})
         backend_request = replace(request, cursor=self._cursor(request.cursor, fingerprint))
         # Backend callback must constrain recall to these versions, before querying.
@@ -135,11 +136,22 @@ class PlatformResources:
                     raise ServiceError('ACCESS_DENIED', 'mapped media is outside project scope', 403)
         if self._scope(context)[1] != allowed:
             raise ServiceError('AUTHORIZATION_CHANGED', 'mapping authorization changed', 409)
+        if getattr(task, 'media_type', 'image') == 'video':
+            from .whole_video import canonical_whole_video_record, require_whole_video_records
+            verified = tuple(self.whole_video_bindings()) if callable(self.whole_video_bindings) else ()
+            if any(hit.binding not in verified for hit in hits):
+                raise ServiceError('VIDEO_SOURCE_UNVERIFIED', 'Whole-video source binding is not verified', 422)
+            try:
+                result = tuple(replace(item, media=canonical_whole_video_record(item.media,
+                    source_unit_type='whole_video')) if item.media is not None else item for item in result)
+                require_whole_video_records(tuple(item.media for item in result if item.media is not None))
+            except ValueError as exc:
+                raise ServiceError('PLATFORM_MAPPING_INVALID', 'Conflicting original-video mapping', 503) from exc
         return result
 
     @contextmanager
     def open_read(self, context, media_ref, max_bytes):
-        if type(max_bytes) is not int or not 0 < max_bytes <= 100_000_000:
+        if type(max_bytes) is not int or not 0 < max_bytes <= 2 * 1024**3:
             raise ServiceError('MEDIA_LIMIT_EXCEEDED', 'invalid media read limit', 422)
         self.require_access(context, media_ref, context.purpose)
         task, allowed = self._scope(context)

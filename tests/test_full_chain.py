@@ -42,7 +42,9 @@ from dsh_retrieval.models import Actor, RunStatus, TaskLifecycle
 
 
 # A valid JPEG magic sequence so every image-only gate stays open end to end.
-IMAGE = b"\xff\xd8\xffsynthetic-jpeg-test"
+from image_fixtures import image_bytes
+
+IMAGE = image_bytes()
 IMAGE_DIGEST = "sha256:" + sha256(IMAGE).hexdigest()
 
 
@@ -247,6 +249,27 @@ class FullChainTest(unittest.TestCase):
         self.assertEqual(len(representative.candidate_ids), 2)
         self.assertEqual(len(set(representative.candidate_ids)), 2)
         self.assertEqual(representative.content_digest, IMAGE_DIGEST)
+        audit = duplicate.repo.get_result_read_page(
+            duplicate.actor, duplicate.task_id, view_type='duplicate')
+        self.assertEqual(len(audit['items']), 1)
+        self.assertEqual(audit['items'][0]['representative_candidate_id'],
+                         representative.candidate_id)
+        self.assertEqual(audit['items'][0]['elimination_stage'], 'deduplication')
+        self.assertEqual(audit['items'][0]['reasons'][0]['reason_code'], 'EXACT_DUPLICATE')
+        self.assertEqual(duplicate.f.reopen().get_result_read_page(
+            duplicate.actor, duplicate.task_id, view_type='duplicate'), audit)
+        with sqlite3.connect(duplicate.repo.tasks.path) as db:
+            db.execute("DELETE FROM task_result_read_views WHERE task_id=? AND view_type='duplicate'",
+                       (duplicate.task_id,))
+            db.execute("DELETE FROM task_result_read_items WHERE task_id=? AND view_type='duplicate'",
+                       (duplicate.task_id,))
+        with self.assertRaises(ServiceError) as missing:
+            duplicate.repo.get_result_read_page(duplicate.actor, duplicate.task_id,
+                                                view_type='duplicate')
+        self.assertEqual(missing.exception.code, 'READ_PROJECTION_REQUIRED')
+        duplicate.repo.rebuild_asset_read_bindings()
+        self.assertEqual(duplicate.repo.get_result_read_page(
+            duplicate.actor, duplicate.task_id, view_type='duplicate'), audit)
 
         delivery = ImageDeliveryService(duplicate.repo, gateway)
         package, replayed = delivery.prepare(

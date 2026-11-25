@@ -143,13 +143,13 @@ class CandidateStorageTest(unittest.TestCase):
 
     def test_serialization_failure_has_no_partial_publication(self):
         before = self.state()
-        with patch("dsh_retrieval.adapters.task_storage.candidates.dump_state", side_effect=ServiceError("STORAGE_LIMIT", "full", 507)):
+        with patch("dsh_retrieval.adapters.task_storage.ledger_rows.prepare_state", side_effect=ServiceError("STORAGE_LIMIT", "full", 507)):
             self.assert_code("STORAGE_LIMIT", self.confirm)
         self.assertEqual(self.state(), before)
 
     def test_get_does_not_write(self):
         manifest, _ = self.confirm()
-        with patch("dsh_retrieval.adapters.task_storage.candidates.dump_state", side_effect=AssertionError("write")):
+        with patch("dsh_retrieval.adapters.task_storage.ledger_rows.prepare_state", side_effect=AssertionError("write")):
             self.assertEqual(self.repo.get(self.f.actor, self.f.tid, manifest.manifest_ref), manifest)
 
     def test_corrupt_storage_is_not_reset(self):

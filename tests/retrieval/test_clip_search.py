@@ -113,6 +113,15 @@ class CLIPTextSearchClientTest(unittest.TestCase):
             callback()
         self.assertEqual(caught.exception.code, code)
 
+    def test_declared_group_rejects_hits_from_other_shards(self):
+        self.endpoint = replace(self.endpoint, declared_shards=('shard_0.db', 'shard_1.db'))
+        valid, _ = self.client([response()])
+        self.assertEqual(len(valid.search_text(self.context, self.request).matches), 1)
+        payload = response()
+        payload['matches'][0]['shard'] = 'another_shard.db'
+        invalid, _ = self.client([payload])
+        self.assert_code('SEARCH_RESPONSE_INVALID', lambda: invalid.search_text(self.context, self.request))
+
     def test_builds_bounded_form_and_projects_source_fields(self):
         client, transport = self.client([response()])
         batch = client.search_text(self.context, self.request)
@@ -199,6 +208,20 @@ class CLIPTextSearchClientTest(unittest.TestCase):
             loaded = load_clip_search_endpoints(path, self.registry,
                 environ={"CLIP_BASE_URL": "http://clip-search.invalid:4444"})
             self.assertEqual(loaded, (self.endpoint,))
+            catalog = dict(schema='image-shard-catalog@1', datasets=[dict(
+                library_id=self.binding.library_id, index_version=self.binding.index_version,
+                shards=[dict(shard_id=str(i), file_name=f'shard_{i}.db', status='ready')
+                        for i in range(3)])])
+            declared = dict(schema='clip-search-endpoints@1', entries=[entry], shard_catalog=catalog)
+            path.write_text(json.dumps(declared))
+            self.assert_code('SHARD_COVERAGE_INCOMPLETE', lambda: load_clip_search_endpoints(
+                path, self.registry, environ={'CLIP_BASE_URL': 'http://clip-search.invalid:4444'}))
+            catalog['datasets'][0]['shards'].pop()
+            path.write_text(json.dumps(declared))
+            self.assertEqual(load_clip_search_endpoints(path, self.registry,
+                environ={'CLIP_BASE_URL': 'http://clip-search.invalid:4444'}),
+                (replace(loaded[0], declared_shards=('shard_0.db', 'shard_1.db')),))
+
             self.assertNotIn("clip-search.invalid", repr(loaded))
             for broken in ({**entry, "model_id": "guessed-model"},
                            {**entry, "dataset_path": "relative/path"},

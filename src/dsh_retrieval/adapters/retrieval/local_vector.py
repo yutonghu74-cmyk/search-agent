@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import unicodedata
 
 from ...errors import ServiceError
@@ -31,6 +32,7 @@ class LocalVectorRecord:
     values: tuple[float, ...]
     scope: str
     media: tuple[MediaRecord, ...] = ()
+    search_text: str = ""
 
 
 class LocalVectorRetrieval(SimulatedRetrieval):
@@ -51,7 +53,7 @@ class LocalVectorRetrieval(SimulatedRetrieval):
                  filter_templates: dict[str, frozenset[str]],
                  cursor_secret: bytes,
                  query_rules: tuple[tuple[IndexBinding, tuple[str, ...], QueryVector], ...] = (),
-                 query_encoder=None):
+                 query_encoder=None, query_texts=None, progressive=False):
         if not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32:
             raise ValueError("stable cursor_secret must contain at least 32 bytes")
         if not filter_templates or any(not isinstance(key, str) or not key
@@ -65,7 +67,8 @@ class LocalVectorRetrieval(SimulatedRetrieval):
         mappings = {}
         for record in records:
             key = (record.binding, record.vector_id)
-            if (record.binding not in bindings or type(record.vector_id) not in (str, int)
+            if (not isinstance(record.search_text, str) or len(record.search_text) > 10000
+                    or record.binding not in bindings or type(record.vector_id) not in (str, int)
                     or not record.vector_id and type(record.vector_id) is str
                     or key in seen or not isinstance(record.scope, str) or not record.scope
                     or record.binding.metric not in ("COSINE", "IP", "L2")
@@ -94,6 +97,13 @@ class LocalVectorRetrieval(SimulatedRetrieval):
                 raise ValueError("zero-norm local query rule")
         self._query_rules = query_rules
         self._query_encoder = query_encoder
+        if type(progressive) is not bool:
+            raise ValueError('invalid progressive search policy')
+        self._progressive = progressive
+        self._query_texts = dict(query_texts or {})
+        if any(not isinstance(k, str) or not isinstance(v, str) or not v.strip()
+               for k, v in self._query_texts.items()):
+            raise ValueError('invalid approved query texts')
         self._records = tuple(records)
         self._templates = dict(filter_templates)
         self._cursor_secret = cursor_secret
@@ -103,6 +113,12 @@ class LocalVectorRetrieval(SimulatedRetrieval):
                           str(record.vector_id), record.values, record.scope)
                          for record in records)),
         )
+        if any(record.search_text for record in records) and self._query_texts:
+            snapshot_data += ('hybrid-rrf@1', tuple(sorted(self._query_texts.items())),
+                              tuple((repr(r.binding), type(r.vector_id).__name__,
+                                     str(r.vector_id), r.search_text) for r in records))
+        if progressive:
+            snapshot_data += ('progressive-window@1',)
         self._snapshot = "local:" + hashlib.sha256(repr(snapshot_data).encode()).hexdigest()
 
     def encode_query(self, context: AccessContext, text: str, binding: IndexBinding) -> QueryVector:
@@ -222,10 +238,39 @@ class LocalVectorRetrieval(SimulatedRetrieval):
         reverse = request.binding.metric != "L2"
         ranked.sort(key=lambda pair: (pair[0] if not reverse else -pair[0],
                                       type(pair[1].vector_id).__name__, str(pair[1].vector_id)))
+        # Metadata is optional. Missing metadata retains pure vector retrieval;
+        # never manufacture captions from identifiers or media locations.
+        text = self._query_texts.get(request.plan_id)
+        if text:
+            tokens = set(re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]',
+                                    unicodedata.normalize('NFKC', text).casefold()))
+            lexical = []
+            for vector_rank, (score, record) in enumerate(ranked, 1):
+                words = set(re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]',
+                                       unicodedata.normalize('NFKC', record.search_text).casefold()))
+                overlap = len(tokens & words)
+                if overlap:
+                    lexical.append((overlap, vector_rank, record.vector_id))
+            lexical.sort(key=lambda row: (-row[0], row[1]))
+            lexical_ranks = {row[2]: rank for rank, row in enumerate(lexical, 1)}
+            if lexical:
+                # Reciprocal rank fusion keeps exact identifiers and semantic
+                # matches in one stable, identity-unique candidate stream.
+                fused = [(1 / (60 + rank) + (
+                    1 / (60 + lexical_ranks[record.vector_id])
+                    if record.vector_id in lexical_ranks else 0), rank, score, record)
+                    for rank, (score, record) in enumerate(ranked, 1)]
+                fused.sort(key=lambda row: (-row[0], row[1]))
+                ranked = [(score, record) for _, _, score, record in fused]
         limit = min(len(ranked), fixture.depth_limit)
         if offset > 0 and offset >= limit:
             raise ServiceError("CURSOR_INVALID", "Cursor exceeds searchable depth", 409)
-        end = min(offset + request.batch_size, limit)
+        # Grow candidate windows, never hard filters or approved query scope.
+        # The immutable request batch size remains the upper bound. Offset is
+        # signed, so replay/restart reconstruct the exact same window.
+        page_size = (min(request.batch_size, max(1, request.batch_size // 2) + offset)
+                     if self._progressive else request.batch_size)
+        end = min(offset + page_size, limit)
         hits = tuple(SearchHit(request.binding, record.vector_id, score)
                      for score, record in ranked[offset:end])
         if end < limit:

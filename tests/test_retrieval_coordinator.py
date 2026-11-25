@@ -63,6 +63,17 @@ class CoordinatorTest(unittest.TestCase):
     def tick(self, **kwargs):
         return self.coordinator.tick(self.fixture.actor, self.fixture.task_id, **kwargs)
 
+    def test_initial_subset_defers_others_and_cannot_page_twice(self):
+        selected = frozenset({self.approved.members[0].plan.request.plan_id})
+        result = self.tick(max_requests=2, plan_ids=selected)
+        self.assertEqual(result['network_attempts'], 1)
+        self.assertEqual([m['initial_deferred'] for m in result['members']], [False, True])
+        self.assertEqual(self.tick(max_requests=2, plan_ids=selected)['network_attempts'], 0)
+        self.assertEqual(len(self.calls), 1)
+        with self.assertRaises(ServiceError):
+            self.tick(plan_ids=frozenset({'outside-approved-plan'}))
+        self.assertEqual(len(self.calls), 1)
+
     def test_two_members_isolated_and_terminal_not_dispatched(self):
         result = self.tick(max_requests=2)
         self.assertFalse(result['pagination_stopped'])

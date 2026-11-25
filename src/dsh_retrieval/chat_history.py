@@ -46,7 +46,9 @@ def sync(db, memory, *, task_ids=None):
         rows.append((task.task_id, task.tenant_id, task.owner_user_id, task.project_id,
                      task.dimension_id, item['created_at'], json.dumps(item, ensure_ascii=False)))
     if targets is None:
-        db.execute('DELETE FROM chat_read_summaries')
+        retained = {row[0] for row in rows}
+        existing = {row[0] for row in db.execute('SELECT chat_id FROM chat_read_summaries')}
+        db.executemany('DELETE FROM chat_read_summaries WHERE chat_id=?', ((key,) for key in existing - retained))
     else:
         retained = {row[0] for row in rows}
         db.executemany('DELETE FROM chat_read_summaries WHERE chat_id=?',

@@ -195,7 +195,7 @@ class MultiRuleApprovalTest(unittest.TestCase):
     def test_serialization_failure_rolls_back_task_and_event(self):
         self.proposal = self.prepare()
         before = self.f.tasks.get(self.f.actor, self.f.tid)
-        with patch("dsh_retrieval.adapters.task_storage.multi_rule.dump_state",
+        with patch("dsh_retrieval.adapters.task_storage.ledger_rows.prepare_state",
                    side_effect=ServiceError("STORAGE_LIMIT", "full", 507)):
             self.assert_code("STORAGE_LIMIT", self.confirm)
         self.assertEqual(self.f.tasks.get(self.f.actor, self.f.tid), before)

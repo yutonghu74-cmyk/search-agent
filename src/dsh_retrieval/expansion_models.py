@@ -205,6 +205,11 @@ def explicit_group_targets(raw_request, labels, target_count):
     """
     if not isinstance(raw_request, str) or not labels or len(set(labels)) < 2:
         return None
+    # A shared per-category quantity is explicit, rather than an inferred split.
+    each = re.findall(r'(?:每(?:个)?(?:类型|类别|种类)|每类|每种)\s*'
+                      r'(?:都)?(?:要|需要)?\s*([1-9][0-9]{0,4})\s*张', raw_request)
+    if len(each) == 1 and int(each[0]) * len(labels) == target_count:
+        return {label: int(each[0]) for label in labels}
     unit = r"(?:张|只)"
     noun = r"(?:的)?(?:图片|照片|图像|图)?"
     forms = (lambda label: rf"([1-9][0-9]{{0,4}})\s*{unit}\s*{noun}\s*{re.escape(label)}",

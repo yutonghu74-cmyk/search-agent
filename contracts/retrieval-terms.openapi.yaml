@@ -1,0 +1,513 @@
+openapi: 3.1.0
+info:
+  title: Retrieval Agent provisional terms phase
+  version: 1.0.0
+  description: Existing grouped-expansion contracts and durable expansion_jobs ledger.
+    Legacy expansion-jobs paths are aliases. No Task/approval/run created. Bearer/project
+    and external-task-reference headers follow the existing deployment and shared
+    access contract; no self-declared owner permissions.
+paths:
+  /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms:
+    parameters:
+    - &id001
+      name: project_id
+      in: path
+      required: true
+      schema:
+        type: string
+    - &id002
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^dlg_[A-Za-z0-9]+$
+    get:
+      operationId: getLatestDialogueTerms
+      responses:
+        '200':
+          description: Provisional term job; never confirms or searches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermJob'
+        '403':
+          description: Scope or capability denied
+        '409':
+          description: Stale scope, model binding or dialogue version
+        '422':
+          description: Invalid request
+        '503':
+          description: Terms phase not installed
+    post:
+      operationId: prepareDialogueTerms
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DialogueRequest'
+      responses:
+        '202':
+          description: Provisional term job; never confirms or searches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermJob'
+        '403':
+          description: Scope or capability denied
+        '409':
+          description: Stale scope, model binding or dialogue version
+        '422':
+          description: Invalid request
+        '503':
+          description: Terms phase not installed
+  /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms/{job_id}:
+    parameters: &id003
+    - *id001
+    - *id002
+    - name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^expjob_[a-f0-9]{32}$
+    get:
+      operationId: getDialogueTerms
+      responses:
+        '200':
+          description: Provisional term job; never confirms or searches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermJob'
+        '403':
+          description: Scope or capability denied
+        '409':
+          description: Stale scope, model binding or dialogue version
+        '422':
+          description: Invalid request
+        '503':
+          description: Terms phase not installed
+  /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms/{job_id}/retry:
+    parameters: *id003
+    post:
+      operationId: retryDialogueTerms
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '202':
+          description: Provisional term job; never confirms or searches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermJob'
+        '403':
+          description: Scope or capability denied
+        '409':
+          description: Stale scope, model binding or dialogue version
+        '422':
+          description: Invalid request
+        '503':
+          description: Terms phase not installed
+  /v1/retrieval/tasks/{task_id}/retrieval-agent/terms:
+    parameters:
+    - &id004
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^rt_[a-f0-9]{32}$
+    get:
+      operationId: getLatestTaskTerms
+      responses:
+        '200':
+          description: Provisional term job; never confirms or searches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermJob'
+        '403':
+          description: Scope or capability denied
+        '409':
+          description: Stale scope, model binding or dialogue version
+        '422':
+          description: Invalid request
+        '503':
+          description: Terms phase not installed
+    post:
+      operationId: prepareTaskTerms
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskRequest'
+      responses:
+        '202':
+          description: Provisional term job; never confirms or searches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermJob'
+        '403':
+          description: Scope or capability denied
+        '409':
+          description: Stale scope, model binding or dialogue version
+        '422':
+          description: Invalid request
+        '503':
+          description: Terms phase not installed
+  /v1/retrieval/tasks/{task_id}/retrieval-agent/terms/{job_id}:
+    parameters: &id005
+    - *id004
+    - name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^expjob_[a-f0-9]{32}$
+    get:
+      operationId: getTaskTerms
+      responses:
+        '200':
+          description: Provisional term job; never confirms or searches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermJob'
+        '403':
+          description: Scope or capability denied
+        '409':
+          description: Stale scope, model binding or dialogue version
+        '422':
+          description: Invalid request
+        '503':
+          description: Terms phase not installed
+  /v1/retrieval/tasks/{task_id}/retrieval-agent/terms/{job_id}/retry:
+    parameters: *id005
+    post:
+      operationId: retryTaskTerms
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '202':
+          description: Provisional term job; never confirms or searches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermJob'
+        '403':
+          description: Scope or capability denied
+        '409':
+          description: Stale scope, model binding or dialogue version
+        '422':
+          description: Invalid request
+        '503':
+          description: Terms phase not installed
+  /v1/retrieval/tasks/{task_id}/retrieval-agent/recall:
+    parameters:
+    - name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^rt_[a-f0-9]{32}$
+    get:
+      operationId: getRetrievalRecall
+      description: Read-only current approved page/candidate coverage. No model, encoding,
+        search, confirmation or business write. Integration requires agent.retrieval.recall.read
+        and current external Task binding.
+      responses:
+        '200':
+          description: Unwashed candidate coverage, never accepted counts or ground-truth
+            recall
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecallReport'
+        '403':
+          description: Project, source, identity or capability revoked
+        '409':
+          description: No current approved plan or concurrent scope/page change
+        '422':
+          description: Unsupported media or bounded evidence limit
+        '503':
+          description: Installed backend has no recall port
+components:
+  schemas:
+    TermFields:
+      type: object
+      required:
+      - raw_request
+      - target_count
+      - dimension_id
+      - model_selection
+      properties:
+        raw_request:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        target_count:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        dimension_id:
+          const: default
+        model_selection:
+          type: object
+          additionalProperties: false
+          required:
+          - llm
+          - vlm
+          properties:
+            llm:
+              type: string
+            vlm:
+              type: string
+        feedback_text:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        current_groups:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - primary_label
+            - auxiliary_terms
+            properties:
+              primary_label:
+                type: string
+                minLength: 1
+                maxLength: 32
+              auxiliary_terms:
+                type: array
+                maxItems: 200
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 80
+              delivery_target:
+                type:
+                - integer
+                - 'null'
+                minimum: 1
+        count_edits:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - target
+            - labels
+            - operation
+            - value
+            properties:
+              target:
+                const: terms
+              labels:
+                type: array
+                items:
+                  type: string
+              operation:
+                enum:
+                - set
+                - add
+                - scale
+              value:
+                type: number
+        current_target_count:
+          type: integer
+        regeneration_key:
+          type: string
+          minLength: 1
+          maxLength: 80
+        requested_terms_per_group:
+          type: integer
+          minimum: 1
+          maximum: 200
+        term_count_only:
+          type: boolean
+    DialogueRequest:
+      allOf:
+      - $ref: '#/components/schemas/TermFields'
+      - type: object
+        required:
+        - dialogue_session_id
+        - dialogue_version
+        properties:
+          dialogue_session_id:
+            type: string
+          dialogue_version:
+            type: integer
+      unevaluatedProperties: false
+    TaskRequest:
+      allOf:
+      - $ref: '#/components/schemas/TermFields'
+      - type: object
+        required:
+        - expected_task_version
+        - expected_revision
+        properties:
+          expected_task_version:
+            type: integer
+          expected_revision:
+            type: integer
+          confirmation_feedback_text:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          recall_evidence_digest:
+            type: string
+            pattern: ^sha256:[0-9a-f]{64}$
+            description: Optional server report reference. Re-read and revalidate
+              before enqueue and every batch checkpoint; retain original request/group
+              sizes/quotas. Client report payloads are rejected.
+      unevaluatedProperties: false
+    TermJob:
+      type: object
+      required:
+      - job_id
+      - agent
+      - status
+      - result
+      properties:
+        job_id:
+          type: string
+          pattern: ^expjob_[a-f0-9]{32}$
+        agent:
+          const:
+            capability: retrieval
+            phase: terms
+            workflow_ref: retrieval-terms@1
+            implementation_ref: grouped-terms-agent@1
+        status:
+          enum:
+          - queued
+          - running
+          - failed
+          - completed
+        result:
+          oneOf:
+          - type: 'null'
+          - type: object
+            required:
+            - plan
+            properties:
+              plan:
+                $ref: ./query-spec-v2.schema.json#/properties/grouped_expansion
+        completed_terms:
+          type: integer
+          minimum: 0
+        target_terms:
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+        error:
+          type:
+          - object
+          - 'null'
+        failed_batch:
+          type:
+          - object
+          - 'null'
+        recall_feedback:
+          type:
+          - object
+          - 'null'
+          description: When based on recall, contains evidence_digest and original
+            source scope, not an execution approval.
+    RecallReport:
+      type: object
+      required:
+      - schema_version
+      - scope
+      - evidence_digest
+      - complete
+      - mapping_complete
+      - can_refine
+      - branches
+      - totals
+      - quality
+      - suggestions
+      properties:
+        schema_version:
+          const: retrieval-recall@1
+        scope:
+          type: object
+          required:
+          - task_id
+          - revision
+          - generation
+          - task_version
+          properties:
+            task_id:
+              type: string
+            revision:
+              type: integer
+            generation:
+              type: integer
+            task_version:
+              type: integer
+        evidence_digest:
+          type: string
+          pattern: ^sha256:[0-9a-f]{64}$
+        source_snapshot_digest:
+          type: string
+        plan_digest:
+          type: string
+        complete:
+          type: boolean
+        mapping_complete:
+          type: boolean
+        can_refine:
+          type: boolean
+        branches:
+          type: array
+          items:
+            type: object
+        totals:
+          type: object
+          description: Raw/resolved/unresolved hits, first-attributed new candidates,
+            repeated hits, unique versioned candidates and repeated-hit ratio. Unmapped
+            is never empty.
+        quality:
+          type: object
+          properties:
+            relevance:
+              const: not_assessed
+            accepted_count:
+              type: 'null'
+            corpus_recall:
+              type: 'null'
+        suggestions:
+          type: array
+          items:
+            type: object
+            properties:
+              action:
+                enum:
+                - wait_or_reconcile
+                - repair_mapping
+                - broaden_terms
+                - diversify_terms
+                - review_candidates
+              reason:
+                type: string

@@ -43,7 +43,8 @@ def branch_counts(search):
     return counts
 
 
-def project_workflow(task, progress, *, search=None, manifest=None, cleaning=None, errors=(), capabilities=None):
+def project_workflow(task, progress, *, search=None, manifest=None, cleaning=None, errors=(), capabilities=None,
+                     execution_job=None):
     """Pure projection; no mapping, writes, confirmations or model calls."""
     nodes = deepcopy(progress['nodes'])
     indexed = {row['node']: row for row in nodes}
@@ -76,7 +77,11 @@ def project_workflow(task, progress, *, search=None, manifest=None, cleaning=Non
     retrieval = indexed['retrieval']
     if scoped_search is not None and scoped_search.get('status') == 'approved':
         branches = branch_counts(scoped_search)
-        if scoped_search.get('job_status') == 'failed':
+        if (scoped_search.get('execution_budget') or {}).get('stop_reason'):
+            set_node('retrieval', 'failed', '预算已用尽', '本任务检索预算已用尽，已停止继续召回；可查看已有结果。')
+        elif scoped_search.get('execution_queue', {}).get('state') == 'failed':
+            set_node('retrieval', 'failed', '检索已停止', '检索执行已停止，请查看记录后重试。')
+        elif scoped_search.get('job_status') == 'failed':
             set_node('retrieval', 'failed', '检索失败', '检索作业失败，请查看检索结果与失败记录。')
         elif scoped_search.get('job_status') == 'superseded':
             set_node('retrieval', 'pending', '已替代', '此检索作业已被替代，请核对当前方案。')
@@ -86,6 +91,8 @@ def project_workflow(task, progress, *, search=None, manifest=None, cleaning=Non
                      'approved' if scoped_manifest else 'awaiting_approval')
         elif scoped_search.get('initial_window_complete'):
             set_node('retrieval', 'running', '首轮候选已就绪', '首轮检索已返回，后续位置留给补数。')
+        elif scoped_search.get('execution_queue', {}).get('state') == 'queued':
+            set_node('retrieval', 'running', '排队中', '正在等待检索执行槽位。')
         else:
             set_node('retrieval', 'running', '检索中', '检索正在进行。')
     elif scoped_search is not None and scoped_search.get('status') == 'unapproved' and retrieval['node_status'] != 'succeeded':
@@ -130,6 +137,9 @@ def project_workflow(task, progress, *, search=None, manifest=None, cleaning=Non
         summary = (clean['detail'] if cleaning else
                    '当前处于清洗阶段。' if stage == 'cleaning' else '清洗未完成，请查看失败原因。')
         action('view_cleaning', '查看清洗结果', 'cleaning')
+    elif scoped_search and (scoped_search.get('execution_budget') or {}).get('stop_reason'):
+        stage, summary = 'retrieval_budget_exhausted', '本任务检索预算已用尽，已停止继续召回；已有结果仍可查看。'
+        action('view_retrieval', '查看已有检索结果', 'retrieval')
     elif str(task.get('stage', '')).upper() == 'REFILL' and run_status == 'RUNNING':
         ready = scoped_search and scoped_search.get('job_status') not in ('failed', 'superseded') and (scoped_search.get('pagination_stopped') or scoped_search.get('initial_window_complete'))
         if ready and not scoped_manifest:
@@ -167,6 +177,45 @@ def project_workflow(task, progress, *, search=None, manifest=None, cleaning=Non
     elif scoped_search and scoped_search.get('status') == 'unapproved':
         stage, summary = 'awaiting_retrieval', '需求已确认，检索尚未启动。'
         action('start_retrieval', '开始检索', 'retrieval', 'confirm')
+    execution_current = (isinstance(execution_job, dict)
+        and execution_job.get('workflow_ref') == 'confirmed-terms-retrieval@1'
+        and (execution_job.get('revision'), execution_job.get('generation'), execution_job.get('task_version'))
+            == (task['confirmed_revision'], task['run_generation'], task['task_version']))
+    if execution_current and stage in ('unknown', 'awaiting_retrieval', 'retrieving'):
+        state = execution_job['status']
+        actions = [item for item in actions if item['id'] != 'start_retrieval']
+        if state in ('queued', 'running') and (not scoped_search or scoped_search.get('status') == 'unapproved'):
+            stage = 'awaiting_retrieval'
+            summary = '词表已确认，检索 Agent 已接收，正在排队准备检索。'
+            retrieval['display_status'] = '检索 Agent 准备中'
+            retrieval['detail'] = summary
+        elif state in ('unknown', 'failed'):
+            stage = 'unknown' if state == 'unknown' else 'retrieval_failed'
+            summary = ('检索请求的执行结果待核对，已暂停，不会自动重发。' if state == 'unknown' else
+                       '检索 Agent 未能完成查找，已确认的词表仍保留。')
+            retrieval['display_status'] = '结果待核对' if state == 'unknown' else '检索未完成'
+            retrieval['detail'] = summary
+            reasons.append({'source':'retrieval', 'code':execution_job.get('code') or 'AGENT_SEARCH_FAILED'})
+    intake_policy = (execution_job.get('execution_scope') or {}) if execution_current else {}
+    automatic_cleaning = intake_policy.get('schema_version') == 'confirmed-terms-execution@2'
+    if automatic_cleaning and (stage == 'awaiting_cleaning' or
+            stage == 'awaiting_candidates' and intake_policy.get('candidate_intake') == 'auto'):
+        actions = [item for item in actions if item['id'] not in ('confirm_candidates', 'prepare_cleaning')]
+        if execution_job['status'] in ('failed', 'unknown'):
+            stage = 'intake_blocked'
+            summary = '自动清洗交接未完成，已有候选保留，请查看原因；不会跳过校验。'
+            reasons.append({'source': 'cleaning', 'code': execution_job.get('code') or 'AUTO_INTAKE_FAILED'})
+            set_node('cleaning', 'failed', '交接未完成', summary, 'blocked')
+        else:
+            stage, summary = 'preparing_cleaning', '候选将自动固定并按已确认条件进入现有清洗流程，无需再次确认。'
+            set_node('retrieval', 'succeeded', '候选已就绪', summary, 'approved')
+            set_node('cleaning', 'pending', '准备清洗中', summary, 'approved')
+        action('view_retrieval', '查看检索候选', 'retrieval')
+    if (execution_current and stage in ('awaiting_candidates', 'preparing_cleaning') and execution_job['status']=='completed'
+            and execution_job.get('code')=='NO_CANDIDATES'):
+        stage, summary = 'retrieval_empty', '检索已结束，目前没有可确认的候选。可以调整词表后重新确认。'
+        actions = [item for item in actions if item['id'] != 'confirm_candidates']
+        set_node('retrieval','succeeded','检索已结束，无可确认候选',summary,'blocked')
     if stage == 'unknown':
         action('refresh', '刷新状态', None)
     if task.get('pending_draft'):

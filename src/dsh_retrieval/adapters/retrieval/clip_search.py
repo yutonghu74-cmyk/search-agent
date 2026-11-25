@@ -8,7 +8,7 @@ must use a combined-search coordinator and persist returned materialization data
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http.client import HTTPException
 import base64
 import binascii
@@ -47,6 +47,8 @@ class CLIPSearchEndpoint:
     min_similarity: float
     wait_seconds: int
     base_url: str = field(repr=False)
+
+    declared_shards: tuple[str, ...] = ()
 
     def validate(self, registry: PhysicalIndexRegistry):
         if type(self.binding) is not IndexBinding:
@@ -128,7 +130,7 @@ def load_clip_search_endpoints(path, registry: PhysicalIndexRegistry, *, environ
         if len(raw) > 1_000_000:
             _invalid()
         value = json.loads(raw, object_pairs_hook=_unique_object)
-        if (type(value) is not dict or set(value) != {"schema", "entries"}
+        if (type(value) is not dict or set(value) not in ({"schema", "entries"}, {"schema", "entries", "shard_catalog"})
                 or value["schema"] != "clip-search-endpoints@1"
                 or type(value["entries"]) is not list or not 1 <= len(value["entries"]) <= 256):
             _invalid()
@@ -160,6 +162,16 @@ def load_clip_search_endpoints(path, registry: PhysicalIndexRegistry, *, environ
             endpoints.append(endpoint)
         if len({endpoint.binding.binding_id for endpoint in endpoints}) != len(endpoints):
             _invalid()
+        if 'shard_catalog' in value:
+            from ...shard_coverage import coverage_report
+            if not coverage_report(value['shard_catalog'], value)['complete']:
+                raise ServiceError('SHARD_COVERAGE_INCOMPLETE',
+                    'Configured bindings do not cover the declared shard catalog', 422)
+        if 'shard_catalog' in value:
+            declared = {(r['library_id'], r['index_version']): tuple(sorted(
+                sh['file_name'] for sh in r['shards'])) for r in value['shard_catalog']['datasets']}
+            endpoints = [replace(e, declared_shards=declared[(e.binding.library_id,
+                e.binding.index_version)]) for e in endpoints]
         return tuple(endpoints)
     except ServiceError:
         raise
@@ -334,6 +346,8 @@ class CLIPTextSearchClient:
                            for name in required - {"id", "similarity_score"})
                     or item["dataset_key"] not in versions):
                 raise ValueError("match shape")
+            if endpoint.declared_shards and item["shard"] not in endpoint.shard_paths:
+                raise ValueError("match outside frozen shard group")
             identity = hashlib.sha256(repr((request.binding.binding_id,
                 request.binding.index_version, item["dataset_key"], item["shard"],
                 item["full_path"])).encode()).hexdigest()

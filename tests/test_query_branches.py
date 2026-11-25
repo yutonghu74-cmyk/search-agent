@@ -31,6 +31,9 @@ class QueryBranchesTest(unittest.TestCase):
         self.assertEqual([b['query_text'] for b in result['branches']],
                          ['狗 不要人物 SKU-Ab12', '狗', '狗 柯基', '狗 特写'])
         self.assertEqual(len(result['branches'][-1]['origins']), 3)
+        self.assertEqual(result['branches'][0]['origins'][0]['source'], 'original_request')
+        self.assertEqual(result['branches'][2]['origins'][0]['source'], 'confirmed_expansion')
+        self.assertEqual(result['branches'][2]['origins'][0]['source_term'], '柯基')
         self.assertFalse(result['executable'])
         self.assertTrue(all(not b['intended_libraries'] for b in result['branches']))
         self.assertEqual(result, compile_query_branches(query))

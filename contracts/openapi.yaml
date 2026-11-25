@@ -6,6 +6,104 @@ info:
 servers:
   - url: http://127.0.0.1:8080
 paths:
+  /v1/retrieval/tasks/{task_id}/retrieval-agent/recall:
+    $ref: './retrieval-terms.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1retrieval-agent~1recall'
+  /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms:
+    $ref: './retrieval-terms.openapi.yaml#/paths/~1v1~1retrieval~1projects~1{project_id}~1dialogue-sessions~1{session_id}~1retrieval-agent~1terms'
+  /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms/{job_id}:
+    $ref: './retrieval-terms.openapi.yaml#/paths/~1v1~1retrieval~1projects~1{project_id}~1dialogue-sessions~1{session_id}~1retrieval-agent~1terms~1{job_id}'
+  /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms/{job_id}/retry:
+    $ref: './retrieval-terms.openapi.yaml#/paths/~1v1~1retrieval~1projects~1{project_id}~1dialogue-sessions~1{session_id}~1retrieval-agent~1terms~1{job_id}~1retry'
+  /v1/retrieval/tasks/{task_id}/retrieval-agent/terms:
+    $ref: './retrieval-terms.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1retrieval-agent~1terms'
+  /v1/retrieval/tasks/{task_id}/retrieval-agent/terms/{job_id}:
+    $ref: './retrieval-terms.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1retrieval-agent~1terms~1{job_id}'
+  /v1/retrieval/tasks/{task_id}/retrieval-agent/terms/{job_id}/retry:
+    $ref: './retrieval-terms.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1retrieval-agent~1terms~1{job_id}~1retry'
+  /v1/retrieval/tasks/{task_id}/agent-jobs:
+    $ref: './agent-jobs.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-jobs'
+  /v1/retrieval/tasks/{task_id}/agent-jobs/prepare:
+    $ref: './agent-jobs.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-jobs~1prepare'
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}:
+    $ref: './agent-jobs.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-jobs~1{job_ref}'
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}/confirm:
+    $ref: './agent-jobs.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-jobs~1{job_ref}~1confirm'
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}/start:
+    $ref: './agent-jobs.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-jobs~1{job_ref}~1start'
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}/cancel:
+    $ref: './agent-jobs.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-jobs~1{job_ref}~1cancel'
+  /v1/retrieval/tasks/{task_id}/agent-jobs/{job_ref}/artifacts:
+    $ref: './agent-jobs.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-jobs~1{job_ref}~1artifacts'
+  /v1/shared/capabilities:
+    $ref: './shared-capabilities.openapi.yaml#/paths/~1v1~1shared~1capabilities'
+  /v1/shared/tasks/{task_id}/binding:
+    $ref: './shared-capabilities.openapi.yaml#/paths/~1v1~1shared~1tasks~1{task_id}~1binding'
+  /v1/shared/tasks/{task_id}/receipt:
+    $ref: './shared-capabilities.openapi.yaml#/paths/~1v1~1shared~1tasks~1{task_id}~1receipt'
+  /v1/shared/tasks/{task_id}/cancel:
+    $ref: './shared-capabilities.openapi.yaml#/paths/~1v1~1shared~1tasks~1{task_id}~1cancel'
+  /v1/retrieval/tasks/{task_id}/agent-capabilities:
+    $ref: './agent-stages.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-capabilities'
+  /v1/retrieval/tasks/{task_id}/agent-stages:
+    $ref: './agent-stages.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-stages'
+  /v1/retrieval/tasks/{task_id}/agent-stages/prepare:
+    $ref: './agent-stages.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-stages~1prepare'
+  /v1/retrieval/tasks/{task_id}/agent-stages/{stage_draft_id}:
+    $ref: './agent-stages.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-stages~1{stage_draft_id}'
+  /v1/retrieval/tasks/{task_id}/agent-stages/{stage_draft_id}/confirm:
+    $ref: './agent-stages.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-stages~1{stage_draft_id}~1confirm'
+  /v1/retrieval/tasks/{task_id}/agent-stages/{stage_draft_id}/start:
+    $ref: './agent-stages.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-stages~1{stage_draft_id}~1start'
+  /v1/retrieval/tasks/{task_id}/agent-stages/{stage_draft_id}/cancel:
+    $ref: './agent-stages.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1agent-stages~1{stage_draft_id}~1cancel'
+  /v1/retrieval/projects/{project}/historical-batches:
+    get:
+      operationId: listHistoricalImageDeliveries
+      description: Read-only list of the owner's published image deliveries in this project and dimension. See historical-dedup.md for the first-phase scope.
+      parameters:
+        - {name: project, in: path, required: true, schema: {type: string}}
+        - {name: dimension_id, in: query, schema: {type: string, default: default}}
+      responses:
+        '200': {description: Options with immutable delivery references; no selection is applied}
+        '401': {description: Authentication required}
+        '403': {description: Project access denied}
+        '422': {description: Invalid scope or persistent resolver unavailable}
+  /v1/retrieval/projects/{project}/historical-dedup:
+    post:
+      operationId: resolveHistoricalImageSelection
+      description: Read-only resolution of explicit history references into a draft policy. Does not create or confirm a task. Only exact-content@1 is available.
+      parameters:
+        - {name: project, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [dimension_id, references]
+              properties:
+                dimension_id: {type: string, minLength: 1}
+                references:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [task_id, batch_id, delivery_id, snapshot_id, manifest_digest, task_version]
+                    properties:
+                      task_id: {type: string}
+                      batch_id: {type: string}
+                      delivery_id: {type: string}
+                      snapshot_id: {type: string}
+                      manifest_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                      task_version: {type: integer, minimum: 1}
+      responses:
+        '200': {description: Canonical policy; an empty selection returns scope none}
+        '401': {description: Authentication required}
+        '403': {description: Project access denied}
+        '409': {description: Historical reference unavailable or changed}
+        '422': {description: Invalid selection or persistent resolver unavailable}
   /v1/platform/session:
     post:
       operationId: createPlatformApplicationSession
@@ -519,6 +617,7 @@ components:
       required: [schema_version, scope, outcome, total_ms, stages, counters]
       properties:
         schema_version: {const: conversation-timing@1}
+        trace_id: {type: string, pattern: '^[a-f0-9]{32}$', description: Optional performance trace correlation. Replayed receipts preserve the original value; X-Performance-Trace-Id identifies the current HTTP request.}
         scope: {const: original_processing}
         outcome: {enum: [succeeded, failed]}
         total_ms: {type: number, minimum: 0}
@@ -594,6 +693,7 @@ components:
         workflow: {$ref: '#/components/schemas/TaskWorkflow'}
         search: {type: [object, 'null'], description: Compact current binding and branch counts; no candidate or member payload.}
         manifest: {type: [object, 'null'], description: Confirmed current manifest reference and count only; no preview is created by this read.}
+        retrieval_agent_job: {type: [object, 'null'], description: Read-only current confirmed-terms Agent job projection; no enqueue or execution occurs during this read.}
         mutation_sequence: {type: [integer, 'null'], minimum: 0}
     Error:
       type: object

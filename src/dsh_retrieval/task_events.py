@@ -60,7 +60,7 @@ def initialize_event_tables(db):
     db.execute("CREATE INDEX IF NOT EXISTS task_event_stream_owner "
                "ON task_event_stream(tenant_id,owner_user_id,task_id,sequence)")
     existing = {row[0] for row in db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
     db.execute('''CREATE TABLE IF NOT EXISTS task_event_task_mutations (
         task_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL)''')
     db.execute('''CREATE TABLE IF NOT EXISTS task_event_observed_mutations (
@@ -83,16 +83,49 @@ def initialize_event_tables(db):
             continue
         for action in ("INSERT", "UPDATE", "DELETE"):
             trigger = f"task_event_mutation_{table}_{action.lower()}"
-            db.execute(f"""CREATE TRIGGER IF NOT EXISTS {trigger}
-                AFTER {action} ON {table}
-                BEGIN
-                  UPDATE task_event_mutation_clock
-                  SET sequence=sequence+1,
-                      updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')
-                  WHERE id=1;
-                END""")
+            from .adapters.task_storage import ledger_rows
+            ledger_rows.watch(db, table, trigger, action,
+                "UPDATE task_event_mutation_clock SET sequence=sequence+1, "
+                "updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=1;")
     db.execute("""CREATE TABLE IF NOT EXISTS task_event_write_heads (
         task_id TEXT PRIMARY KEY, digest TEXT NOT NULL)""")
+
+
+def publish_retrieval_budget_stop(db, scope, reason):
+    """Notify an existing task stream in the same transaction as its budget stop.
+
+    A stale generation never emits an event for the current stream. A task with
+    no stream yet is observed normally on its first authorized read.
+    """
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='task_event_state' AND type='table'").fetchone():
+        return
+    row = db.execute('SELECT tenant_id,owner_user_id,as_of_sequence,snapshot_json '
+                     'FROM task_event_state WHERE task_id=?', (scope.task_id,)).fetchone()
+    if row is None or row[:2] != (scope.tenant_id, scope.owner_user_id):
+        return
+    try:
+        binding = json.loads(row[3]).get('binding', {})
+    except (ValueError, TypeError, AttributeError):
+        raise ServiceError('STORAGE_CORRUPT', 'Task event binding is invalid', 500) from None
+    if (binding.get('revision'), binding.get('generation')) != (scope.revision, scope.generation):
+        return
+    previous_mutation = db.execute('SELECT sequence FROM task_event_task_mutations WHERE task_id=?', (scope.task_id,)).fetchone()
+    observed = db.execute('SELECT sequence FROM task_event_observed_mutations WHERE task_id=?', (scope.task_id,)).fetchone()
+    sequence, now = row[2] + 1, datetime.now(UTC).isoformat()
+    payload = {**binding, 'event_schema_version': EVENT_SCHEMA_VERSION,
+               'node': 'retrieval', 'code': 'SEARCH_BUDGET_EXHAUSTED', 'reason': reason}
+    db.execute('INSERT INTO task_event_stream VALUES (?,?,?,?,?,?,?,?)',
+        (scope.task_id, sequence, scope.tenant_id, scope.owner_user_id,
+         f'{scope.task_id}:{sequence}', 'node.progress', _canonical(payload), now))
+    db.execute('UPDATE task_event_state SET as_of_sequence=?,updated_at=? WHERE task_id=?',
+               (sequence, now, scope.task_id))
+    db.execute('INSERT INTO task_event_task_mutations VALUES (?,1) '
+               'ON CONFLICT(task_id) DO UPDATE SET sequence=sequence+1', (scope.task_id,))
+    if previous_mutation is not None and observed == previous_mutation:
+        db.execute('INSERT OR REPLACE INTO task_event_observed_mutations '
+                   'SELECT task_id,sequence FROM task_event_task_mutations WHERE task_id=?', (scope.task_id,))
+    db.execute('DELETE FROM task_event_stream WHERE task_id=? AND sequence<=?',
+               (scope.task_id, max(0, sequence - 512)))
 
 
 def publish_task_change(db, task, summary, tables):

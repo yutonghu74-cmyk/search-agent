@@ -9,7 +9,7 @@ from .query_spec import digest
 COMPILER_VERSION = "query-branches@1"
 
 
-def compile_query_branches(query: dict) -> dict:
+def compile_query_branches(query: dict, *, include_provenance=True) -> dict:
     """Compile stored QuerySpec without guessing semantics or authorizing work.
 
     Whitespace is the only equivalence rule. Case, punctuation, product numbers
@@ -52,6 +52,11 @@ def compile_query_branches(query: dict) -> dict:
         fingerprint = digest(fingerprint_input)
         origin = {"group_id": group_id, "query_role": role,
                   "source_term": term, "skill_version": version}
+        if include_provenance:
+            origin.update({"source": ("original_request" if role in {"original", "reference_image"}
+                             else "confirmed_expansion"),
+                  "expansion_type": ("original" if role in {"original", "reference_image"}
+                                     else "primary" if role == "primary" else "variant")})
         if fingerprint not in branches:
             branches[fingerprint] = {
                 "branch_id": "branch_" + fingerprint[7:], "query_fingerprint": fingerprint,

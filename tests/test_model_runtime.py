@@ -664,6 +664,9 @@ class ModelRuntimeTest(unittest.TestCase):
             {'primary_label': '狗', 'auxiliary_terms': ['柯基']}]},
             {'verdict': 'unknown', 'reason': '主体被遮挡'}])
         expansion = runtime.expand('狗，不要人物', 'text', 'vision')
+        prompt = self.transport.calls[0]['messages'][0]['content']
+        self.assertIn('同义词', prompt)
+        self.assertIn('不编造别名或缩写', prompt)
         plan = expansion['plan']
         self.assertEqual(normalize_grouped_expansion(plan), plan)
         self.assertEqual(plan['generator'], 'llm@1')

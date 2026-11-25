@@ -1,5 +1,6 @@
 """Platform search using the existing approval, candidate and refill ledgers."""
 from dataclasses import asdict
+from contextlib import contextmanager
 import hashlib
 import json
 import threading
@@ -67,7 +68,7 @@ class PlatformFirstSearch(LocalFirstSearch):
     mode = 'PLATFORM'
 
     def __init__(self, service, configs, *, resources, ledger_path, cursor_secret,
-                 capabilities, encode_query, encode_reference=None, start=True):
+                 capabilities, encode_query, encode_reference=None, start=True, search_limits=None):
         self.service, self.configs, self.resources = service, configs, resources
         self.source = PlatformCatalogSource(resources)
         self.capabilities = capabilities
@@ -78,19 +79,7 @@ class PlatformFirstSearch(LocalFirstSearch):
         self.browser = CandidateBrowser(ledger_path, cursor_secret)
         self.repository = SQLitePlanSetApprovalRepository(ledger_path,
             projects=service.projects, authorization=resources)
-        self._condition, self._pending, self._closed = threading.Condition(), set(), False
-        self._worker = threading.Thread(target=self._work, name='platform-first-search', daemon=True)
-        if start:
-            self._worker.start()
-            for actor, task_id in self.repository.recoverable():
-                self.enqueue(actor, task_id)
-
-    def close(self):
-        with self._condition:
-            self._closed = True
-            self._condition.notify_all()
-        if self._worker.is_alive():
-            self._worker.join()
+        self._setup_search_execution(ledger_path, search_limits, start=start)
 
     def _authority(self):
         return self.resources
@@ -102,6 +91,14 @@ class PlatformFirstSearch(LocalFirstSearch):
         libraries = self.source.inventory(scope)
         capabilities = tuple(self.capabilities())
         version = digest({'libraries': [asdict(lib) for lib in libraries], 'capabilities': [asdict(cap) for cap in capabilities]})
+        query = json.loads(task.confirmed_proposal_json)['query_spec']
+        if task.media_type == 'video':
+            registered = self.resources.whole_video_bindings
+            verified = set(registered()) if callable(registered) else set()
+            capabilities = tuple(cap for cap in capabilities if cap.binding in verified)
+            if query['refill_policy']['mode'] == 'maintain_target':
+                permitted = set(query['refill_policy']['approved_library_ids'])
+                capabilities = tuple(cap for cap in capabilities if cap.binding.library_id in permitted)
         configs = self._local_configs({lib.library_id: set() for lib in libraries})
         router = build_configured_routing(tasks=self.service.repository,
             projects=self.service.projects, configs=configs, authorization=self.resources,
@@ -120,6 +117,12 @@ class PlatformFirstSearch(LocalFirstSearch):
     def prepare(self, actor, task_id, **kwargs):
         view = super().prepare(actor, task_id, **kwargs)
         view['note'] = '待发起人确认；检索输出仅为原始候选。'
+        return view
+
+    def auto_start(self, actor, task_id, *, key):
+        view = super().auto_start(actor, task_id, key=key)
+        if self.service.repository.get(actor, task_id).media_type == 'video':
+            view['target_media_type'] = 'video'
         return view
 
     def _adapter_for_plan(self, actor, task_id, approved):
@@ -153,3 +156,30 @@ class PlatformFirstSearch(LocalFirstSearch):
         if content_type is None:
             raise ServiceError('PREVIEW_UNAVAILABLE', 'unsupported image type', 409)
         return content_type, content
+
+
+    @contextmanager
+    def open_candidate_video(self, actor, task_id, candidate_id, *, ref=None):
+        from .adapters.task_storage.sqlite import decode
+        from .video_media import open_verified_video, inspect_video_file
+        task = self.service.repository.get(actor, task_id)
+        if task.media_type != 'video':
+            raise ServiceError('FEATURE_NOT_SUPPORTED', 'Video preview requires a video task', 422)
+        approved = self.repository.get_browse_current(actor, task_id)
+        if approved is None:
+            raise ServiceError('PLAN_NOT_APPROVED', 'Approved search required', 409)
+        hit = decode(json.loads(self.browser.locate(actor, task_id, approved.proposal_digest, candidate_id, ref)))
+        context = AccessContext(actor, task_id, 'candidate_preview', 'current')
+        item = self.resources.resolve_hits(context, (hit,))[0]
+        if item.status != 'resolved' or item.media is None or candidate_identity(item.media) != candidate_id:
+            raise ServiceError('PREVIEW_UNAVAILABLE', 'Video candidate unavailable', 404)
+        def guard():
+            if self.repository.get_browse_current(actor, task_id) != approved:
+                raise ServiceError('PLAN_NOT_CURRENT', 'Video search plan changed', 409)
+            self.resources.require_access(context, item.media.authorized_media_ref, 'read')
+        with open_verified_video(self.resources, context, item.media.authorized_media_ref,
+                item.media.content_digest, policy=self.resources.video_policy, guard=guard) as file:
+            metadata = inspect_video_file(file, inspector=self.resources.video_inspector,
+                file_inspector=self.resources.video_file_inspector, policy=self.resources.video_policy)
+            guard()
+            yield file, metadata, guard

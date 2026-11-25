@@ -48,6 +48,21 @@ class MultiBranchContractTest(unittest.TestCase):
         self.assertEqual(self.task, before)
         self.assertEqual(self.plan_set.proposal_digest, deepcopy(self.plan_set).proposal_digest)
 
+    def test_exact_legacy_preview_is_compatible_but_changed_constraints_are_not(self):
+        spec = json.loads(self.task.confirmed_proposal_json)['query_spec']
+        old = compile_query_branches(spec, include_provenance=False)['preview_digest']
+        legacy = replace(self.plan_set, members=tuple(
+            replace(m, logical_preview_digest=old) for m in self.members))
+        validate_plan_set(self.actor, self.task, legacy)
+        changed = deepcopy(spec)
+        changed['source_constraints'] = [{'library_id': 'another-library'}]
+        wrong = compile_query_branches(changed, include_provenance=False)['preview_digest']
+        self.assert_code('PLAN_SET_BINDING_MISMATCH', lambda: validate_plan_set(
+            self.actor, self.task, replace(legacy, members=tuple(
+                replace(m, logical_preview_digest=wrong) for m in legacy.members))))
+        self.assert_code('PLAN_SET_BINDING_MISMATCH', lambda: validate_plan_set(
+            self.actor, self.task, replace(legacy, members=(self.members[0],) + legacy.members[1:])))
+
     def test_missing_original_empty_and_budget_rejected(self):
         for members, code in ((self.members[1:], 'ORIGINAL_QUERY_REQUIRED'),
                               ((), 'INVALID_PLAN_SET'), (self.members * 22, 'INVALID_PLAN_SET')):

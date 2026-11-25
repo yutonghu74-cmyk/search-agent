@@ -1,0 +1,46 @@
+{
+  "schema": "image-shard-catalog@1",
+  "datasets": [
+    {
+      "library_id": "synthetic-library",
+      "index_version": "synthetic-v1",
+      "shards": [
+        {
+          "shard_id": "synthetic-0",
+          "file_name": "synthetic_0.db",
+          "status": "ready"
+        },
+        {
+          "shard_id": "synthetic-1",
+          "file_name": "synthetic_1.db",
+          "status": "ready"
+        },
+        {
+          "shard_id": "synthetic-2",
+          "file_name": "synthetic_2.db",
+          "status": "ready"
+        },
+        {
+          "shard_id": "synthetic-3",
+          "file_name": "synthetic_3.db",
+          "status": "ready"
+        },
+        {
+          "shard_id": "synthetic-4",
+          "file_name": "synthetic_4.db",
+          "status": "ready"
+        },
+        {
+          "shard_id": "synthetic-5",
+          "file_name": "synthetic_5.db",
+          "status": "ready"
+        },
+        {
+          "shard_id": "synthetic-6",
+          "file_name": "synthetic_6.db",
+          "status": "ready"
+        }
+      ]
+    }
+  ]
+}

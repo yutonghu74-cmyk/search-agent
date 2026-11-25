@@ -1,5 +1,8 @@
 """Local immutable input manifests; refs only, not a media cache/result set."""
 from contextlib import closing
+from . import transactions
+from .transactions import checked_access
+from . import ledger_rows
 from dataclasses import replace
 import json
 import sqlite3
@@ -105,25 +108,27 @@ class SQLiteCandidateManifestRepository:
         try:
             with closing(self.tasks._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
-                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='candidate_ledger'").fetchone()
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='candidate_ledger'").fetchone()
                 if exists:
                     load_state(db.execute("SELECT format,payload FROM candidate_ledger WHERE id=1").fetchone())
                 else:
                     db.execute("CREATE TABLE candidate_ledger (id INTEGER PRIMARY KEY CHECK(id=1), format INTEGER NOT NULL, payload TEXT NOT NULL)")
                     db.execute("INSERT INTO candidate_ledger VALUES (1,1,?)", (dump_state(empty_state()),))
+                ledger_rows.migrate(db, 'candidate_ledger', load_state)
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "Candidate ledger unavailable", 503, retryable=True) from exc
 
-    def _transaction(self, write, operation):
+    @transactions.staged()
+    def _transaction(self, write, operation, *, with_connection=False):
         try:
             with closing(self.tasks._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                 memory = self.tasks._load(db.execute("SELECT format,payload FROM local_ledger WHERE id=1").fetchone())
                 retrieval = load_retrieval(db.execute("SELECT format,payload FROM retrieval_ledger WHERE id=1").fetchone())
                 state = load_state(db.execute("SELECT format,payload FROM candidate_ledger WHERE id=1").fetchone())
-                result = operation(memory, retrieval, state)
+                result = operation(memory, retrieval, state, db) if with_connection else operation(memory, retrieval, state)
                 if write:
-                    db.execute("UPDATE candidate_ledger SET payload=? WHERE id=1", (dump_state(state),))
+                    ledger_rows.write_state(db, 'candidate_ledger', 1, state)
                 return result
         except sqlite3.Error as exc:
             raise ServiceError("STORAGE_UNAVAILABLE", "Candidate transaction failed", 503, retryable=True) from exc
@@ -131,6 +136,15 @@ class SQLiteCandidateManifestRepository:
     def _check(self, memory, retrieval, actor, proposal, *, reading=False, delivery_read=False):
         task = self.retrieval._authorize(memory, actor, proposal.scope.task_id,
                                          action="read" if reading else "approve")
+        if proposal.operation_id.startswith('clipjob_'):
+            validator = getattr(self, 'combined_source_validator', None)
+            if not callable(validator):
+                raise ServiceError('CANDIDATE_SOURCE_UNAVAILABLE', 'Combined source validator required', 503)
+            validator(task, actor, proposal, reading=reading, delivery_read=delivery_read)
+            context = AccessContext(actor, task.task_id, 'candidate_manifest', 'current')
+            for item in proposal.items:
+                checked_access(self.authorization, context, item.media.authorized_media_ref, 'read')
+            return
         record = retrieval["operations"].get(proposal.operation_id)
         if record is None or record[0].scope.task_id != task.task_id:
             raise ServiceError("NOT_FOUND", "Candidate source operation not found", 404)
@@ -151,7 +165,7 @@ class SQLiteCandidateManifestRepository:
                                   "read" if reading else "approve")
         context = AccessContext(actor, task.task_id, "candidate_manifest", "current")
         for item in proposal.items:
-            self.authorization.require_access(context, item.media.authorized_media_ref, "read")
+            checked_access(self.authorization, context, item.media.authorized_media_ref, "read")
 
     def put_proposal(self, actor, proposal):
         def put(memory, retrieval, state):
@@ -163,36 +177,92 @@ class SQLiteCandidateManifestRepository:
             state["proposals"][proposal.proposal_digest] = proposal
         return self._transaction(True, put)
 
-    def confirm(self, actor, proposal, *, key, expected_task_version, action):
+    def _confirm(self, memory, retrieval, state, actor, proposal, *, key, expected_task_version, action):
         require_key(key)
         require_version(expected_task_version)
         fingerprint = digest([proposal.proposal_digest, expected_task_version, action])
-        def confirm(memory, retrieval, state):
-            self._check(memory, retrieval, actor, proposal)
-            scoped_key = (actor.tenant_id, actor.user_id, proposal.scope.task_id, key)
-            old = state["keys"].get(scoped_key)
-            if old is not None and old[0] != fingerprint:
-                raise ServiceError("IDEMPOTENCY_CONFLICT", "Candidate confirmation key changed", 409)
-            if action != "confirm":
-                raise ServiceError("CONFIRMATION_REQUIRED", "Explicit owner confirmation required", 422)
-            if expected_task_version != proposal.scope.task_version:
-                raise ServiceError("REVISION_CONFLICT", "Confirmation task version changed", 409)
-            if state["proposals"].get(proposal.proposal_digest) != proposal:
-                raise ServiceError("MANIFEST_NOT_PREVIEWED", "Preview required before confirmation", 409)
-            self._check(memory, retrieval, actor, proposal)
-            ref = state["published"].get(proposal.proposal_digest)
-            replayed = ref is not None
-            if ref is None:
-                ref = "manifest_" + uuid.uuid4().hex
-                state["manifests"][ref] = CandidateManifest(ref, proposal)
-                state["published"][proposal.proposal_digest] = ref
-                state["events"].append({"event_id": "candidate-published:" + ref,
-                                         "kind": "candidate_manifest_published", "manifest_ref": ref,
-                                         "task_id": proposal.scope.task_id,
-                                         "proposal_digest": proposal.proposal_digest})
-            state["keys"][scoped_key] = (fingerprint, ref)
-            return state["manifests"][ref], replayed
-        return self._transaction(True, confirm)
+        self._check(memory, retrieval, actor, proposal)
+        scoped_key = (actor.tenant_id, actor.user_id, proposal.scope.task_id, key)
+        old = state["keys"].get(scoped_key)
+        if old is not None and old[0] != fingerprint:
+            raise ServiceError("IDEMPOTENCY_CONFLICT", "Candidate confirmation key changed", 409)
+        if action != "confirm":
+            raise ServiceError("CONFIRMATION_REQUIRED", "Explicit owner confirmation required", 422)
+        if expected_task_version != proposal.scope.task_version:
+            raise ServiceError("REVISION_CONFLICT", "Confirmation task version changed", 409)
+        if state["proposals"].get(proposal.proposal_digest) != proposal:
+            raise ServiceError("MANIFEST_NOT_PREVIEWED", "Preview required before confirmation", 409)
+        self._check(memory, retrieval, actor, proposal)
+        ref = state["published"].get(proposal.proposal_digest)
+        replayed = ref is not None
+        if ref is None:
+            ref = "manifest_" + uuid.uuid4().hex
+            state["manifests"][ref] = CandidateManifest(ref, proposal)
+            state["published"][proposal.proposal_digest] = ref
+            state["events"].append({"event_id": "candidate-published:" + ref,
+                                     "kind": "candidate_manifest_published", "manifest_ref": ref,
+                                     "task_id": proposal.scope.task_id,
+                                     "proposal_digest": proposal.proposal_digest})
+        state["keys"][scoped_key] = (fingerprint, ref)
+        return state['manifests'][ref], replayed
+
+    def confirm(self, actor, proposal, *, key, expected_task_version, action, on_confirm=None):
+        require_key(key)
+        require_version(expected_task_version)
+        def confirm(memory, retrieval, state, db):
+            manifest, replayed = self._confirm(memory, retrieval, state, actor, proposal,
+                key=key, expected_task_version=expected_task_version, action=action)
+            if on_confirm is not None: on_confirm(db, manifest)
+            return manifest, replayed
+        return self._transaction(True, confirm, with_connection=True)
+
+    def confirm_many(self, actor, proposals, *, key, expected_task_version, action, on_confirm):
+        """One owner action publishes existing page proposals in one transaction."""
+        require_key(key)
+        require_version(expected_task_version)
+        if (type(proposals) is not tuple or not 1 <= len(proposals) <= 10
+                or any(type(p) is not CandidateManifestProposal for p in proposals)
+                or len({p.operation_id for p in proposals}) != len(proposals)
+                or any((p.scope,p.plan_digest) != (proposals[0].scope,proposals[0].plan_digest) for p in proposals)):
+            raise ServiceError('MANIFEST_INVALID', 'Bounded pages of one approved plan required', 422)
+        def confirm(memory, retrieval, state, db):
+            manifests, replays = [], []
+            for index, proposal in enumerate(proposals):
+                manifest, replayed = self._confirm(memory, retrieval, state, actor, proposal,
+                    key='pages_'+digest((key,index))[7:], expected_task_version=expected_task_version, action=action)
+                manifests.append(manifest); replays.append(replayed)
+            on_confirm(db, tuple(manifests))
+            return tuple(manifests), all(replays)
+        return self._transaction(True, confirm, with_connection=True)
+
+    def seen_candidate_ids(self, actor, task_id, operation_id):
+        def read(memory, retrieval, state):
+            task = self.retrieval._authorize(memory, actor, task_id)
+            return frozenset(item.candidate_id for manifest in state['manifests'].values()
+                if manifest.proposal.operation_id == operation_id
+                and manifest.proposal.scope.task_id == task_id
+                and (manifest.proposal.scope.revision, manifest.proposal.scope.generation)
+                    == (task.confirmed_revision, task.run_generation)
+                for item in manifest.proposal.items)
+        return self._transaction(False, read)
+
+    def replay_confirmation(self, actor, task_id, *, key, proposal_digest,
+                            expected_task_version, action):
+        """Read back an authorized committed confirmation even after cleaning advances."""
+        require_key(key)
+        require_version(expected_task_version)
+        fingerprint = digest([proposal_digest, expected_task_version, action])
+        def read(memory, retrieval, state):
+            self.retrieval._authorize(memory, actor, task_id)
+            old = state['keys'].get((actor.tenant_id, actor.user_id, task_id, key))
+            if old is None:
+                return None
+            if old[0] != fingerprint:
+                raise ServiceError('IDEMPOTENCY_CONFLICT', 'Candidate confirmation key changed', 409)
+            manifest = state['manifests'][old[1]]
+            self._check(memory, retrieval, actor, manifest.proposal, reading=True)
+            return manifest
+        return self._transaction(False, read)
 
     def get(self, actor, task_id, manifest_ref):
         def read(memory, retrieval, state):
@@ -203,4 +273,15 @@ class SQLiteCandidateManifestRepository:
             self._check(memory, retrieval, actor, manifest.proposal, reading=True)
             self._check(memory, retrieval, actor, manifest.proposal, reading=True)
             return manifest
+        return self._transaction(False, read)
+
+    def get_proposal(self, actor, task_id, proposal_digest):
+        """Authorized read of an existing review; never materializes or publishes."""
+        def read(memory, retrieval, state):
+            self.retrieval._authorize(memory, actor, task_id)
+            proposal = state['proposals'].get(proposal_digest)
+            if proposal is None or proposal.scope.task_id != task_id:
+                raise ServiceError('NOT_FOUND', 'Candidate proposal not found', 404)
+            self._check(memory, retrieval, actor, proposal, reading=True)
+            return proposal
         return self._transaction(False, read)

@@ -53,7 +53,7 @@ class LocalVectorTest(unittest.TestCase):
             LocalVectorRecord(self.cat, 2, (1.0, 0.0), "public"),
         )
 
-    def make_adapter(self, *, records=None, depth=10, secret=b"s" * 32):
+    def make_adapter(self, *, records=None, depth=10, secret=b"s" * 32, **options):
         return LocalVectorRetrieval(
             self.authority, libraries=self.libraries,
             query_vectors={(self.dog, "dog"): self.dog_query,
@@ -62,7 +62,49 @@ class LocalVectorTest(unittest.TestCase):
                       ApprovedFixture(self.context, self.cat_request, (), depth)),
             records=self.records if records is None else records,
             filter_templates={"allowed": frozenset({"public"})}, cursor_secret=secret,
+            **options,
         )
+
+    def test_hybrid_recovers_exact_metadata_match_without_scope_leak_or_duplicates(self):
+        records = tuple(replace(record, search_text='SKU-Ab12' if record.vector_id in (3, 4)
+                                else 'ordinary image') for record in self.records)
+        adapter = self.make_adapter(records=records,
+                                    query_texts={'dog-plan': 'SKU-Ab12'})
+        first = adapter.search(self.context, self.dog_request)
+        self.assertEqual(first.hits[0].vector_id, 3)
+        ids = [h.vector_id for h in first.hits]
+        second = adapter.search(self.context, replace(self.dog_request, cursor=first.next_cursor))
+        ids += [h.vector_id for h in second.hits]
+        self.assertEqual(set(ids), {1, 2, 3})
+        self.assertEqual(len(ids), len(set(ids)))
+        self.authority.denied.add('library:animals')
+        self.assert_code('ACCESS_DENIED', lambda: adapter.search(self.context, self.dog_request))
+
+    def test_missing_metadata_keeps_legacy_vector_cursor_compatible(self):
+        old = self.make_adapter().search(self.context, self.dog_request)
+        new = self.make_adapter(query_texts={'dog-plan': 'SKU-Ab12'})
+        self.assertEqual(new.search(self.context, self.dog_request), old)
+        page = new.search(self.context, replace(self.dog_request, cursor=old.next_cursor))
+        self.assertEqual([h.vector_id for h in page.hits], [3])
+
+    def test_progressive_windows_grow_and_restart_preserves_pagination(self):
+        adapter = self.make_adapter(progressive=True)
+        first = adapter.search(self.context, self.dog_request)
+        self.assertEqual([h.vector_id for h in first.hits], [1])
+        request = replace(self.dog_request, cursor=first.next_cursor)
+        resumed = self.make_adapter(progressive=True).search(self.context, request)
+        self.assertEqual([h.vector_id for h in resumed.hits], [2, 3])
+        self.assertEqual(resumed.stop_reason, 'exhausted')
+        self.assertEqual(adapter.search(self.context, request), resumed)
+
+    def test_metadata_change_invalidates_hybrid_cursor(self):
+        records = tuple(replace(r, search_text='dog') for r in self.records)
+        adapter = self.make_adapter(records=records, query_texts={'dog-plan': 'dog'})
+        page = adapter.search(self.context, self.dog_request)
+        changed = self.make_adapter(records=tuple(replace(r, search_text='cat') for r in records),
+                                    query_texts={'dog-plan': 'dog'})
+        self.assert_code('INDEX_SNAPSHOT_EXPIRED', lambda: changed.search(
+            self.context, replace(self.dog_request, cursor=page.next_cursor)))
 
     def assert_code(self, code, action):
         with self.assertRaises(ServiceError) as caught:

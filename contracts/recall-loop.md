@@ -1,0 +1,42 @@
+# 召回闭环落地范围
+
+## 查询与来源
+
+原始查询始终保留，已确认分组的主词和辅助词分别形成分支。扩词提示覆盖有依据的同义词、别名、全称、缩写和画面变体；不保证模型必然生成全部类型，不凭规则猜测语义。词表仍需发起人确认。
+
+`query-branches` 的 `origins` 保留 `group_id/query_role/source_term/skill_version`，补充 `source`（原始需求或确认扩词）与 `expansion_type`（original/primary/variant）。variant 不代表系统已验证其属于同义词。分支指纹不变，逻辑预览摘要随新增来源信息变化。
+
+## 关键词和向量融合
+
+本地向量素材记录可选 `search_text`，最长10000字符，来自可信索引元数据，例如标题、标签、说明；不得以文件路径、素材ID或模型臆测填充。无元数据保留纯向量排序。
+
+新准备的文本计划在同一授权库、索引和硬过滤范围内，分别按向量距离与元数据关键词重合排序，再用 RRF（常数60）融合。英文按字母数字片段、中文按单字匹配；这是轻量关键词通道，不是完整中文分词/BM25。输出仍保留原向量 score，融合排序不把不同索引的相似度直接相加。相同向量身份只出现一次，内容去重及有效计数仍由后续业务层负责。
+
+参考图不启用文字融合。外部 CLIP 服务没有元数据关键词接口时仍走原服务；本次没有新增真实内网关键词服务或声称已完成其混合检索联测。
+
+## 渐进扩大候选窗口
+
+新准备的本地图片自动补数计划，首批每分支最多取批准页上限的一半（至少1条）；后续窗口按签名游标偏移扩大，最多达到批准页上限，并继续至已有深度上限。例：页上限8时，窗口为4、8、8……。首轮仍覆盖整组已批准查询，每轮均保留硬过滤、后置规则和否定条件；不会自动发出新词或放宽来源权限。
+
+分支优先级按持久化已提交页数均衡，组配额缺口过滤继续优先。旧批准计划按其 `logical_preview_digest` 识别并保留旧排序/窗口策略，无需重置运行。新关键词元数据或渐进策略参与快照摘要，失效游标拒绝复用。
+
+## 缺口、预算与观察指标
+
+缺口继续使用当前版本权威有效去重数。复用确认的 `max_rounds/max_vlm_calls/no_progress_rounds`、原子预留、恢复和停止原因；可在草稿界面配置。不将模型调用预算表述为货币费用，不擅自为旧任务增加全局轮数上限。
+
+补数预览 `execution` 新增 `new_unique_accepted/effective_yield/remaining_rounds/remaining_vlm_calls`；有效产出为已完成补数轮新增有效数除以对应候选数，没有候选时为null。它不是召回率。`next_position` 增加 `query_origins/candidate_window_cap/progression`，便于追查补采来源；窗口 cap 仍是批准上限，不是保证返回数量。
+
+## 淘汰原因和旧数据迁移
+
+结果条目增加 `disposition/elimination_stage`，区分清洗、去重、选样与人工排除。清洗 fail/unknown 保留逐规则原因；未知不算通过。结果接口 `GET /v1/retrieval/tasks/{task_id}/results?view=duplicate` 展示重复候选、代表素材及 `EXACT_DUPLICATE` 或 `NEAR_DUPLICATE_OWNER_MERGE` 原因；聊天结果区新增“重复合并”分类。
+
+重复摘要可包含跨轮重复事件，同一候选的审计明细仅列一次，所以 `duplicate_audit_count` 与原事件统计 `duplicate_count` 分别保留。精确重复根据当前结果来源的批准输入与通过判定恢复，人工排除代表素材后仍保留去重证据。
+
+历史账本没有 duplicate 投影时返回 `READ_PROJECTION_REQUIRED`，沿用 `tools/migrate_task_asset_bindings.py` 生成隔离副本并验证后再替换；不在读取请求中改写账本。迁移工具随新增分类更新数量验证，并核对实际分类集合。策略测试与部署迁移分别记录：本地8096已于2026-11-20完成停服备份、隔离副本语义校验及切换，详见docs/dev/progress.md。真实内网依赖联测尚未执行。
+
+
+## 本地启用工具与兼容
+
+工具tools/enrich_local_recall_metadata.py按素材ID、版本和内容摘要从可信清单提取原始source_title，只生成新fixture文件，不覆盖输入或使用意图标签猜测内容。tools/evaluate_local_recall_titles.py执行离线CLIP的10条已知标题Top-10检查，不测量语义召回率或清洗通过率。
+
+批准集兼容精确重算的旧版来源格式摘要；查询、硬约束、分支指纹、scope和generation仍按当前版本逐项校验。不能混用新旧逻辑预览，也不接受任意旧摘要。新计划使用新策略，旧批准计划保留旧排序与窗口。

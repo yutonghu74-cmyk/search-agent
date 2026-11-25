@@ -4,7 +4,9 @@ This module deliberately does not construct approvals, locate media, persist
 results, or register any real detector. Those are separate trusted boundaries.
 """
 
+from contextlib import nullcontext
 from typing import Mapping
+from ...video_media import VerifiedVideoFile, verify_file
 
 from ...errors import ServiceError
 from ...multi_rule_contracts import (
@@ -51,7 +53,7 @@ class GenericCleaningExecutor:
                 raise ServiceError("DETECTOR_NOT_RELEASED", "Approved detector unavailable", 409)
 
     def run(self, job: ApprovedCleaningJob, *, completed=(), checkpoint=None,
-            partial=None, step_checkpoint=None) -> JobVerdict:
+            partial=None, step_checkpoint=None, usage=None) -> JobVerdict:
         if type(job) is not ApprovedCleaningJob:
             raise TypeError("only an approved cleaning job can be executed")
         self._preflight(job)
@@ -62,79 +64,105 @@ class GenericCleaningExecutor:
         partial_id, partial_steps = partial if partial is not None else (None, ())
         for candidate in job.candidates:
             self._guard.require_current(job.binding)
-            content = self._reader.read(candidate, job.binding)
-            if type(content) is not bytes:
-                raise ServiceError("INVALID_MEDIA_RESPONSE", "Authorized media was not bytes", 502)
-            total_bytes += len(content)
-            if len(content) > MAX_CANDIDATE_BYTES or total_bytes > MAX_JOB_BYTES:
-                raise ServiceError("MEDIA_LIMIT_EXCEEDED", "Approved media exceeds worker limit", 413)
-            if bytes_digest(content) != candidate.content_digest:
-                raise ServiceError("INPUT_SNAPSHOT_CHANGED", "Approved media digest changed", 409)
-            # Re-read authorized bytes even on resume, but do not repeat model
-            # calls for an immutable, fully persisted candidate verdict.
-            if candidate.candidate_id in cached:
-                verdicts.append(cached[candidate.candidate_id])
-                self._guard.require_current(job.binding)
-                continue
+            file_mode = job.recipe.media_type == 'video' and callable(getattr(self._reader, 'open_file', None))
+            access = (self._reader.open_file(candidate, job.binding) if file_mode else
+                      nullcontext(self._reader.read(candidate, job.binding)))
+            with access as content:
+                if file_mode:
+                    if type(content) is not VerifiedVideoFile:
+                        raise ServiceError('INVALID_MEDIA_RESPONSE', 'Verified video file required', 502)
+                    total_bytes += content.size
+                    if total_bytes > self._reader.video_policy.max_job_bytes:
+                        raise ServiceError('MEDIA_LIMIT_EXCEEDED', 'Video job byte budget exceeded', 413)
+                else:
+                    if type(content) is not bytes:
+                        raise ServiceError('INVALID_MEDIA_RESPONSE', 'Authorized media was not bytes', 502)
+                    total_bytes += len(content)
+                    if len(content) > MAX_CANDIDATE_BYTES or total_bytes > MAX_JOB_BYTES:
+                        raise ServiceError('MEDIA_LIMIT_EXCEEDED', 'Approved media exceeds worker limit', 413)
+                    if bytes_digest(content) != candidate.content_digest:
+                        raise ServiceError('INPUT_SNAPSHOT_CHANGED', 'Approved media digest changed', 409)
+                # Re-read authorized bytes even on resume, but do not repeat model
+                # calls for an immutable, fully persisted candidate verdict.
+                if candidate.candidate_id in cached:
+                    verdicts.append(cached[candidate.candidate_id])
+                    self._guard.require_current(job.binding)
+                    continue
 
-            by_rule = {}
-            for step_index, step in enumerate(job.recipe.steps):
-                step_rules = [rule for rule in job.recipe.rules if rule.step_id == step.step_id]
-                if candidate.candidate_id == partial_id and step_index < len(partial_steps):
-                    saved = partial_steps[step_index]
-                    if tuple(rule.rule_id for rule in step_rules) != tuple(item.rule_id for item in saved):
-                        raise ServiceError('STORAGE_CORRUPT', 'Step checkpoint mismatches recipe', 500)
+                by_rule = {}
+                for step_index, step in enumerate(job.recipe.steps):
+                    step_rules = [rule for rule in job.recipe.rules if rule.step_id == step.step_id]
+                    if candidate.candidate_id == partial_id and step_index < len(partial_steps):
+                        saved = partial_steps[step_index]
+                        if tuple(rule.rule_id for rule in step_rules) != tuple(item.rule_id for item in saved):
+                            raise ServiceError('STORAGE_CORRUPT', 'Step checkpoint mismatches recipe', 500)
+                        by_rule.update((item.rule_id, item) for item in saved)
+                        continue
+                    scopes = {rule.group_id for rule in step_rules}
+                    if None not in scopes and not scopes & set(candidate.group_ids):
+                        # Outside this candidate's origin groups: no model call.
+                        # Checkpoint it anyway so step indexes stay aligned on resume.
+                        saved = tuple(RuleVerdict(rule.rule_id, 'not_applicable',
+                                                  'GROUP_NOT_APPLICABLE', None,
+                                                  group_id=rule.group_id)
+                                      for rule in step_rules)
+                        by_rule.update((item.rule_id, item) for item in saved)
+                        if step_checkpoint is not None:
+                            step_checkpoint(candidate, step, saved)
+                        continue
+                    error = None
+                    try:
+                        detector = self._detectors[step.backend_ref]
+                        with (usage.step(candidate, step, supported=(
+                                getattr(detector, 'usage_instrumentation', None) == 'model-http@1'))
+                              if usage is not None else nullcontext()):
+                            observed = self._detect(detector, content, candidate, job.binding)
+                    except ServiceError:
+                        raise
+                    except Exception:
+                        observed = None
+                        error = 'DETECTOR_ERROR'
+                    if type(observed) is not DetectionResult or observed.validator_ref != step.validator_ref:
+                        observed = None
+                        error = error or 'DETECTOR_OUTPUT_INVALID'
+                    saved = []
+                    for rule in step_rules:
+                        fact = None if observed is None else observed.facts.get(rule.predicate_ref)
+                        if observed is None or fact is None or type(fact) is not type(rule.value):
+                            explicit_unknown = observed is not None and observed.status == 'unknown'
+                            saved.append(RuleVerdict(rule.rule_id, 'unknown', error or 'FACT_UNAVAILABLE', None,
+                                                     observed.reason_summary if explicit_unknown else None,
+                                                     observed.reason_truncated if explicit_unknown else False,
+                                                     rule.group_id))
+                        else:
+                            passed = fact == rule.value
+                            saved.append(RuleVerdict(rule.rule_id, 'pass' if passed else 'fail',
+                                                     'MATCH' if passed else 'MISMATCH', observed.evidence_ref,
+                                                     observed.reason_summary if not passed else None,
+                                                     observed.reason_truncated if not passed else False,
+                                                     rule.group_id))
+                    if file_mode:
+                        verify_file(content)
                     by_rule.update((item.rule_id, item) for item in saved)
-                    continue
-                scopes = {rule.group_id for rule in step_rules}
-                if None not in scopes and not scopes & set(candidate.group_ids):
-                    # Outside this candidate's origin groups: no model call.
-                    # Checkpoint it anyway so step indexes stay aligned on resume.
-                    saved = tuple(RuleVerdict(rule.rule_id, 'not_applicable',
-                                              'GROUP_NOT_APPLICABLE', None,
-                                              group_id=rule.group_id)
-                                  for rule in step_rules)
-                    by_rule.update((item.rule_id, item) for item in saved)
+                    self._guard.require_current(job.binding)
                     if step_checkpoint is not None:
-                        step_checkpoint(candidate, step, saved)
-                    continue
-                error = None
-                try:
-                    observed = self._detectors[step.backend_ref].detect(content, candidate, job.binding)
-                except ServiceError:
-                    raise
-                except Exception:
-                    observed = None
-                    error = 'DETECTOR_ERROR'
-                if type(observed) is not DetectionResult or observed.validator_ref != step.validator_ref:
-                    observed = None
-                    error = error or 'DETECTOR_OUTPUT_INVALID'
-                saved = []
-                for rule in step_rules:
-                    fact = None if observed is None else observed.facts.get(rule.predicate_ref)
-                    if observed is None or fact is None or type(fact) is not type(rule.value):
-                        explicit_unknown = observed is not None and observed.status == 'unknown'
-                        saved.append(RuleVerdict(rule.rule_id, 'unknown', error or 'FACT_UNAVAILABLE', None,
-                                                 observed.reason_summary if explicit_unknown else None,
-                                                 observed.reason_truncated if explicit_unknown else False,
-                                                 rule.group_id))
-                    else:
-                        passed = fact == rule.value
-                        saved.append(RuleVerdict(rule.rule_id, 'pass' if passed else 'fail',
-                                                 'MATCH' if passed else 'MISMATCH', observed.evidence_ref,
-                                                 observed.reason_summary if not passed else None,
-                                                 observed.reason_truncated if not passed else False,
-                                                 rule.group_id))
-                by_rule.update((item.rule_id, item) for item in saved)
+                        step_checkpoint(candidate, step, tuple(saved))
+                rules = [by_rule[rule.rule_id] for rule in job.recipe.rules]
+                verdicts.append(CandidateVerdict(candidate.candidate_id, candidate.asset_version,
+                                                 aggregate_rule_verdicts(rules), tuple(rules)))
                 self._guard.require_current(job.binding)
-                if step_checkpoint is not None:
-                    step_checkpoint(candidate, step, tuple(saved))
-            rules = [by_rule[rule.rule_id] for rule in job.recipe.rules]
-            verdicts.append(CandidateVerdict(candidate.candidate_id, candidate.asset_version,
-                                             aggregate_rule_verdicts(rules), tuple(rules)))
-            self._guard.require_current(job.binding)
-            if checkpoint is not None:
-                checkpoint(verdicts[-1])
+                if checkpoint is not None:
+                    checkpoint(verdicts[-1])
         self._guard.require_current(job.binding)
         return require_complete_cleaning_result(
             job, JobVerdict(job.binding, tuple(verdicts)))
+
+    @staticmethod
+    def _detect(detector, content, candidate, binding):
+        if type(content) is VerifiedVideoFile:
+            if callable(getattr(detector, 'detect_file', None)):
+                return detector.detect_file(content.path, candidate, binding)
+            if content.size <= MAX_CANDIDATE_BYTES:
+                return detector.detect(content.path.read_bytes(), candidate, binding)
+            raise ServiceError('VIDEO_EVALUATOR_UNAVAILABLE', 'File-based video evaluator required', 422)
+        return detector.detect(content, candidate, binding)

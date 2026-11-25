@@ -1,5 +1,7 @@
 """Local multi-branch ledger. No network search or automatic dispatch."""
 from contextlib import closing
+from . import transactions
+from .transactions import checked_access
 from collections import Counter
 from dataclasses import asdict, replace, dataclass
 import json
@@ -8,7 +10,7 @@ import sqlite3
 import uuid
 
 from .sqlite import SQLiteTaskRepository, MAX_BYTES, encode, decode, dump
-from . import plan_read_views, plan_sources
+from . import plan_read_views, plan_sources, ledger_rows
 from ...errors import ServiceError
 from ...candidate_contracts import (CandidateManifest, CandidateManifestProposal,
                                     ManifestItem, candidate_identity)
@@ -182,7 +184,7 @@ class SQLitePlanSetApprovalRepository:
         try:
             with closing(self.tasks._connect()) as db, db:
                 db.execute('BEGIN IMMEDIATE')
-                exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='plan_set_ledger' AND type='table'").fetchone()
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='plan_set_ledger' AND type IN ('table','view')").fetchone()
                 if exists:
                     row = db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone()
                     state = restore(row)
@@ -194,6 +196,7 @@ class SQLitePlanSetApprovalRepository:
                 create_projection(db)
                 state = restore(db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone())
                 self._project_hits(db, state)
+                ledger_rows.migrate(db, 'plan_set_ledger', restore)
                 plan_read_views.create(db)
                 plan_read_views.sync(db, state)
                 plan_sources.create(db)
@@ -211,6 +214,7 @@ class SQLitePlanSetApprovalRepository:
                 append_hit(db, approved.proposal_digest, str(operation_id)+':'+str(index),
                            plan_id, branch, json.dumps(encode(hit)))
 
+    @transactions.staged()
     def _transaction(self, write, operation, *, task_id=None):
         try:
             with closing(self.tasks._connect()) as db, db:
@@ -229,15 +233,15 @@ class SQLitePlanSetApprovalRepository:
                 if isinstance(result, _ReadOnlyResult):
                     return result.value
                 if write:
-                    task_payload, set_payload = dump(memory), serialize(state)
-                    if task_payload != task_row[1]:
-                        db.execute('UPDATE local_ledger SET payload=? WHERE id=1', (task_payload,))
-                    db.execute('UPDATE plan_set_ledger SET format=3,payload=? WHERE id=1', (set_payload,))
+                    ledger_rows.write_memory(db, memory)
+                    ledger_rows.write_state(db, 'plan_set_ledger', 3, state)
                     self._project_hits(db, {'operations': {key: value for key, value in state['operations'].items() if key not in committed_before}})
                     self.tasks._sync_task_read_summaries(db, memory,
-                        task_ids={task_id} if summaries_ready else None)
+                        task_ids={task_id} if summaries_ready else None,
+                        searches=state['current'])
                     plan_read_views.sync(db, state, task_ids={task_id} if views_ready else None)
-                    plan_sources.sync(db, state)
+                    plan_sources.sync(db, state,
+                        task_ids={task_id} if source_ready and task_id is not None else None)
                 return result
         except sqlite3.Error as error:
             raise ServiceError('STORAGE_UNAVAILABLE', 'Plan set transaction failed', 503) from error
@@ -262,7 +266,6 @@ class SQLitePlanSetApprovalRepository:
                         db.rollback()
                         return self._transaction(True, operation, task_id=task_id)
                     task_row = db.execute('SELECT format,payload FROM local_ledger WHERE id=1').fetchone()
-                    shadow = db.execute('SELECT payload FROM plan_set_ledger WHERE id=1').fetchone()[0]
                     summaries_ready = (db.execute('SELECT dirty FROM task_read_summaries_meta WHERE id=1').fetchone() == (0,)
                         and db.execute('SELECT ready FROM chat_read_meta WHERE id=1').fetchone() == (1,))
                     views_ready = db.execute('SELECT version,dirty FROM plan_task_read_meta WHERE id=1').fetchone() == (1, 0)
@@ -271,16 +274,27 @@ class SQLitePlanSetApprovalRepository:
                     # encoding hold neither a read nor a write transaction.
                     memory = self.tasks._load(task_row)
                     before = deepcopy(state)
-                    result = operation(memory, state)
-                    replayed = isinstance(result, _ReadOnlyResult)
-                    if not replayed:
-                        shadow = plan_sources.patch_shadow(shadow, before, state)
-                        if len(shadow.encode()) > MAX_BYTES:
-                            raise ServiceError('STORAGE_LIMIT', 'Plan set ledger exceeds local limit', 507)
-                        prepared = plan_sources.prepare(state)
-                        committed_before = {key for key, value in before['operations'].items() if value[3] is not None}
-                        new_pages = {key: value for key, value in state['operations'].items()
-                                     if key not in committed_before and value[3] is not None}
+                    try:
+                        result = operation(memory, state)
+                        replayed = isinstance(result, _ReadOnlyResult)
+                        if not replayed:
+                            row_changes = ledger_rows.prepare_subset(db, 'plan_set_ledger', 3, before, state)
+                            prepared = plan_sources.prepare(state)
+                            full_view = None
+                            if not views_ready:
+                                full_view = restore(db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone())
+                                for section, value in state.items():
+                                    if isinstance(value, dict):
+                                        full_view[section].update(value)
+                                    else:
+                                        full_view[section].extend(value[len(before[section]):])
+                            committed_before = {key for key, value in before['operations'].items() if value[3] is not None}
+                            new_pages = {key: value for key, value in state['operations'].items()
+                                         if key not in committed_before and value[3] is not None}
+                    except ServiceError:
+                        if db.execute('PRAGMA data_version').fetchone()[0] != version:
+                            continue
+                        raise
                     db.execute('BEGIN IMMEDIATE')
                     if db.execute('PRAGMA data_version').fetchone()[0] != version:
                         db.rollback()
@@ -292,13 +306,13 @@ class SQLitePlanSetApprovalRepository:
                         if replayed:
                             db.commit()
                             return result.value
-                        db.execute('UPDATE plan_set_ledger SET format=3,payload=? WHERE id=1', (shadow,))
+                        ledger_rows.apply(db, row_changes)
                         plan_sources.save(db, task_id, prepared)
                         self._project_hits(db, {'operations': new_pages})
                         self.tasks._sync_task_read_summaries(db, memory,
                             task_ids={task_id} if summaries_ready else None,
                             searches=state['current'] if summaries_ready else None)
-                        plan_read_views.sync(db, state if views_ready else restore((3, shadow)),
+                        plan_read_views.sync(db, state if views_ready else full_view,
                                              task_ids={task_id} if views_ready else None)
                         db.commit()
                         return result
@@ -313,11 +327,11 @@ class SQLitePlanSetApprovalRepository:
         task = memory.get(actor, task_id)
         if self.projects is None or self.authorization is None:
             raise ServiceError('ACCESS_DENIED', 'Authority not configured', 403)
-        self.projects.require_access(actor, task.project_id, task.dimension_id, action)
+        checked_access(self.projects, actor, task.project_id, task.dimension_id, action)
         if proposal is not None:
             context = AccessContext(actor, task_id, 'retrieval', 'current')
             for library in sorted({m.plan.request.binding.library_id for m in proposal.members}):
-                self.authorization.require_access(context, 'library:' + library, 'search')
+                checked_access(self.authorization, context, 'library:' + library, 'search')
         return task
 
     @staticmethod
@@ -395,8 +409,9 @@ class SQLitePlanSetApprovalRepository:
     def _read_transaction(self, actor, task_id, operation, *, pages=False, manifests=False):
         """Read one task in a SQLite snapshot, without decoding other tasks' pages.
 
-        Use the transactionally maintained per-task view when clean. Dirty or
-        absent views fall back to the authoritative ledger in this snapshot.
+        Prefer clean current-plan sources for pointer/page reads. Manifest
+        lineage retains the per-task view. Missing or dirty sources fall back
+        to that view or the authoritative ledger in this same snapshot.
         Authorization is always checked against the current task and grants.
         """
         from ..memory import InMemoryTaskRepository
@@ -410,6 +425,10 @@ class SQLitePlanSetApprovalRepository:
                 else:
                     memory = InMemoryTaskRepository()
                     memory._tasks[task_id] = task
+                if not manifests:
+                    current = plan_sources.load_current(db, task_id, pages=pages)
+                    if current is not None:
+                        return operation(memory, current)
                 row = plan_read_views.read(db, task_id)
                 if row is None:
                     row = db.execute('SELECT format,payload FROM plan_set_ledger WHERE id=1').fetchone()
@@ -515,7 +534,11 @@ class SQLitePlanSetApprovalRepository:
                     validate_plan_set(actor, task, approved)
                 except ServiceError as error:
                     if error.code in ('REVISION_CONFLICT', 'PLAN_NOT_CURRENT',
-                                      'INVALID_STATE_TRANSITION'):
+                                      'INVALID_STATE_TRANSITION', 'PLAN_SET_BINDING_MISMATCH'):
+                        if error.code == 'PLAN_SET_BINDING_MISMATCH':
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                'Recovery skipped invalid plan binding: task=%s code=%s', task_id, error.code)
                         continue
                     raise
                 rows.append((actor, task_id))
@@ -535,80 +558,107 @@ class SQLitePlanSetApprovalRepository:
         return replace(task, task_version=approved.scope.task_version,
                        run_status=RunStatus.RUNNING, stage='retrieving')
 
-    def get_progress(self, actor, approved, *, allow_downstream=False):
-        """Rebuild every member head from the committed ledger in one read transaction."""
+    def get_progress(self, actor, approved, *, allow_downstream=False, reading=False):
+        """Rebuild member heads with the same validator used by atomic snapshots."""
+        def read(memory, state):
+            return self._progress_from_state(memory, state, actor, approved,
+                allow_downstream=allow_downstream, reading=reading)
+        return self._read_transaction(actor, approved.scope.task_id, read, pages=True)
+
+    def get_progress_snapshot(self, actor, task_id, *, browsing=False, allow_downstream=False):
+        """Read current approval and page heads together; never cache across requests."""
+        def read(memory, state):
+            self._authorize(memory, actor, task_id)
+            approved = state['current'].get(task_id)
+            if approved is None:
+                return None, ()
+            if approved.scope.task_id != task_id:
+                raise ServiceError('STORAGE_CORRUPT', 'Current plan task binding differs', 500)
+            rows = self._progress_from_state(memory, state, actor, approved,
+                reading=browsing, allow_downstream=allow_downstream)
+            return approved, rows
+        return self._read_transaction(actor, task_id, read, pages=True)
+
+    def _progress_from_state(self, memory, state, actor, approved, *, allow_downstream=False, reading=False):
+        """Validate scope, grants, cursor chain and pages in the caller's snapshot."""
         def corrupt():
             raise ServiceError('STORAGE_CORRUPT', 'Invalid plan set page chain', 500)
 
-        def read(memory, state):
-            task_id = approved.scope.task_id
-            task = self._authorize(memory, actor, task_id, approved)
-            current = state['current'].get(task_id)
-            if current != approved:
-                raise ServiceError('PLAN_NOT_CURRENT', 'Set unapproved or superseded', 409)
+        task_id = approved.scope.task_id
+        task = self._authorize(memory, actor, task_id, approved)
+        current = state['current'].get(task_id)
+        if current != approved:
+            raise ServiceError('PLAN_NOT_CURRENT', 'Set unapproved or superseded', 409)
+        if reading:
+            if (task.confirmed_revision != approved.scope.revision
+                    or task.run_generation != approved.scope.generation
+                    or task.task_version < approved.scope.task_version):
+                raise ServiceError('REVISION_CONFLICT', 'Search version changed; reload', 409)
+            task = replace(task, task_version=approved.scope.task_version,
+                           run_status=RunStatus.RUNNING, stage='retrieving')
+        else:
             task = self._execution_task(task, approved, allow_downstream)
-            validate_plan_set(actor, task, current)
-            members = {member.plan.request.plan_id: member.plan.request for member in current.members}
-            operations = {plan_id: {} for plan_id in members}
-            expected_cursors = {}
-            for operation_id, record in state['operations'].items():
-                if not isinstance(record, tuple) or len(record) != 4:
-                    corrupt()
-                saved, plan_id, request, page = record
-                if saved != current:
-                    continue
-                if (not isinstance(operation_id, str) or not operation_id
-                        or plan_id not in members):
-                    corrupt()
-                validate_member_execution(actor, task, approved, current,
-                                          plan_id=plan_id, request=request)
-                fingerprint = digest({'set': current.proposal_digest, 'member': plan_id,
-                                      'request': asdict(request)})
-                if state['requests'].get(fingerprint) != operation_id:
-                    corrupt()
-                if request.cursor in operations[plan_id]:
-                    corrupt()
-                operations[plan_id][request.cursor] = (operation_id, request, page)
-                if page is not None and page.next_cursor is not None:
-                    key = (current.proposal_digest, plan_id, page.next_cursor)
-                    if key in expected_cursors:
-                        corrupt()
-                    expected_cursors[key] = operation_id
-
-            actual_cursors = {key: value for key, value in state['cursors'].items()
-                              if isinstance(key, tuple) and len(key) == 3
-                              and key[0] == current.proposal_digest}
-            if actual_cursors != expected_cursors:
+        validate_plan_set(actor, task, current)
+        members = {member.plan.request.plan_id: member.plan.request for member in current.members}
+        operations = {plan_id: {} for plan_id in members}
+        expected_cursors = {}
+        for operation_id, record in state['operations'].items():
+            if not isinstance(record, tuple) or len(record) != 4:
                 corrupt()
-
-            result = []
-            for plan_id, initial in members.items():
-                chain = operations[plan_id]
-                cursor, previous, seen, visited, committed = None, None, set(), set(), 0
-                while cursor in chain:
-                    if cursor in visited:
-                        corrupt()
-                    visited.add(cursor)
-                    operation_id, request, page = chain[cursor]
-                    if page is None:
-                        head = PlanSetMemberProgress(plan_id, request, operation_id, None, committed)
-                        break
-                    validate_page(request, page, previous=previous, seen_cursors=frozenset(seen))
-                    committed += 1
-                    head = PlanSetMemberProgress(plan_id, request, operation_id, page, committed)
-                    if page.next_cursor is None:
-                        break
-                    seen.add(page.next_cursor)
-                    cursor, previous = page.next_cursor, page
-                else:
-                    if committed == 0:
-                        head = PlanSetMemberProgress(plan_id, initial, None, None, 0)
-                if len(visited) != len(chain):
+            saved, plan_id, request, page = record
+            if saved != current:
+                continue
+            if (not isinstance(operation_id, str) or not operation_id
+                    or plan_id not in members):
+                corrupt()
+            validate_member_execution(actor, task, approved, current,
+                                      plan_id=plan_id, request=request)
+            fingerprint = digest({'set': current.proposal_digest, 'member': plan_id,
+                                  'request': asdict(request)})
+            if state['requests'].get(fingerprint) != operation_id:
+                corrupt()
+            if request.cursor in operations[plan_id]:
+                corrupt()
+            operations[plan_id][request.cursor] = (operation_id, request, page)
+            if page is not None and page.next_cursor is not None:
+                key = (current.proposal_digest, plan_id, page.next_cursor)
+                if key in expected_cursors:
                     corrupt()
-                result.append(head)
-            self._authorize(memory, actor, task_id, current)
-            return tuple(result)
-        return self._read_transaction(actor, approved.scope.task_id, read, pages=True)
+                expected_cursors[key] = operation_id
+
+        actual_cursors = {key: value for key, value in state['cursors'].items()
+                          if isinstance(key, tuple) and len(key) == 3
+                          and key[0] == current.proposal_digest}
+        if actual_cursors != expected_cursors:
+            corrupt()
+
+        result = []
+        for plan_id, initial in members.items():
+            chain = operations[plan_id]
+            cursor, previous, seen, visited, committed = None, None, set(), set(), 0
+            while cursor in chain:
+                if cursor in visited:
+                    corrupt()
+                visited.add(cursor)
+                operation_id, request, page = chain[cursor]
+                if page is None:
+                    head = PlanSetMemberProgress(plan_id, request, operation_id, None, committed)
+                    break
+                validate_page(request, page, previous=previous, seen_cursors=frozenset(seen))
+                committed += 1
+                head = PlanSetMemberProgress(plan_id, request, operation_id, page, committed)
+                if page.next_cursor is None:
+                    break
+                seen.add(page.next_cursor)
+                cursor, previous = page.next_cursor, page
+            else:
+                if committed == 0:
+                    head = PlanSetMemberProgress(plan_id, initial, None, None, 0)
+            if len(visited) != len(chain):
+                corrupt()
+            result.append(head)
+        self._authorize(memory, actor, task_id, current)
+        return tuple(result)
 
     def list_committed_pages(self, actor, approved, *, allow_downstream=False):
         """Local read projection for candidate mapping, never a media grant.
@@ -767,6 +817,8 @@ class SQLitePlanSetApprovalRepository:
                 visited.add(cursor)
                 page = chain[cursor]
                 if page is None:
+                    if reading and cursor is not None and len(visited) > 1:
+                        break  # A later pending page cannot invalidate a frozen earlier input.
                     raise ServiceError('SEARCH_IN_PROGRESS', 'Search pages are still pending', 409)
                 raw_hits.extend(page.hits)
                 for hit in page.hits:
@@ -780,7 +832,7 @@ class SQLitePlanSetApprovalRepository:
                 # committed initial window and retain its next approved cursor
                 # for refill. A downstream refill batch likewise ends at a
                 # validated committed prefix.
-                if not downstream and (not automatic_refill(task) or not visited):
+                if not downstream and ((not automatic_refill(task) and task.media_type != 'video') or not visited):
                     raise ServiceError('SEARCH_IN_PROGRESS', 'Search is not complete', 409)
             if len(visited) != len(chain):
                 raise ServiceError('STORAGE_CORRUPT', 'Disconnected page chain', 500)
@@ -803,7 +855,7 @@ class SQLitePlanSetApprovalRepository:
                 raise ServiceError('MANIFEST_INVALID', 'Invalid verified candidate identity', 422)
             identities.add(item.candidate_id)
             manifest_hits.extend(item.hits)
-            self.authorization.require_access(context, media.authorized_media_ref, 'read')
+            checked_access(self.authorization, context, media.authorized_media_ref, 'read')
         available = Counter(digest(asdict(hit)) for hit in raw_hits)
         selected = Counter(digest(asdict(hit)) for hit in manifest_hits)
         if selected - available:

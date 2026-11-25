@@ -169,10 +169,14 @@ class PlanReadViewsTest(unittest.TestCase):
 
     def test_missing_row_falls_back_but_corrupt_row_fails_closed(self):
         with closing(self.repo.tasks._connect()) as db, db:
+            # Exercise the retained legacy-view fallback when current sources
+            # are dirty, instead of an unused cache on the new hot path.
+            db.execute('UPDATE plan_source_meta SET dirty=1 WHERE id=1')
             db.execute('DELETE FROM plan_task_read_views WHERE task_id=?', (self.task_id,))
         self.assertEqual(self.read()[0].committed_pages, 0)
         self.repo = self.fixture.fixture.reopen()
         with closing(self.repo.tasks._connect()) as db, db:
+            db.execute('UPDATE plan_source_meta SET dirty=1 WHERE id=1')
             db.execute("UPDATE plan_task_read_views SET payload='{}' WHERE task_id=?", (self.task_id,))
         with self.assertRaises(ServiceError) as error:
             self.read()
