@@ -57,13 +57,14 @@ class FirstSearchLocalTest(unittest.TestCase):
         self.task_id = created['task_id']
         self.local = self.make_local()
 
-    def make_local(self, *, start=True):
+    def make_local(self, *, start=True, defer_recovery=False):
         configs = build_local_catalog(self.source, self.config_ledger, ModelRuntime())
         local = LocalFirstSearch(self.tasks, configs, ledger_path=self.ledger,
             source_path=self.source,
             capabilities_path=CONFIG / 'local-first-search-capabilities.example.json',
             fixture_path=self.fixture_path,
-            cursor_secret=b'test-only-local-cursor-secret-12345', start=start)
+            cursor_secret=b'test-only-local-cursor-secret-12345', start=start,
+            defer_recovery=defer_recovery)
         self.addCleanup(local.close)
         return local
 
@@ -110,6 +111,35 @@ class FirstSearchLocalTest(unittest.TestCase):
             local = self.make_local(start=False)
         self.assertFalse(local._worker.is_alive())
         local.close()
+
+    def test_deferred_recovery_waits_for_repository_assembly_and_starts_once(self):
+        import threading
+        called = threading.Event()
+        with patch.object(LocalFirstSearch, '_recover_searches', side_effect=called.set) as recover:
+            local = self.make_local(defer_recovery=True)
+            self.assertTrue(local._worker.is_alive())
+            self.assertIsNone(local._recovery_worker)
+            recover.assert_not_called()
+            # Additional repositories must open before old search recovery writes.
+            SQLiteTaskRepository(self.ledger)
+            local.start_recovery()
+            self.assertTrue(called.wait(2))
+            worker = local._recovery_worker
+            worker.join(2)
+            local.start_recovery()
+            self.assertIs(local._recovery_worker, worker)
+            recover.assert_called_once()
+
+    def test_deferred_recovery_cannot_start_in_browse_only_or_after_close(self):
+        with patch.object(LocalFirstSearch, '_recover_searches') as recover:
+            browse = self.make_local(start=False, defer_recovery=True)
+            browse.start_recovery()
+            self.assertIsNone(browse._recovery_worker)
+            stopped = self.make_local(defer_recovery=True)
+            stopped.close()
+            stopped.start_recovery()
+            self.assertIsNone(stopped._recovery_worker)
+            recover.assert_not_called()
 
     def test_refill_authority_only_allows_library_search(self):
         authority = self.local._authority()

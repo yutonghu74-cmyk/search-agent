@@ -37,7 +37,7 @@ class LocalFirstSearch:
     def __init__(self, service, configs, *, ledger_path, source_path,
                  capabilities_path, fixture_path, cursor_secret,
                  legacy_fixture_path=None, legacy_capabilities_path=None,
-                 clip_model_path=None, start=True, search_limits=None):
+                 clip_model_path=None, start=True, search_limits=None, defer_recovery=False):
         if not isinstance(cursor_secret, bytes) or len(cursor_secret) < 32:
             raise ValueError('Local cursor secret must contain at least 32 bytes')
         self.service, self.configs = service, configs
@@ -61,9 +61,9 @@ class LocalFirstSearch:
             self._fixture(self.legacy_fixture_path, self.legacy_capabilities_path)
         self.repository = SQLitePlanSetApprovalRepository(ledger_path,
             projects=service.projects, authorization=self._authority())
-        self._setup_search_execution(ledger_path, search_limits, start=start)
+        self._setup_search_execution(ledger_path, search_limits, start=start, defer_recovery=defer_recovery)
 
-    def _setup_search_execution(self, ledger_path, limits, *, start):
+    def _setup_search_execution(self, ledger_path, limits, *, start, defer_recovery=False):
         from .search_scheduling import SearchLimits, FairSearchQueue
         from .search_budget import SearchBudget
         self.search_limits = limits or SearchLimits()
@@ -72,7 +72,15 @@ class LocalFirstSearch:
         self.scheduler = FairSearchQueue(self._activation, self.search_limits, start=start)
         self._worker = self.scheduler.workers[0]  # compatibility for browse-only inspection
         self._recovery_worker = None
-        if start:
+        self._recovery_lock = threading.Lock()
+        if start and not defer_recovery:
+            self.start_recovery()
+
+    def start_recovery(self):
+        """Start once, after all application repositories have been assembled."""
+        with self._recovery_lock:
+            if self._recovery_worker is not None or self.scheduler.closed or not self._worker.is_alive():
+                return
             self._recovery_worker = threading.Thread(target=self._recover_searches,
                 daemon=True, name='search-recovery')
             self._recovery_worker.start()
@@ -99,8 +107,10 @@ class LocalFirstSearch:
 
     def close(self):
         self.scheduler.close()
-        if self._recovery_worker is not None:
-            self._recovery_worker.join()
+        with self._recovery_lock:
+            worker = self._recovery_worker
+        if worker is not None:
+            worker.join()
 
     def enqueue(self, actor, task_id):
         self.scheduler.enqueue(actor, task_id)

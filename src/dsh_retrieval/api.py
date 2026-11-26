@@ -2683,7 +2683,8 @@ def main() -> None:
             fixture_path=args.local_first_search_fixture, cursor_secret=secret,
             legacy_fixture_path=args.local_first_search_legacy_fixture,
             legacy_capabilities_path=args.local_first_search_legacy_capabilities,
-            clip_model_path=args.local_clip_model, start=not args.browse_only, search_limits=search_limits)
+            clip_model_path=args.local_clip_model, start=not args.browse_only, search_limits=search_limits,
+            defer_recovery=True)
         plan_sets = first_search.repository
     elif all(clip_values):
         secret = os.environ.get('DSH_LOCAL_CURSOR_SECRET', '').encode()
@@ -2774,6 +2775,8 @@ def main() -> None:
     if not args.browse_only:
         handler.task_commands.recover_interrupted()
         expansion_jobs.recover()
+        if isinstance(first_search, LocalFirstSearch):
+            first_search.start_recovery()
     storage = f"SQLite ledger {Path(args.ledger).absolute()}" if args.ledger else "memory storage"
     print(f"LOCAL ONLY: http://127.0.0.1:{server.server_port}; {storage}, simulated identity", flush=True)
     try:
