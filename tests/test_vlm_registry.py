@@ -185,7 +185,7 @@ class ConfirmedTaskVLMRegistryTest(unittest.TestCase):
         self.assert_code('VLM_PLAN_LIMIT', lambda: instruction_plan('，'.join(['条件'] * 9)))
         self.assert_code('VLM_PLAN_LIMIT', lambda: instruction_plan('条件' * 321))
 
-    def test_vlm_generated_instructions_are_frozen_in_recipe(self):
+    def test_confirmed_instructions_are_frozen_without_model_rewriting(self):
         from dsh_retrieval.recipe_bridge import compile_confirmed_recipe
         from dsh_retrieval.adapters.task_storage.sqlite import encode, decode
         task = self.task(raw_request='有人和狗，画面无水印')
@@ -193,7 +193,8 @@ class ConfirmedTaskVLMRegistryTest(unittest.TestCase):
         with patch.object(self.runtime, 'plan_vlm_cleaning',
                           return_value=('检查有人和狗', '检查画面无水印')) as generated:
             instructions = provider.generate(task)
-        self.assertEqual(generated.call_count, 1)
+        generated.assert_not_called()
+        self.assertTrue(all('模型整理' not in text for text in instructions))
         registry = provider.build(self.actor, task, instructions=instructions)
         recipe = compile_confirmed_recipe(task, registry)
         self.assertEqual(recipe.instructions, instructions)

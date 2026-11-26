@@ -491,7 +491,7 @@ async function offerExistingSearch(taskId){
     if(error.code==='REVISION_CONFLICT'){
       const cleaning=await api(`/v1/retrieval/tasks/${taskId}/cleaning/steps`).catch(()=>null);
       if(state.task?.task_id!==taskId)return;
-      if(cleaning?.available){message('assistant','VLM 清洗已完成','检索候选已进入清洗结果；可在右侧“清洗”节点查看每一步明细。');return}
+      if(cleaning?.available){showCleaningHandoff(cleaning);return}
       if(state.task.active_cleaning_operation_id){message('assistant','VLM 清洗进行中','检索候选已固定，后台正在执行已确认的清洗方案。');return}
     }
     $('status').textContent='检索进度暂不可读：'+error.message
@@ -632,7 +632,7 @@ function watchExpansionJob(job){
   state.expansionPollTimer=setTimeout(async()=>{try{const latest=await api(expansionJobPath(job.dialogue_session_id)+'/'+job.job_id);if(state.expansionJob?.job_id===job.job_id)watchExpansionJob(latest)}catch(error){if(state.dialogueId===job.dialogue_session_id){line.textContent='扩词进度暂时读取失败：'+(error.detail||error.message);state.expansionPollTimer=setTimeout(()=>watchExpansionJob(job),4000)}}},2000);
 }
 async function restoreExpansionJob(){if(!state.dialogueId||state.dialogueStage!=='terms')return;try{const job=await api(expansionJobPath());if(state.dialogueId===job.dialogue_session_id)watchExpansionJob(job)}catch(error){if(error.code!=='EXPANSION_JOB_NOT_FOUND')$('status').textContent='扩词状态读取失败：'+(error.detail||error.message)}}
-function saveDialogueSession(){if(state.dialogueId){sessionStorage.setItem('dsh-dialogue',JSON.stringify({id:state.dialogueId,proposal:state.proposedExpansion}));saveCurrentModelChoice('dialogue:'+state.dialogueId)}else sessionStorage.removeItem('dsh-dialogue')}
+function saveDialogueSession(){if(state.dialogueId){sessionStorage.removeItem('dsh-fresh-chat');sessionStorage.setItem('dsh-dialogue',JSON.stringify({id:state.dialogueId,proposal:state.proposedExpansion}));saveCurrentModelChoice('dialogue:'+state.dialogueId)}else sessionStorage.removeItem('dsh-dialogue')}
 function insertRequestExample(){
   const input=$('request-text');
   if(input.value.trim()){$('status').textContent='输入框已有内容，保留你的文字；清空后可填入参考说法。';input.focus();return}
@@ -672,7 +672,9 @@ async function prepareTask(){
     return prepareAgentCandidateRequest(text);
   }
   const unresolved=pendingDialogueCommand();if(unresolved){
-    if(unresolved.body.message===text){await recoverDialogueCommand(true);return}
+    const selectedDialogue=$('dialogue-llm-model')?.value||$('llm-model')?.value;
+    const modelChanged=Boolean(selectedDialogue)&&selectedDialogue!==unresolved.body.llm_id;
+    if(unresolved.body.message===text&&!modelChanged){await recoverDialogueCommand(true);return}
     if(await recoverDialogueCommand(false,true))return prepareTask();
     return;
   }
@@ -712,14 +714,13 @@ async function prepareTask(){
     if(e.name==='AbortError'){const unresolved=Boolean(pendingDialogueCommand());$('status').textContent=unresolved?'已停止等待，后台结果仍需核对。':'已暂停等待，可以修改后重新发送。';const bubble=message('assistant','',unresolved?'已停止等待，可以核对原消息的处理结果。':'已暂停等待。原消息已放回输入框，可以修改后重新发送。');if(unresolved)guidedAction(bubble,'核对处理结果',()=>recoverDialogueCommand());if(!input.value.trim())input.value=text;return}
     const explanation=(e.code==='DSH_TIMEOUT'?(waitStage.includes('扩词')||waitStage.includes('生成检索词')?'扩词 Agent 等待超时，尚未生成可用的新词表；原词表已保留，可重试。':'需求理解模型响应超时，这条消息已保留，未创建任务。'):
       e.code==='NETWORK_UNAVAILABLE'?'与服务的连接中断，原消息已放回输入框。服务恢复后可重试。':
+      e.code==='MODEL_RATE_LIMIT'?'模型服务暂时繁忙，原需求已保留，请稍后重试。':
       e.code==='MODEL_OUTPUT_INVALID'?(e.detail||'这次生成的内容未通过校验，这条消息已保留。'):
       e.code==='MODEL_REQUEST_FAILED'?'模型服务暂时没有返回可用结果，这条消息已保留。':
       '这次消息没有处理成功：'+(e.detail||e.message));
     $('status').textContent=explanation;
-    const unresolved=Boolean(pendingDialogueCommand());
-    const bubble=message('assistant',unresolved?'消息结果待核对':'这次没有提单',unresolved?'暂时无法核对处理结果，原消息已保留。':explanation+'你可以直接重试。');
+    showDialogueFailure(e,explanation);
     if(!input.value.trim())input.value=text;
-    if(unresolved)guidedAction(bubble,'核对处理结果',()=>recoverDialogueCommand());else guidedAction(bubble,'重试这条消息',()=>prepareTask());
   }
   finally{clearInterval(waitTimer);pending?.remove?.();if(state.requestController===controller){state.requestController=null;$('stop-request')?.classList?.add('hidden');setDialogueBusy(false)}}
 }
@@ -737,12 +738,20 @@ function pendingDialogueCommand(){
   return null;
 }
 function dialogueCommandPath(commandKey){return '/v1/retrieval/projects/demo/dialogue-commands/'+encodeURIComponent(commandKey)}
+function showDialogueFailure(error,explanation){
+  const pending=Boolean(pendingDialogueCommand());
+  const terminal=['failed','interrupted'].includes(error.commandStatus);
+  const uncertain=pending&&!terminal;
+  const bubble=message('assistant',uncertain?'消息结果待核对':'消息暂未完成',uncertain?'暂时无法核对处理结果，原消息已保留。':explanation);
+  if(pending){state.dialogueRecoveryBubble?.remove?.();state.dialogueRecoveryBubble=bubble}
+  guidedAction(bubble,uncertain?'核对处理结果':'重试这条消息',()=>pending?recoverDialogueCommand(terminal):prepareTask());
+}
 async function awaitDialogueCommand(value,commandKey,signal){
   if(value.schema_version!=='dialogue-command@1')return value;
   while(value.status!=='completed'){
     if(['failed','interrupted'].includes(value.status)){
       const error=new Error(value.error?.message||'处理因服务重启中断，可以明确重试。');
-      error.code=value.error?.code||'COMMAND_INTERRUPTED';error.detail=error.message;throw error;
+      error.code=value.error?.code||'COMMAND_INTERRUPTED';error.detail=error.message;error.commandStatus=value.status;throw error;
     }
     await new Promise((resolve,reject)=>{
       const cleanup=()=>{clearTimeout(timer);signal?.removeEventListener('abort',abort)};
@@ -759,6 +768,7 @@ async function sendDialogueCommand(body,selection,signal,retryFailed=false){
   let pending=pendingTaskTurn(scope);
   if(pending&&pending.body.message!==body.message){const error=new Error('请先核对上一条消息的结果；新输入已保留。');error.code='COMMAND_UNRESOLVED';throw error}
   if(!pending){pending={taskId:scope,key:key('dialogue-command'),body,selection,proposal:state.proposedExpansion};saveTaskTurn(pending)}
+  sessionStorage.removeItem('dsh-fresh-chat');
   const received=result=>{saveTaskTurn({...pending,result});return {...result,command_key:pending.key,command_scope:scope}};
   try{const accepted=await api('/v1/retrieval/projects/demo/dialogue-command',{method:'POST',keyValue:pending.key,body:pending.body,signal,retryFailed,asyncCommand:true});
     return received(await awaitDialogueCommand(accepted,pending.key,signal))}
@@ -804,7 +814,10 @@ async function recoverDialogueCommand(retryFailed=false,releaseFailed=false){
     if(error.code==='NOT_FOUND'){
       const bubble=message('assistant','','服务尚未收到上一条消息，可以重新发送。');
       guidedAction(bubble,'重新发送',()=>recoverDialogueCommand(true));
-    }else if(error.name!=='AbortError')$('status').textContent='暂时无法核对消息结果：'+(error.detail||error.message);
+    }else if(error.name!=='AbortError'){
+      const explanation=error.code==='MODEL_RATE_LIMIT'?'模型服务暂时繁忙，原需求已保留，请稍后重试。':error.detail||error.message;
+      $('status').textContent=explanation;showDialogueFailure(error,explanation);
+    }
   }}finally{if(state.requestController===controller){state.requestController=null;$('stop-request')?.classList?.add('hidden');setDialogueBusy(false)}}
 }
 async function applyDialogueTurn(turn,proposal,text,selection,signal,active=()=>true,onStage=()=>{},recovered=false){
@@ -910,6 +923,10 @@ async function confirmGuidedExpansion(proposal,editor,confirmedRefill,confirmedE
     $('status').textContent=explanation;message('assistant',state.task?'需求已保存':'需求尚未保存',explanation);
   }
   finally{setBusy(false)}
+}
+function showCleaningHandoff(cleaning){
+  const completed=Boolean(cleaning.runs?.length)&&cleaning.runs.every(run=>run.status==='completed');
+  message('assistant',completed?'清洗检测已结束':'候选已进入清洗',completed?'检测回执已生成，可查看各步骤结果；有效数量以正式结果为准。':'可在右侧“清洗”节点查看实际执行状态和各步骤明细。');
 }
 async function guidedStartSearch(){
   if(!state.task)return;

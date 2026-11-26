@@ -263,6 +263,11 @@ class ModelRuntime:
         projected = dict(state)
         if not isinstance(semantic_edits, list):
             raise ServiceError('MODEL_OUTPUT_INVALID', 'requirement_edits must be a list', 502)
+        if (not semantic_edits and value['action'] in ('update', 'replace')
+                and value.get('subject') and (not state.get('subject') or value['action'] == 'replace')):
+            raise ServiceError('MODEL_OUTPUT_INVALID',
+                'Save a new subject with requirement_edits/add_category for every category and scene; '
+                'subject alone loses category structure. Keep an overall total unallocated unless per-category counts are explicit.', 502)
         if semantic_edits:
             if value['action'] not in ('update', 'replace', 'revise_terms'):
                 raise ServiceError('MODEL_OUTPUT_INVALID', 'Category edits belong to the pre-task request stage', 502)
@@ -270,7 +275,7 @@ class ModelRuntime:
                 raise ServiceError('MODEL_OUTPUT_INVALID', 'Do not mix category edits and count_edits', 502)
             constraints = value.get('constraints')
             previous_constraints = '；'.join(state.get('constraints', []))
-            if constraints and constraints != previous_constraints and constraints not in message:
+            if constraints and constraints != previous_constraints and constraints not in message and constraints not in (state.get('reference_request') or ''):
                 raise ServiceError('MODEL_OUTPUT_INVALID',
                     'Only change common constraints explicitly stated in this turn; do not copy category conditions into common constraints', 502)
             try:

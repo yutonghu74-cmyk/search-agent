@@ -28,13 +28,13 @@ stage=terms 表示用户正在审阅检索词，未说明“图片”时有关�
 一只动物、两个人等是画面内容数量，不是目标图片数；“一些”没有指定图片数量。当前只支持图片。无执行事实不声称已检索、已找到、已批准或已交付。
 例如 execution_context.search_started=false 且 stage=terms 时，用户问“为什么还没开始检索？”：直接说明词表仍待用户点击确认，确认后才会检索；不要重新保存需求、修改词表或扩词。
 理解完整语义后再保存。多类需求以 requirement_draft.categories 为权威；每个类别分别保存 label、scene、target_count、conditions，category_id 稳定。逐图对象数量保留在 scene 中，不用于图片张数。共同条件用 constraints，类别专属条件用下列操作，不能提升成共同条件。
-多类别首次输入、类别数量/画面/专属条件的后续修改必须用 requirement_edits；仅改变本轮明确提到的字段，未提及项保留，已有类别专属条件不能复制到共同 constraints；没有修改共同条件时 constraints=null。不要为多类修改同时重写 subject/target_count；总数由后端根据各类数量计算。用户只给总数时可用 target_count，不平均分配。无依据不补动作、环境、品种或条件。
+首次保存或替换主体时，无论一个还是多个类别，都必须用 requirement_edits 的 add_category 保存逐类画面；subject 仅兼容历史草稿，不能代替首次类别拆解。类别数量/画面/专属条件的后续修改必须用 requirement_edits；仅改变本轮明确提到的字段，未提及项保留，已有类别专属条件不能复制到共同 constraints；没有修改共同条件时 constraints=null。不要为多类修改同时重写 subject/target_count；总数由后端根据各类数量计算。用户只给总数时可用 target_count，不平均分配。无依据不补动作、环境、品种或条件。
 requirement_edits: 操作数组，每项含 op、targets、source_text 和该操作需要的字段；省略无关字段，不能把原话填入无关字段。targets 不用时为 []。
 - add_category: targets=[]，label 为原话中的类别短名，scene 为原话中的完整画面，count 可为明确图片数量，否则 null。
 - update_category: targets=[已有 category_id]，只给变化的 label/scene，不传其他字段。remove_category: targets=[已有 category_id]，不传其他字段。
 - set_count: targets 显式列出作用类别的 category_id（同轮新类别可用 label），count 为每类张数，不传其他字段。“各20张”对所有当前类别用一项操作，不能把20当总数。
 - add_condition/remove_condition: targets 列出适用类别，text 为条件；删除引用已有条件，不删除其他条件。
-所有操作 source_text 逐字引用本轮原话。仅迁移尚未结构化的旧主体时，add_category 可引用 current_request.subject 的原文片段；随后用本轮原话补数量。不修改已有草稿的字段不要重新生成。
+所有操作 source_text 逐字引用本轮原话。仅迁移尚未结构化的旧主体时，add_category 可引用 current_request.subject 的原文片段；随后用本轮原话补数量。不修改已有草稿的字段不要重新生成。用户只改画面时只给 scene，保留原 label 和 category_id；不要顺便改名。scene 可保留原画面中的主体和对象数量，不能新增无依据细节。
 例如用户“毛驴奔跑、狗吃饭、兔子睡觉的图，每类20张”：新增三个类别，scene 分别是“毛驴奔跑”“狗吃饭”“兔子睡觉”，再 set_count targets=[毛驴,狗,兔子] count=20 source_text=“每类20张”，media_type=image，不再问总数。后续“狗改为30张”只对狗 set_count。后续“兔子不要了”只 remove_category。后续“狗不要水印”只对狗 add_condition。
 保存前检查本轮每个类别、动作、否定和数量作用范围是否已覆盖。没有依据的具体细节不追问。clarification 可为 {field:media_type|subject|target_count|scope|conflict,source_text:本轮原话,question:具体问题}；只在缺项或影响检索的歧义/冲突时给出，否则 null。已知张数不得再次问张数。能保存的非歧义信息先保存，用 action=update 配合 clarification，只追问未决部分。
 工具 proposal 字段（仅修改工具需要这些字段，未改变项省略或 null）：
@@ -585,7 +585,8 @@ class DialogueCoordinator:
             if simple_request is not None and count_hint is not None:
                 simple_request['target_count'] = count_hint
         if (body.get('generate_terms_when_complete', False) and phase == 'request'
-                and not structured and prior.get('question') == 'target_count' and prior.get('subject')
+                and (not structured or len(prior['requirement_draft']['categories']) == 1)
+                and prior.get('question') == 'target_count' and prior.get('subject')
                 and prior.get('media_type') == 'image'):
             answer = re.fullmatch(r'\s*(?:要|需要|共|总共)?\s*([1-9][0-9]{0,4})\s*(?:张(?:图片|照片)?)?[。.!！]?\s*', message)
             if answer and int(answer[1]) <= 10000:

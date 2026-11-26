@@ -10,7 +10,7 @@
 
 2026-11-25 增量：8096 原窗口已启用 [平台中控首片](docs/dev/platform-coordinator.md)。正式任务的检索节点增加“安排下一步”，由 DSH rc.5 承载有界规划，宿主复用原检索/清洗接口；普通对话和原人工确认保持现有路径。真实独立清洗 Agent、跨域完成依赖及生产/训练/RHF 未随本片开放。
 
-当前使用入口为 [8096 原 Chat 窗口](http://127.0.0.1:8096/chat)。已显式启用检索 Agent：实际 DSH 0.2.2-rc.5、角色独立 GLM-5.3、既有 LOCAL_CLIP，最多3页且每页受来源能力限制。刷新后新建 Chat 可使用新链路；历史任务仍保留原流程。既有 Chat 默认模型设置没有修改。
+当前使用入口为 [8096 原 Chat 窗口](http://127.0.0.1:8096/chat)。已显式启用检索 Agent：实际 DSH 0.2.2-rc.5、角色独立 GLM-5.3、既有 LOCAL_CLIP，最多3页且每页受来源能力限制。刷新后新建 Chat 可使用新链路；历史任务仍保留原流程。2026-11-26 起，本机 demo 新 Chat 的默认清洗 VLM 为 Qwen-3.8-27B；对话和扩词默认值保留，已确认任务沿用原冻结模型。
 
 启动命令沿原参数增加 `--retrieval-agent-config /absolute/private/retrieval-agent.json`，配置示例与边界见 [窗口接入说明](docs/dev/retrieval-agent-window.md)，实际验证/备份记录见 [启用报告](docs/architecture.md#13-运行装配与部署)。这是既有本机 demo 身份环境；真实平台接入继续按独立契约验收。下文带日期的旧端口记录保留追溯。
 

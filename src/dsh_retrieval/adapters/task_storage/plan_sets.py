@@ -46,6 +46,11 @@ def serialize(state):
     return value
 
 
+def delegated_window(task):
+    from ...confirmed_terms_contract import delegates_candidate_window
+    return delegates_candidate_window(json.loads(task.confirmed_proposal_json)['query_spec'])
+
+
 def automatic_refill(task):
     try:
         proposal = json.loads(task.confirmed_proposal_json)
@@ -799,6 +804,10 @@ class SQLitePlanSetApprovalRepository:
                 raise ServiceError('REVISION_CONFLICT', 'Candidate task version changed', 409)
             validate_plan_set(actor, self._execution_task(task, approved, True), approved)
 
+        initial_ids = None
+        if automatic_refill(task) and task.media_type == 'image':
+            from ...recall_strategy import initial_plan_ids
+            initial_ids = initial_plan_ids(approved)
         raw_hits = []
         origin_groups = plan_origin_groups(task, approved)
         hit_groups = {}
@@ -810,6 +819,8 @@ class SQLitePlanSetApprovalRepository:
                     if request.cursor in chain:
                         raise ServiceError('STORAGE_CORRUPT', 'Duplicate page cursor', 500)
                     chain[request.cursor] = page
+            if not chain and initial_ids is not None and plan_id not in initial_ids:
+                continue
             cursor, visited = None, set()
             while cursor in chain:
                 if cursor in visited:
@@ -828,11 +839,11 @@ class SQLitePlanSetApprovalRepository:
                 cursor = page.next_cursor
             else:
                 # Ordinary initial publication waits for a finished search.
-                # Automatic maintain-target tasks intentionally publish one
+                # Maintain-target and versioned intake delegations publish one
                 # committed initial window and retain its next approved cursor
                 # for refill. A downstream refill batch likewise ends at a
                 # validated committed prefix.
-                if not downstream and ((not automatic_refill(task) and task.media_type != 'video') or not visited):
+                if not downstream and ((not automatic_refill(task) and task.media_type != 'video' and not delegated_window(task)) or not visited):
                     raise ServiceError('SEARCH_IN_PROGRESS', 'Search is not complete', 409)
             if len(visited) != len(chain):
                 raise ServiceError('STORAGE_CORRUPT', 'Disconnected page chain', 500)

@@ -17,8 +17,7 @@ from .recipe_bridge import confirmed_rules_digest
 from .released_detectors import ReleasedDetectorRegistry
 from .vlm_detector import VLMRequirementDetector
 from .vlm_node_detector import VLMNodeDetector
-from .vlm_instruction_plan import (confirmed_instruction_plan, plan_for_instructions,
-                                   with_model_instructions)
+from .vlm_instruction_plan import confirmed_instruction_plan, plan_for_instructions
 
 
 class ConfirmedTaskVLMRegistry:
@@ -73,15 +72,11 @@ class ConfirmedTaskVLMRegistry:
         return confirmed_instruction_plan(spec), binding, spec
 
     def generate(self, task):
-        plan, binding, _ = self._confirmed(task)
-        drafted = self.runtime.plan_vlm_cleaning(
-            tuple(node['source'] for node in plan), binding)
-        instructions = tuple(
-            '只以节点原文判断当前图片；无法观察则 unknown；模型整理仅用于解释，不增加新条件。'
-            f'节点原文：{node["source"]}。模型整理：{text}'
-            for node, text in zip(plan, drafted))
-        return tuple(node['instruction'] for node in
-                     with_model_instructions(plan, instructions))
+        # These conditions are already confirmed. Rewriting them with another
+        # model can invent exclusions and lose group scope. Freeze the existing
+        # source-grounded plan; stored instructions of older runs still replay.
+        plan, _, _ = self._confirmed(task)
+        return tuple(node['instruction'] for node in plan)
 
     def build(self, actor, task, *, instructions=None):
         plan, model_binding, spec = self._confirmed(task)

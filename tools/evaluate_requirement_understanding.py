@@ -50,8 +50,19 @@ CASES = [
 
 def check_semantics(case, index, row):
     categories = (row.get('draft') or {}).get('categories', [])
-    by_label = {c['label']: c for c in categories}
     errors = []
+    # Category display names may be literal scene phrases, not only entity nouns.
+    # Match identity in both label and scene, and reject omissions/duplicates.
+    by_label = {}
+    for category in categories:
+        identities = [label for label in ('毛驴', '狗', '兔子')
+                      if label in category['label']
+                      and not any(other in category['scene'] for other in ('毛驴', '狗', '兔子') if other != label)]
+        if len(identities) != 1 or identities[0] in by_label:
+            if case in ('three_scenes_each_20', 'quantity_followup'):
+                errors.append('ambiguous_category_identity')
+        else:
+            by_label[identities[0]] = category
     if case in ('three_scenes_each_20', 'quantity_followup'):
         labels = {'毛驴', '狗'} if case == 'three_scenes_each_20' and index == 4 else {'毛驴', '狗', '兔子'}
         if set(by_label) != labels:
@@ -68,13 +79,38 @@ def check_semantics(case, index, row):
             if case == 'three_scenes_each_20' and index >= 2:
                 if (label == '狗') != ('水印' in conditions):
                     errors.append('wrong_condition_scope:' + label)
-    if case in ('unallocated_total', 'scene_objects_are_not_images'):
+    if case == 'unallocated_total':
         if len(categories) != 2 or any(c['target_count'] is not None for c in categories):
             errors.append('invented_category_quota')
+    if case == 'scene_objects_are_not_images':
+        scenes = '；'.join(c['scene'] for c in categories)
+        if not categories or any(c['target_count'] is not None for c in categories):
+            errors.append('invented_category_quota')
+        if not all(fragment in scenes for fragment in ('一只狗', '吃饭', '两只兔子', '睡觉')):
+            errors.append('lost_scene_objects_or_actions')
     return errors
 
 
-def evaluate(runtime, llm, output):
+TRANSIENT_ERRORS = {'MODEL_RATE_LIMIT', 'MODEL_REQUEST_FAILED', 'MODEL_TIME_BUDGET_EXCEEDED', 'DSH_TIMEOUT'}
+
+
+def retry_turn(coordinator, actor, body, attempts, retry_transient=0):
+    """Retry only uncommitted pre-task turns, retaining each failure as evidence."""
+    for attempt in range(retry_transient + 1):
+        started = time.monotonic()
+        try:
+            result = coordinator.turn(actor, 'evaluation', body)
+        except ServiceError as error:
+            attempts.append({'status': 'failed', 'error_code': error.code,
+                             'seconds': round(time.monotonic() - started, 3)})
+            if error.code not in TRANSIENT_ERRORS or attempt == retry_transient:
+                raise
+        else:
+            attempts.append({'status': 'completed', 'seconds': round(time.monotonic() - started, 3)})
+            return result
+
+
+def evaluate(runtime, llm, output, *, retry_transient=0):
     rows = []
     with tempfile.TemporaryDirectory(prefix='requirement-eval-') as directory:
         actor = Actor('evaluation', 'requester')
@@ -86,13 +122,13 @@ def evaluate(runtime, llm, output):
             for turn_index, (message, expected_count) in enumerate(case['turns']):
                 runtime.rejected = []
                 started = time.monotonic()
-                row = {'case': case['name'], 'message': message, 'expected_count': expected_count}
+                row = {'case': case['name'], 'message': message, 'expected_count': expected_count, 'attempts': []}
                 try:
-                    result = coordinator.turn(actor, 'evaluation', {
+                    result = retry_turn(coordinator, actor, {
                         'session_id': previous['session_id'] if previous else None,
                         'expected_version': previous['version'] if previous else 0,
                         'phase': previous['stage'] if previous else 'request',
-                        'llm_id': llm, 'message': message, 'generate_terms_when_complete': True})
+                        'llm_id': llm, 'message': message, 'generate_terms_when_complete': True}, row['attempts'], retry_transient)
                     row.update(actual_count=result['request']['target_count'], action=result['action'],
                                stage=result['stage'], question=result['question'], reply=result['reply'],
                                draft=result['request'].get('requirement_draft'),
@@ -128,6 +164,8 @@ def main():
     parser.add_argument('--user', required=True)
     parser.add_argument('--llm')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--retry-transient', type=int, choices=range(3), default=0,
+                        help='explicit bounded retries of failed pre-task turns; all attempts remain in the report')
     args = parser.parse_args()
     if not args.settings_store.is_file() or not args.key_file.is_file():
         parser.error('Existing settings and key files are required')
@@ -145,7 +183,7 @@ def main():
             if profile is None:
                 parser.error('No selected conversation model is available')
             runtime = ObservedRuntime((profile,), opener=settings.opener)
-            success = evaluate(runtime, llm, args.output)
+            success = evaluate(runtime, llm, args.output, retry_transient=args.retry_transient)
         settings.db.close()
     return 0 if success else 1
 

@@ -246,9 +246,10 @@ class ModelRuntimeTest(unittest.TestCase):
         from dsh_retrieval.dialogue import DialogueCoordinator, DialogueStore
         from dsh_retrieval.adapters.projects import LocalProjectAccess
         from dsh_retrieval.models import Actor
-        runtime = self.runtime(['需要多少张这样的图片？', {
-            'action': 'update', 'subject': '小狗在海边散步', 'media_type': 'image',
-            'target_count': 12, 'constraints': '无水印', 'reply': '会按这两个画面要求整理检索词。'}])
+        runtime = self.runtime([{'action': 'update', 'media_type': 'image',
+            'requirement_edits': [{'op': 'add_category', 'targets': [], 'label': '小狗',
+                'scene': '小狗在海边散步', 'source_text': '小狗在海边散步'}],
+            'constraints': '不要水印', 'reply': '需要多少张这样的图片？'}])
         coordinator = DialogueCoordinator(DialogueStore(), runtime,
             LocalProjectAccess([('tenant-a', 'user-a', 'demo', 'default')]))
         actor = Actor('tenant-a', 'user-a')
@@ -260,7 +261,7 @@ class ModelRuntimeTest(unittest.TestCase):
             'message': '12张', 'generate_terms_when_complete': True})
         self.assertEqual(second['stage'], 'terms')
         self.assertIn('小狗在海边散步', second['request']['effective_request'])
-        self.assertIn('无水印', second['request']['effective_request'])
+        self.assertIn('不要水印', second['request']['effective_request'])
         sent = self.transport.calls[-1]['messages']
         self.assertIn('想找小狗在海边散步，不要水印', [item['content'] for item in sent])
 
@@ -280,7 +281,9 @@ class ModelRuntimeTest(unittest.TestCase):
         runtime = self.runtime([
             '可以先聊画面内容，数量确定后再整理检索词。',
             {'action': 'update', 'subject': '小狗在雪地玩耍', 'media_type': 'image',
-             'constraints': '无水印', 'reply': '画面和无水印要求记下了，想要几张？'},
+             'requirement_edits': [{'op': 'add_category', 'targets': [], 'label': '小狗',
+                 'scene': '小狗在雪地玩耍', 'source_text': '小狗在雪地玩耍'}],
+             'constraints': '不要水印', 'reply': '画面和无水印要求记下了，想要几张？'},
             '数量用来确定交付目标，你也可以先补充画面要求。',
             '这些词分别覆盖了奔跑和趴卧两种画面。',
             {'action': 'revise_terms', 'count_edits': [
@@ -319,7 +322,7 @@ class ModelRuntimeTest(unittest.TestCase):
             self.assertEqual(turn('再说一下我现在要什么')['action'], 'answer')
             context = json.loads(self.transport.calls[-1]['messages'][1]['content'])
             self.assertEqual(context['current_request']['target_count'], 10)
-            self.assertEqual(context['current_request']['constraints'], '无水印')
+            self.assertEqual(context['current_request']['constraints'], '不要水印')
             self.assertNotIn('recent_messages', context)
             self.assertEqual(len(self.transport.calls), 6)
             reopened = DialogueCoordinator(DialogueStore(Path(folder) / 'dialogue.sqlite3'), runtime, projects)
@@ -414,7 +417,9 @@ class ModelRuntimeTest(unittest.TestCase):
 
     def test_new_request_reference_is_context_not_latest_user_message(self):
         runtime = self.runtime([{'action': 'update', 'subject': '猫', 'target_count': 20,
-                                 'media_type': 'image', 'constraints': '无水印'}])
+            'requirement_edits': [{'op': 'add_category', 'targets': [], 'label': '猫',
+                'scene': '猫', 'source_text': '猫'}],
+            'media_type': 'image', 'constraints': '无水印'}])
         state = {'stage': 'request', 'question': None, 'messages': [],
                  'reference_request': '找10张狗图片；无水印'}
         result = runtime.interpret_dialogue_turn(state, '再找20张猫，条件一样', 'text')
@@ -568,6 +573,8 @@ class ModelRuntimeTest(unittest.TestCase):
 
     def test_dialogue_model_can_suggest_bounded_natural_reply(self):
         runtime = self.runtime([{'action': 'update', 'subject': '猫', 'target_count': None,
+            'requirement_edits': [{'op': 'add_category', 'targets': [], 'label': '猫',
+                'scene': '猫', 'source_text': '猫'}],
                                  'media_type': 'image', 'constraints': None, 'question': None,
                                  'reply': '想找多少张猫的图片？'}])
         state = {'stage': 'request', 'question': None, 'messages': [],

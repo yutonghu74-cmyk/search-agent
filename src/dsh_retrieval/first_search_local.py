@@ -29,6 +29,7 @@ from .retrieval_contracts import RetrievalScope
 from .retrieval_coordinator import RetrievalCoordinator
 from .retrieval_progress import read_retrieval_progress
 from .routing_preview import load_capabilities
+from .confirmed_terms_contract import delegates_candidate_window
 from .text_catalog_config import CatalogConfigScope
 
 
@@ -108,7 +109,7 @@ class LocalFirstSearch:
         """One page per turn; yield between branches, tasks and users."""
         task = self.service.repository.get(actor, task_id)
         identity = (actor, task_id, task.confirmed_revision, task.run_generation)
-        if (self._automatic_refill(task) or task.media_type == 'video') and self._first_window_committed(actor, task_id):
+        if self._first_window_only(task) and self._first_window_committed(actor, task_id):
             self._retry_rounds.pop(identity, None)
             return False
         try:
@@ -122,7 +123,7 @@ class LocalFirstSearch:
         if any(row.get('code') == 'SEARCH_BUSY' for row in result['outcomes']):
             from .search_scheduling import SearchRetry
             return SearchRetry()
-        if result['pagination_stopped'] or ((self._automatic_refill(task) or task.media_type == 'video')
+        if result['pagination_stopped'] or (self._first_window_only(task)
                                            and self._initial_window_complete(result)):
             self._retry_rounds.pop(identity, None)
             return False
@@ -145,6 +146,15 @@ class LocalFirstSearch:
             return (policy['mode'] == 'maintain_target'
                     and policy['progression'] == 'auto'
                     and proposal['node_modes']['refill'] == 'auto')
+        except (TypeError, ValueError, KeyError):
+            return False
+
+    @classmethod
+    def _first_window_only(cls, task):
+        if cls._automatic_refill(task) or task.media_type == 'video':
+            return True
+        try:
+            return delegates_candidate_window(json.loads(task.confirmed_proposal_json)['query_spec'])
         except (TypeError, ValueError, KeyError):
             return False
 
@@ -453,8 +463,8 @@ class LocalFirstSearch:
                 return {'status': 'unavailable', 'reason': 'approved_source_scope',
                         'queries': [route['query_text'] for route in preview['routes']]}
 
-        if self._automatic_refill(task) and options:
-            # The automatic first window is fixed as one candidate manifest,
+        if self._first_window_only(task) and task.media_type == 'image' and options:
+            # Refill and delegated intake both freeze a bounded first manifest,
             # which holds at most 100 hits. Split that budget across members:
             # 19 branches x 8 per page once stranded a real task at INPUT_LIMIT.
             batch_cap = min(batch_cap, max(1, MANIFEST_HIT_LIMIT // len(options)))
@@ -562,7 +572,7 @@ class LocalFirstSearch:
                 'ranking_evidence': 'authorized_catalog_order'}
         progress['initial_window_complete'] = (
             progress['pagination_stopped'] or (
-                (self._automatic_refill(task) or task.media_type == 'video')
+                self._first_window_only(task)
                 and bool(progress['members'])
                 and all(member['committed_pages'] >= 1
                         and member['status'] != 'pending'
@@ -720,7 +730,7 @@ class LocalFirstSearch:
         if progress is not None:
             progress['members'] = self._mark_initial_members(actor, task_id, progress['members'])
         if (progress is not None and not progress['pagination_stopped']
-                and not ((self._automatic_refill(task) or task.media_type == 'video')
+                and not (self._first_window_only(task)
                          and bool(progress['members'])
                          and all(member['committed_pages'] >= 1
                                  and member['status'] != 'pending'

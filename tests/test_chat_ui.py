@@ -200,8 +200,37 @@ const accepted={schema_version:'dialogue-command@1',status:'understanding'};
 const guard=setTimeout(()=>process.exit(9),2500);
 (async()=>{assert.equal(await wait(accepted,'key'),result);assert.equal(reads,1);
  const controller=new AbortController();const pending=wait(accepted,'key',controller.signal);controller.abort();
- await assert.rejects(pending,error=>error.name==='AbortError');assert.equal(reads,1);clearTimeout(guard);
+ await assert.rejects(pending,error=>error.name==='AbortError');assert.equal(reads,1);
+ await assert.rejects(wait({schema_version:'dialogue-command@1',status:'failed',error:{code:'MODEL_RATE_LIMIT',message:'busy'}},'key'),error=>error.code==='MODEL_RATE_LIMIT'&&error.commandStatus==='failed');
+ assert.equal(reads,1);clearTimeout(guard);
 })().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for cleaning handoff status')
+    def test_available_cleaning_checkpoint_never_claims_completion(self):
+        source = CHAT_JS[CHAT_JS.index('function showCleaningHandoff('):CHAT_JS.index('async function guidedStartSearch(')]
+        script = r"""
+const assert=require('node:assert/strict');let title;
+const show=new Function('message',process.env.SOURCE+';return showCleaningHandoff')((role,value)=>{title=value});
+for(const status of ['running','failed','unknown']){show({available:true,runs:[{status}]});assert.equal(title,'候选已进入清洗')}
+show({available:true,runs:[{status:'completed'}]});assert.equal(title,'清洗检测已结束');
+show({available:true,runs:[]});assert.equal(title,'候选已进入清洗');
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for dialogue failure routing')
+    def test_terminal_dialogue_failure_retries_while_network_loss_only_checks(self):
+        source = CHAT_JS[CHAT_JS.index('function showDialogueFailure('):CHAT_JS.index('async function awaitDialogueCommand(')]
+        script = r"""
+const assert=require('node:assert/strict');let pending=true,callback,view,retries=[],sends=0;
+const state={};const show=new Function('state','pendingDialogueCommand','message','guidedAction','recoverDialogueCommand','prepareTask',process.env.SOURCE+';return showDialogueFailure')(
+ state,()=>pending,(role,title,text)=>{view={title,text};return {remove(){}}},(bubble,label,fn)=>{view.label=label;callback=fn},retry=>retries.push(retry),()=>sends++);
+show({commandStatus:'failed'},'模型繁忙，原消息已保留');assert.equal(view.title,'消息暂未完成');assert.equal(view.label,'重试这条消息');callback();assert.deepEqual(retries,[true]);
+show({code:'NETWORK_UNAVAILABLE'},'连接中断');assert.equal(view.title,'消息结果待核对');callback();assert.deepEqual(retries,[true,false]);
+pending=false;show({},'未提交');callback();assert.equal(sends,1);
 """
         result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -213,7 +242,7 @@ const guard=setTimeout(()=>process.exit(9),2500);
         script = r"""
 const assert=require('node:assert/strict');
 const state={dialogueId:null,dialogueVersion:0,newChatToken:'token'};
-const saved=new Map(),headers={'X-Tenant-Id':'tenant','X-User-Id':'owner'};
+const saved=new Map([['dsh-fresh-chat','token']]),headers={'X-Tenant-Id':'tenant','X-User-Id':'owner'};
 const sessionStorage={getItem:key=>saved.get(key)||null,setItem:(key,value)=>saved.set(key,value),removeItem:key=>saved.delete(key)};
 const body={session_id:null,expected_version:0,message:'想找狗图片',llm_id:'original',phase:'request'};
 const turn={session_id:'dlg_one',version:1,action:'clarify',stage:'request',reply:'需要多少张？',is_current:true};
@@ -224,7 +253,7 @@ const funcs=new Function('state','headers','sessionStorage','key','api','setDial
  state,headers,sessionStorage,prefix=>prefix+'-id',api,()=>{},()=>{},async()=>{state.dialogueId=turn.session_id;state.dialogueVersion=turn.version},()=>{replies++},()=>({textContent:''}));
 const guard=setTimeout(()=>process.exit(9),2000);
 (async()=>{const recovered=await funcs.sendDialogueCommand(body,{llm:'original'});assert.equal(recovered.recovered,true);
- assert.equal(posts,1);assert.equal(reads,1);assert.equal(funcs.pendingDialogueCommand().result.session_id,'dlg_one');
+ assert.equal(posts,1);assert.equal(reads,1);assert.equal(funcs.pendingDialogueCommand().result.session_id,'dlg_one');assert(!saved.has('dsh-fresh-chat'));
  state.pendingTaskTurn=null;await funcs.recoverDialogueCommand();
  assert.equal(posts,1);assert.equal(reads,2);assert.equal(state.dialogueId,'dlg_one');assert.equal(state.dialogueVersion,1);
  assert.equal(funcs.pendingTaskTurn('dialogue:new:token'),null);assert.equal(replies,0);clearTimeout(guard);
@@ -883,8 +912,7 @@ assert.match(status.textContent,/保留你的文字/);
         self.assertIn('已等待 ${waitSeconds} 秒', source)
         self.assertIn('clearInterval(waitTimer)', source)
         self.assertIn("e.code==='DSH_TIMEOUT'", source)
-        self.assertIn("这次没有提单", source)
-        self.assertIn("guidedAction(bubble,'重试这条消息'", source)
+        self.assertIn("showDialogueFailure(e,explanation)", source)
         self.assertIn("e.name==='AbortError'", source)
         self.assertIn('controller.signal', source)
         self.assertIn('id="stop-request"', CHAT_HTML)
@@ -932,6 +960,40 @@ assert.equal(reloads,1);assert(removed.includes('dsh-dialogue'));
         result = subprocess.run(['node', '-e', script],
                                 env={**os.environ, 'SOURCE': source, 'START': start},
                                 capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for failed-turn model changes')
+    def test_switching_model_after_known_failure_releases_original_turn_before_new_send(self):
+        start = CHAT_JS.index('  const unresolved=pendingDialogueCommand();if(unresolved){')
+        source = CHAT_JS[start:CHAT_JS.index('  if(state.dialogueModelBinding)', start)]
+        script = r"""
+(async()=>{
+const assert=require('node:assert/strict');let selected='new-model',release=true,retries=[],newSends=0;
+const pending={body:{message:'same request',llm_id:'old-model'}};
+const run=new Function('pendingDialogueCommand','$','recoverDialogueCommand','prepareTask','text','return async()=>{'+process.env.SOURCE+';return "continue"}')(
+ ()=>pending,()=>({value:selected}),async(...args)=>{retries.push(args);return release},()=>newSends++,'same request');
+await run();assert.deepEqual(retries,[[false,true]]);assert.equal(newSends,1);
+release=false;retries=[];await run();assert.deepEqual(retries,[[false,true]]);assert.equal(newSends,1);
+selected='old-model';retries=[];await run();assert.deepEqual(retries,[[true]]);assert.equal(newSends,1);
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for dialogue refresh recovery')
+    def test_saved_dialogue_refresh_restores_session_instead_of_starting_empty_chat(self):
+        source = (CHAT_JS[CHAT_JS.index('function saveDialogueSession()'):CHAT_JS.index('async function restoreDialogueSession(')] +
+                  CHAT_JS[CHAT_JS.index('function chatNavigationIntent()'):CHAT_JS.index('function startNewChat()')])
+        script = r"""
+const assert=require('node:assert/strict');const saved=new Map([['dsh-fresh-chat','token']]);
+const sessionStorage={getItem:k=>saved.get(k)||null,setItem:(k,v)=>saved.set(k,v),removeItem:k=>saved.delete(k)};
+const localStorage={getItem:()=>null,removeItem(){}};
+const state={dialogueId:'dlg_saved',proposedExpansion:{count:60}};
+const [save,intent]=new Function('state','sessionStorage','localStorage','saveCurrentModelChoice','location',process.env.SOURCE+';return [saveDialogueSession,chatNavigationIntent]')(
+ state,sessionStorage,localStorage,()=>{},{search:''});
+save();assert.deepEqual(intent(),{fresh:false,taskId:null});assert.equal(JSON.parse(saved.get('dsh-dialogue')).id,'dlg_saved');assert.equal(JSON.parse(saved.get('dsh-dialogue')).proposal.count,60);
+"""
+        result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which('node'), 'Node required for navigation isolation test')
@@ -1519,7 +1581,7 @@ const review=new Function('state','$','message','guidedAction','confirmGuidedExp
         self.assertIn("cleaning/prepare", CHAT_JS)
         self.assertIn("cleaning/confirm", CHAT_JS)
         self.assertIn("cleaning/status?operation_id=", CHAT_JS)
-        self.assertIn("if(cleaning?.available){message('assistant','VLM 清洗已完成'", CHAT_JS)
+        self.assertIn("if(cleaning?.available){showCleaningHandoff(cleaning);return}", CHAT_JS)
         self.assertIn('实际清洗指令：', CHAT_JS)
         self.assertIn('清洗模型：', CHAT_JS)
         self.assertIn('/cleaning/candidates/', CHAT_JS)

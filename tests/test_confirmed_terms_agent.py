@@ -1,6 +1,7 @@
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from http.server import ThreadingHTTPServer
 import json
 import os
@@ -127,6 +128,36 @@ class ConfirmedTermsAgentTest(unittest.TestCase):
         self.assertEqual(detector.calls, calls)
         self.assertEqual(recovered.artifacts(self.actor, tid, ref)['items'][0]['ref'], self.links.get(self.actor, tid, ref)['links']['manifest_ref'])
 
+    def test_input_only_delegation_freezes_first_pages_without_exhausting_all_cursors(self):
+        capabilities = json.loads(Path(self.engine.capabilities_path).read_text())
+        for item in capabilities['items']:
+            item['max_batch_size'] = 1
+        path = self.f.root / 'one-hit-capabilities.json'
+        path.write_text(json.dumps(capabilities))
+        self.engine.capabilities_path = path
+        cleaning, dispatcher, detector = self.automatic_intake()
+        task, ref = self.create_auto()
+        tid = task['task_id']
+        self.agent.advance(self.actor, tid, ref)
+        deadline = time.monotonic() + 3
+        while not self.engine.progress(self.actor, tid)['initial_window_complete']:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        progress = self.engine.progress(self.actor, tid)
+        self.assertTrue(progress['initial_window_complete'])
+        self.assertTrue(all(member['committed_pages'] == 1 for member in progress['members']))
+        self.assertTrue(any(member['status'] == 'more_available' for member in progress['members']))
+        self.assertFalse(progress['pagination_stopped'])
+        view = self.wait_intake(tid, ref)
+        self.assertEqual(view['status'], 'completed', view)
+        self.assertEqual(len(cleaning.repository.pending_approved_operations()), 1)
+        dispatcher._drain()
+        self.assertGreater(detector.calls, 0)
+        calls = detector.calls
+        self.agent.advance(self.actor, tid, ref)
+        dispatcher._drain()
+        self.assertEqual(detector.calls, calls)
+
     def test_optional_candidate_review_still_waits_then_queues_cleaning(self):
         cleaning, _, detector = self.automatic_intake()
         task, ref = self.create_auto(review=True); tid=task['task_id']
@@ -165,7 +196,10 @@ class ConfirmedTermsAgentTest(unittest.TestCase):
         cleaning, dispatcher, _ = self.automatic_intake()
         task, ref=self.create_auto();tid=task['task_id']
         self.agent.advance(self.actor,tid,ref)
-        self.f.wait_stopped(self.engine,tid)
+        deadline = time.monotonic() + 3
+        while not self.engine.progress(self.actor,tid)['initial_window_complete']:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
         original=self.links.update
         def crash(*args,**kwargs):
             if kwargs.get('status')=='completed': raise RuntimeError('crash after cleaning approval')

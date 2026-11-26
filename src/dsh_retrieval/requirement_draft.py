@@ -14,10 +14,11 @@ FIELDS = {'op', 'targets', 'label', 'scene', 'count', 'text', 'source_text'}
 def edit_schema():
     text = lambda n: {'type': 'string', 'minLength': 1, 'maxLength': n}
     common = {'targets': {'type': 'array', 'maxItems': 20, 'items': text(64)},
-              'source_text': text(1000)}
+              'source_text': {**text(1000), 'description': 'Exact contiguous quote from the latest user message; no paraphrase.'}}
     shapes = []
     for op, extra, required in (
-        ('add_category', {'label': text(32), 'scene': text(160),
+        ('add_category', {'label': {**text(32), 'description': 'Required short category name copied as a contiguous substring of source_text. Do not concatenate separated words.'},
+                          'scene': {**text(160), 'description': 'Required full scene copied as a contiguous substring of source_text, including object quantities and actions.'},
                           'count': {'type': ['integer', 'null'], 'minimum': 1, 'maximum': 10000}}, ['label', 'scene']),
         ('update_category', {'label': text(32), 'scene': text(160)}, []),
         ('remove_category', {}, []),
@@ -83,8 +84,12 @@ def apply_edits(state, edits, message):
             raise ValueError('Fields do not match requirement operation')
         if op == 'add_category':
             label, scene = edit['label'], edit['scene']
-            if targets or not label or not scene or label not in source or scene not in source:
-                raise ValueError('New categories need a literal label and scene from this message')
+            if targets:
+                raise ValueError('add_category needs targets=[]; use label to name the new category')
+            if not label or label not in source:
+                raise ValueError('add_category.label is required and must be a contiguous substring of source_text; do not concatenate separated words')
+            if not scene or scene not in source:
+                raise ValueError('add_category.scene is required and must be a contiguous substring of source_text, retaining the full scene')
             if any(c['label'] == label for c in categories):
                 raise ValueError('Category exists; use its category_id to update it')
             category_id = _category_id(label)

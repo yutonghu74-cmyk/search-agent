@@ -91,6 +91,14 @@ class PlanSetCleaningBridgeTest(unittest.TestCase):
 
     def test_incremental_cleaning_publishes_cumulative_result_lineage(self):
         f = self.fixture
+        # Progressive recall uses half a batch initially. This lineage test
+        # needs two different candidates to split, regardless of source ranking.
+        capabilities = json.loads(Path(f.local.capabilities_path).read_text())
+        for item in capabilities['items']:
+            item['max_batch_size'] = 4
+        path = f.root / 'lineage-capabilities.json'
+        path.write_text(json.dumps(capabilities))
+        f.local.capabilities_path = path
         body = json.loads(json.dumps(BODY))
         body['query_spec']['raw_request'] = '找动物图片'
         body['query_spec']['target_count'] = 2

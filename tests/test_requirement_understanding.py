@@ -67,6 +67,26 @@ class RequirementUnderstandingTest(unittest.TestCase):
                                                ['毛驴', '狗', '兔子'], 60), dict.fromkeys(['毛驴', '狗', '兔子'], 20))
         self.assertEqual(coordinator.snapshot(self.actor, 'demo', result['session_id'])['request']['requirement_draft'], draft)
 
+    def test_new_subject_without_categories_repairs_before_saving_total(self):
+        message = '找猫在窗边和狗在草地的图片，总共20张，不规定各类数量'
+        coordinator = self.coordinator([
+            {'action': 'update', 'subject': '猫在窗边和狗在草地',
+             'target_count': 20, 'media_type': 'image'},
+            {'action': 'update', 'target_count': 20, 'media_type': 'image',
+             'requirement_edits': [
+                 edit('add_category', label='猫', scene='猫在窗边', source_text='猫在窗边'),
+                 edit('add_category', label='狗', scene='狗在草地', source_text='狗在草地')]},
+        ])
+        result = self.turn(coordinator, message)
+        self.assertEqual(result['stage'], 'terms')
+        self.assertEqual(result['request']['target_count'], 20)
+        categories = result['request']['requirement_draft']['categories']
+        self.assertEqual([(c['label'], c['target_count']) for c in categories], [('猫', None), ('狗', None)])
+        self.assertEqual(len(self.transport.calls), 2)
+        repair = json.loads(self.transport.calls[1]['messages'][1]['content'])['repair']
+        self.assertIn('requirement_edits/add_category', repair['reason'])
+        self.assertEqual(coordinator.snapshot(self.actor, 'demo', result['session_id'])['request'], result['request'])
+
     def test_multiturn_quantity_scene_condition_and_removal_keep_unaffected_categories(self):
         coordinator = self.coordinator([
             {'action': 'update', 'media_type': 'image', 'requirement_edits': EDITS},

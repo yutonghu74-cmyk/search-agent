@@ -7,6 +7,15 @@ from .query_spec import digest
 WORKFLOW = 'confirmed-terms-retrieval@1'
 
 
+def delegates_candidate_window(spec):
+    """Only the versioned intake delegation permits fixing an initial prefix."""
+    execution = spec.get('retrieval_execution') or {}
+    return (spec.get('media_type') == 'image'
+            and execution.get('schema_version') == 'confirmed-terms-execution@2'
+            and execution.get('workflow_ref') == WORKFLOW
+            and execution.get('candidate_intake') in ('auto', 'manual'))
+
+
 def normalize_execution(value):
     fields = {'schema_version', 'workflow_ref', 'binding_ids', 'max_calls', 'max_hit_slots', 'policy_digest'}
     version = value.get('schema_version') if type(value) is dict else None
