@@ -210,6 +210,10 @@ class RetrievalAgentTest(unittest.TestCase):
         status, catalog_after = self.f.call('/v1/retrieval/projects/demo/agent-management')
         self.assertEqual(status, 200, catalog_after)
         self.assertEqual(catalog_after['binding'], catalog['binding'])
+        handler.agent_management = None
+        status, unavailable = self.f.call('/v1/retrieval/projects/demo/agent-management')
+        self.assertEqual(status, 503, unavailable)
+        self.assertEqual(unavailable['code'], 'AGENT_MANAGEMENT_UNAVAILABLE')
 
     def test_regeneration_invalidates_older_plan_even_without_dialogue_edit(self):
         old = self.plan(); body = self.confirmation(old)
