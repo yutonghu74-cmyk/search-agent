@@ -1,0 +1,407 @@
+{
+  "schema_version": "requirement-scenarios@1",
+  "description": "Core pre-task requirement-understanding baseline: 24 multi-turn synthetic scenarios. Development validation only; not a claim that all user phrasing is understood.",
+  "expectation_rules": {
+    "categories": "Full alias map; each actual category must match exactly one alias by all of its match substrings in label+scene. category_changes patches the carried map; null removes an alias.",
+    "count": "Integer, null, or a list of allowed values.",
+    "total": "Stored target_count: integer, null, or a list of allowed values.",
+    "conditions": "Required keywords in category conditions plus common constraints. A tracked keyword outside this list must be absent (scope leak).",
+    "may_change": "Aliases whose stored fields may differ from the previous turn; all others must be identical. Omitted after turn 1 means nothing may change. common_may_change allows common constraints to change.",
+    "ask": "false: no clarification/quantity re-ask. true or {questions, mentions, forbid}: a specific question is expected.",
+    "fixture": "Ideal model proposal for the scripted deterministic regression. @alias in targets resolves to the stored category_id of the previous turn."
+  },
+  "prefixes": {
+    "three_each_20": [
+      {"message": "毛驴奔跑、狗吃饭、兔子睡觉的图片，各20张",
+       "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+         {"op": "add_category", "targets": [], "label": "毛驴", "scene": "毛驴奔跑", "source_text": "毛驴奔跑"},
+         {"op": "add_category", "targets": [], "label": "狗", "scene": "狗吃饭", "source_text": "狗吃饭"},
+         {"op": "add_category", "targets": [], "label": "兔子", "scene": "兔子睡觉", "source_text": "兔子睡觉"},
+         {"op": "set_count", "targets": ["毛驴", "狗", "兔子"], "count": 20, "source_text": "各20张"}]},
+       "expect": {"categories": {
+         "donkey": {"match": ["毛驴"], "scene": ["奔跑"], "count": 20},
+         "dog": {"match": ["狗"], "scene": ["吃饭"], "count": 20},
+         "rabbit": {"match": ["兔子"], "scene": ["睡觉"], "count": 20}},
+         "total": 60, "stage": "terms", "ask": false}}
+    ]
+  },
+  "scenarios": [
+    {"id": "A1", "group": "首轮完整需求", "title": "三类各20张，询问总数原因后只改狗",
+     "tracked_conditions": [],
+     "turns": [
+       {"message": "毛驴奔跑、狗吃饭、兔子睡觉的图片，每类20张",
+        "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "毛驴", "scene": "毛驴奔跑", "source_text": "毛驴奔跑"},
+          {"op": "add_category", "targets": [], "label": "狗", "scene": "狗吃饭", "source_text": "狗吃饭"},
+          {"op": "add_category", "targets": [], "label": "兔子", "scene": "兔子睡觉", "source_text": "兔子睡觉"},
+          {"op": "set_count", "targets": ["毛驴", "狗", "兔子"], "count": 20, "source_text": "每类20张"}]},
+        "expect": {"categories": {
+          "donkey": {"match": ["毛驴"], "scene": ["奔跑"], "count": 20},
+          "dog": {"match": ["狗"], "scene": ["吃饭"], "count": 20},
+          "rabbit": {"match": ["兔子"], "scene": ["睡觉"], "count": 20}},
+          "total": 60, "stage": "terms", "ask": false}},
+       {"message": "为什么是60张？",
+        "fixture": {"action": "answer", "reply": "三类各20张，合计60张。"},
+        "expect": {"total": 60, "action": "answer", "unchanged": true}},
+       {"message": "狗改成25张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 25, "source_text": "狗改成25张"}]},
+        "expect": {"category_changes": {"dog": {"count": 25}}, "total": 65, "may_change": ["dog"]}}
+     ]},
+    {"id": "A2", "group": "首轮完整需求", "title": "类别分别给数量",
+     "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "找猫在窗边的图片10张，狗在草地上奔跑的图片15张",
+        "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "猫", "scene": "猫在窗边", "count": 10, "source_text": "猫在窗边的图片10张"},
+          {"op": "add_category", "targets": [], "label": "狗", "scene": "狗在草地上奔跑", "count": 15, "source_text": "狗在草地上奔跑的图片15张"}]},
+        "expect": {"categories": {
+          "cat": {"match": ["猫"], "scene": ["窗边"], "count": 10},
+          "dog": {"match": ["狗"], "scene": ["草地", "奔跑"], "count": 15}},
+          "total": 25, "stage": "terms", "ask": false}},
+       {"message": "猫改成20张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@cat"], "count": 20, "source_text": "猫改成20张"}]},
+        "expect": {"category_changes": {"cat": {"count": 20}}, "total": 35, "may_change": ["cat"]}},
+       {"message": "狗不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@dog"], "text": "不要水印", "source_text": "狗不要水印"}]},
+        "expect": {"category_changes": {"dog": {"conditions": ["水印"]}}, "total": 35, "may_change": ["dog"]}}
+     ]},
+    {"id": "A3", "group": "首轮完整需求", "title": "只给总数不分配",
+     "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "找猫在窗边和狗在草地的图片，总共20张，不用规定每类多少",
+        "fixture": {"action": "update", "media_type": "image", "target_count": 20, "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "猫", "scene": "猫在窗边", "source_text": "猫在窗边"},
+          {"op": "add_category", "targets": [], "label": "狗", "scene": "狗在草地", "source_text": "狗在草地"}]},
+        "expect": {"categories": {
+          "cat": {"match": ["猫"], "scene": ["窗边"], "count": null},
+          "dog": {"match": ["狗"], "scene": ["草地"], "count": null}},
+          "total": 20, "stage": "terms", "ask": false}},
+       {"message": "狗不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@dog"], "text": "不要水印", "source_text": "狗不要水印"}]},
+        "expect": {"category_changes": {"dog": {"conditions": ["水印"]}}, "total": 20, "may_change": ["dog"]}},
+       {"message": "总数改成30张",
+        "fixture": {"action": "revise_terms", "target_count": 30},
+        "expect": {"total": 30, "may_change": []}}
+     ]},
+    {"id": "A4", "group": "首轮完整需求", "title": "画面物体数量不是图片张数",
+     "tracked_conditions": ["有人"],
+     "turns": [
+       {"message": "找三只猫在沙发上睡觉的图片，要12张",
+        "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "猫", "scene": "三只猫在沙发上睡觉", "count": 12, "source_text": "三只猫在沙发上睡觉的图片，要12张"}]},
+        "expect": {"categories": {
+          "cat": {"match": ["猫"], "scene": ["三只", "沙发", "睡觉"], "count": [12, null]}},
+          "total": 12, "stage": "terms", "ask": false}},
+       {"message": "改成两只猫",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "update_category", "targets": ["@cat"], "scene": "两只猫在沙发上睡觉", "source_text": "改成两只猫"}]},
+        "expect": {"category_changes": {"cat": {"scene": ["两只", "沙发", "睡觉"], "scene_forbid": ["三只"]}}, "total": 12, "may_change": ["cat"]}},
+       {"message": "不要有人",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@cat"], "text": "不要有人", "source_text": "不要有人"}]},
+        "expect": {"category_changes": {"cat": {"conditions": ["有人"]}}, "total": 12, "may_change": ["cat"], "common_may_change": true}}
+     ]},
+    {"id": "B1", "group": "补充缺失信息", "title": "先说类别，再补每类20张",
+     "tracked_conditions": [],
+     "turns": [
+       {"message": "想找毛驴奔跑、狗吃饭和兔子睡觉的图片",
+        "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "毛驴", "scene": "毛驴奔跑", "source_text": "毛驴奔跑"},
+          {"op": "add_category", "targets": [], "label": "狗", "scene": "狗吃饭", "source_text": "狗吃饭"},
+          {"op": "add_category", "targets": [], "label": "兔子", "scene": "兔子睡觉", "source_text": "兔子睡觉"}]},
+        "expect": {"categories": {
+          "donkey": {"match": ["毛驴"], "scene": ["奔跑"], "count": null},
+          "dog": {"match": ["狗"], "scene": ["吃饭"], "count": null},
+          "rabbit": {"match": ["兔子"], "scene": ["睡觉"], "count": null}},
+          "total": null, "stage": "request", "ask": {"questions": ["target_count", "custom_clarification"]}}},
+       {"message": "每类20张",
+        "fixture": {"action": "update", "requirement_edits": [
+          {"op": "set_count", "targets": ["@donkey", "@dog", "@rabbit"], "count": 20, "source_text": "每类20张"}]},
+        "expect": {"category_changes": {"donkey": {"count": 20}, "dog": {"count": 20}, "rabbit": {"count": 20}},
+          "total": 60, "stage": "terms", "ask": false, "may_change": ["donkey", "dog", "rabbit"]}},
+       {"message": "兔子不要了",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "remove_category", "targets": ["@rabbit"], "source_text": "兔子不要了"}]},
+        "expect": {"category_changes": {"rabbit": null}, "total": 40, "may_change": ["rabbit"]}}
+     ]},
+    {"id": "B2", "group": "补充缺失信息", "title": "只给其中一类数量，只追问另一类",
+     "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "找猫和狗的图片，猫要10张",
+        "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "猫", "scene": "猫", "source_text": "猫和狗"},
+          {"op": "add_category", "targets": [], "label": "狗", "scene": "狗", "source_text": "猫和狗"},
+          {"op": "set_count", "targets": ["猫"], "count": 10, "source_text": "猫要10张"}],
+          "clarification": {"field": "target_count", "source_text": "猫要10张", "question": "狗需要多少张？"}},
+        "expect": {"categories": {
+          "cat": {"match": ["猫"], "count": 10},
+          "dog": {"match": ["狗"], "count": null}},
+          "total": null, "stage": "request", "ask": {"mentions": ["狗"]}}},
+       {"message": "狗要15张",
+        "fixture": {"action": "update", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 15, "source_text": "狗要15张"}]},
+        "expect": {"category_changes": {"dog": {"count": 15}}, "total": 25, "stage": "terms", "ask": false, "may_change": ["dog"]}},
+       {"message": "两类都不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@cat", "@dog"], "text": "不要水印", "source_text": "两类都不要水印"}]},
+        "expect": {"category_changes": {"cat": {"conditions": ["水印"]}, "dog": {"conditions": ["水印"]}},
+          "total": 25, "may_change": ["cat", "dog"], "common_may_change": true}}
+     ]},
+    {"id": "B3", "group": "补充缺失信息", "title": "单类先补条件再补数量",
+     "tracked_conditions": ["有人"],
+     "turns": [
+       {"message": "我想找一些海边日落的图片",
+        "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "海边日落", "scene": "海边日落", "source_text": "海边日落"}]},
+        "expect": {"categories": {"sunset": {"match": ["日落"], "scene": ["海边"], "count": null}},
+          "total": null, "stage": "request", "ask": {"questions": ["target_count", "custom_clarification"]}}},
+       {"message": "不要有人",
+        "fixture": {"action": "update", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@sunset"], "text": "不要有人", "source_text": "不要有人"}]},
+        "expect": {"category_changes": {"sunset": {"conditions": ["有人"]}}, "total": null, "stage": "request",
+          "ask": {"questions": ["target_count", "custom_clarification"], "forbid": ["什么内容", "什么场景"]},
+          "may_change": ["sunset"], "common_may_change": true}},
+       {"message": "20张",
+        "fixture": {"action": "update", "target_count": 20},
+        "expect": {"category_changes": {"sunset": {"count": [20, null]}}, "total": 20, "stage": "terms", "ask": false, "may_change": ["sunset"]}}
+     ]},
+    {"id": "B4", "group": "补充缺失信息", "title": "逐类补数量",
+     "tracked_conditions": [],
+     "turns": [
+       {"message": "找小猫玩毛线球、小狗啃骨头的图片",
+        "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "小猫", "scene": "小猫玩毛线球", "source_text": "小猫玩毛线球"},
+          {"op": "add_category", "targets": [], "label": "小狗", "scene": "小狗啃骨头", "source_text": "小狗啃骨头"}]},
+        "expect": {"categories": {
+          "kitten": {"match": ["猫"], "scene": ["毛线球"], "count": null},
+          "puppy": {"match": ["狗"], "scene": ["骨头"], "count": null}},
+          "total": null, "stage": "request", "ask": {"questions": ["target_count", "custom_clarification"]}}},
+       {"message": "小猫要8张",
+        "fixture": {"action": "update", "requirement_edits": [
+          {"op": "set_count", "targets": ["@kitten"], "count": 8, "source_text": "小猫要8张"}],
+          "clarification": {"field": "target_count", "source_text": "小猫要8张", "question": "小狗需要多少张？"}},
+        "expect": {"category_changes": {"kitten": {"count": 8}}, "total": null, "stage": "request",
+          "ask": {"mentions": ["狗"]}, "may_change": ["kitten"]}},
+       {"message": "小狗也要8张",
+        "fixture": {"action": "update", "requirement_edits": [
+          {"op": "set_count", "targets": ["@puppy"], "count": 8, "source_text": "小狗也要8张"}]},
+        "expect": {"category_changes": {"puppy": {"count": 8}}, "total": 16, "stage": "terms", "ask": false, "may_change": ["puppy"]}}
+     ]},
+    {"id": "C1", "group": "局部修改", "title": "狗改30张、只狗无水印、删除兔子",
+     "prefix": "three_each_20", "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "狗改成30张，其他不变",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 30, "source_text": "狗改成30张"}]},
+        "expect": {"category_changes": {"dog": {"count": 30}}, "total": 70, "may_change": ["dog"]}},
+       {"message": "只有狗不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@dog"], "text": "不要水印", "source_text": "只有狗不要水印"}]},
+        "expect": {"category_changes": {"dog": {"conditions": ["水印"]}}, "total": 70, "may_change": ["dog"]}},
+       {"message": "兔子不要了",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "remove_category", "targets": ["@rabbit"], "source_text": "兔子不要了"}]},
+        "expect": {"category_changes": {"rabbit": null}, "total": 50, "may_change": ["rabbit"]}}
+     ]},
+    {"id": "C2", "group": "局部修改", "title": "兔子改吃草、毛驴改河边吃草",
+     "prefix": "three_each_20", "tracked_conditions": [],
+     "turns": [
+       {"message": "兔子改成吃草",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "update_category", "targets": ["@rabbit"], "scene": "兔子吃草", "source_text": "兔子改成吃草"}]},
+        "expect": {"category_changes": {"rabbit": {"scene": ["吃草"], "scene_forbid": ["睡觉"]}}, "total": 60, "may_change": ["rabbit"]}},
+       {"message": "毛驴改成在河边吃草",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "update_category", "targets": ["@donkey"], "scene": "毛驴在河边吃草", "source_text": "毛驴改成在河边吃草"}]},
+        "expect": {"category_changes": {"donkey": {"scene": ["河边", "吃草"], "scene_forbid": ["奔跑"]}}, "total": 60, "may_change": ["donkey"]}}
+     ]},
+    {"id": "C3", "group": "局部修改", "title": "增加猫后再改猫数量",
+     "prefix": "three_each_20", "tracked_conditions": [],
+     "turns": [
+       {"message": "再加一类猫在窗台晒太阳，也要20张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "猫", "scene": "猫在窗台晒太阳", "count": 20, "source_text": "再加一类猫在窗台晒太阳，也要20张"}]},
+        "expect": {"category_changes": {"cat": {"match": ["猫"], "scene": ["窗台", "晒太阳"], "count": 20}}, "total": 80, "may_change": ["cat"]}},
+       {"message": "猫改成10张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@cat"], "count": 10, "source_text": "猫改成10张"}]},
+        "expect": {"category_changes": {"cat": {"count": 10}}, "total": 70, "may_change": ["cat"]}}
+     ]},
+    {"id": "C4", "group": "局部修改", "title": "删除兔子再加回",
+     "prefix": "three_each_20", "tracked_conditions": [],
+     "turns": [
+       {"message": "兔子不要了",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "remove_category", "targets": ["@rabbit"], "source_text": "兔子不要了"}]},
+        "expect": {"category_changes": {"rabbit": null}, "total": 40, "may_change": ["rabbit"]}},
+       {"message": "再把兔子加回来，兔子睡觉，20张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "兔子", "scene": "兔子睡觉", "count": 20, "source_text": "兔子睡觉，20张"}]},
+        "expect": {"category_changes": {"rabbit": {"match": ["兔子"], "scene": ["睡觉"], "count": 20}}, "total": 60, "may_change": ["rabbit"]}}
+     ]},
+    {"id": "D1", "group": "条件范围与撤销", "title": "只有狗无水印，后改兔子不影响条件",
+     "prefix": "three_each_20", "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "只有狗不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@dog"], "text": "不要水印", "source_text": "只有狗不要水印"}]},
+        "expect": {"category_changes": {"dog": {"conditions": ["水印"]}}, "total": 60, "may_change": ["dog"]}},
+       {"message": "兔子改成吃草",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "update_category", "targets": ["@rabbit"], "scene": "兔子吃草", "source_text": "兔子改成吃草"}]},
+        "expect": {"category_changes": {"rabbit": {"scene": ["吃草"], "scene_forbid": ["睡觉"]}}, "total": 60, "may_change": ["rabbit"]}}
+     ]},
+    {"id": "D2", "group": "条件范围与撤销", "title": "所有类别无水印后改数量",
+     "prefix": "three_each_20", "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "所有类别都不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@donkey", "@dog", "@rabbit"], "text": "不要水印", "source_text": "所有类别都不要水印"}]},
+        "expect": {"category_changes": {"donkey": {"conditions": ["水印"]}, "dog": {"conditions": ["水印"]}, "rabbit": {"conditions": ["水印"]}},
+          "total": 60, "may_change": ["donkey", "dog", "rabbit"], "common_may_change": true}},
+       {"message": "狗改成30张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 30, "source_text": "狗改成30张"}]},
+        "expect": {"category_changes": {"dog": {"count": 30}}, "total": 70, "may_change": ["dog"]}}
+     ]},
+    {"id": "D3", "group": "条件范围与撤销", "title": "撤销狗的水印限制",
+     "prefix": "three_each_20", "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "只有狗不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@dog"], "text": "不要水印", "source_text": "只有狗不要水印"}]},
+        "expect": {"category_changes": {"dog": {"conditions": ["水印"]}}, "total": 60, "may_change": ["dog"]}},
+       {"message": "狗的水印限制取消吧",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "remove_condition", "targets": ["@dog"], "text": "不要水印", "source_text": "狗的水印限制取消吧"}]},
+        "expect": {"category_changes": {"dog": {"conditions": []}}, "total": 60, "may_change": ["dog"]}},
+       {"message": "狗改成30张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 30, "source_text": "狗改成30张"}]},
+        "expect": {"category_changes": {"dog": {"count": 30}}, "total": 70, "may_change": ["dog"]}}
+     ]},
+    {"id": "D4", "group": "条件范围与撤销", "title": "全部无水印后单独放开兔子",
+     "prefix": "three_each_20", "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "都不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@donkey", "@dog", "@rabbit"], "text": "不要水印", "source_text": "都不要水印"}]},
+        "expect": {"category_changes": {"donkey": {"conditions": ["水印"]}, "dog": {"conditions": ["水印"]}, "rabbit": {"conditions": ["水印"]}},
+          "total": 60, "may_change": ["donkey", "dog", "rabbit"], "common_may_change": true}},
+       {"message": "兔子可以有水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "remove_condition", "targets": ["@rabbit"], "text": "不要水印", "source_text": "兔子可以有水印"}]},
+        "expect": {"category_changes": {"rabbit": {"conditions": []}}, "total": 60,
+          "may_change": ["donkey", "dog", "rabbit"], "common_may_change": true}}
+     ]},
+    {"id": "E1", "group": "指代与冲突", "title": "其他不变：毛驴换成马",
+     "prefix": "three_each_20", "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "把毛驴换成马在奔跑，其他不变",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "update_category", "targets": ["@donkey"], "label": "马", "scene": "马在奔跑", "source_text": "把毛驴换成马在奔跑"}]},
+        "expect": {"category_changes": {"donkey": null, "horse": {"match": ["马"], "scene": ["奔跑"], "count": 20}},
+          "total": 60, "may_change": ["donkey", "horse"]}},
+       {"message": "马不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@horse"], "text": "不要水印", "source_text": "马不要水印"}]},
+        "expect": {"category_changes": {"horse": {"conditions": ["水印"]}}, "total": 60, "may_change": ["horse"]}}
+     ]},
+    {"id": "E2", "group": "指代与冲突", "title": "按画面明确指代类别",
+     "prefix": "three_each_20", "tracked_conditions": [],
+     "turns": [
+       {"message": "吃饭的那组改成40张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 40, "source_text": "吃饭的那组改成40张"}]},
+        "expect": {"category_changes": {"dog": {"count": 40}}, "total": 80, "may_change": ["dog"]}},
+       {"message": "睡觉的那个不要了",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "remove_category", "targets": ["@rabbit"], "source_text": "睡觉的那个不要了"}]},
+        "expect": {"category_changes": {"rabbit": null}, "total": 60, "may_change": ["rabbit"]}}
+     ]},
+    {"id": "E3", "group": "指代与冲突", "title": "指代不明先追问，回答后只改狗",
+     "prefix": "three_each_20", "tracked_conditions": [],
+     "turns": [
+       {"message": "那个改成30张",
+        "fixture": {"action": "clarify", "question": "要改成30张的是毛驴、狗还是兔子？",
+          "clarification": {"field": "scope", "source_text": "那个改成30张", "question": "要改成30张的是毛驴、狗还是兔子？"}},
+        "expect": {"total": 60, "unchanged": true, "ask": {"mentions": ["狗"]}}},
+       {"message": "狗",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 30, "source_text": "狗"}]},
+        "expect": {"category_changes": {"dog": {"count": 30}}, "total": 70, "ask": false, "may_change": ["dog"]}}
+     ]},
+    {"id": "E4", "group": "指代与冲突", "title": "总数与分组数量冲突",
+     "tracked_conditions": [],
+     "turns": [
+       {"message": "毛驴、狗、兔子的图片各20张，总共50张",
+        "fixture": {"action": "update", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "毛驴", "scene": "毛驴", "source_text": "毛驴、狗、兔子"},
+          {"op": "add_category", "targets": [], "label": "狗", "scene": "狗", "source_text": "毛驴、狗、兔子"},
+          {"op": "add_category", "targets": [], "label": "兔子", "scene": "兔子", "source_text": "毛驴、狗、兔子"}],
+          "clarification": {"field": "conflict", "source_text": "各20张，总共50张", "question": "各20张合计60张，与总共50张不一致，以哪个为准？"}},
+        "expect": {"categories": {
+          "donkey": {"match": ["毛驴"], "count": [20, null]},
+          "dog": {"match": ["狗"], "count": [20, null]},
+          "rabbit": {"match": ["兔子"], "count": [20, null]}},
+          "total": [null, 60], "stage": "request", "ask": {"mentions": ["50"]}}},
+       {"message": "按每类20张算",
+        "fixture": {"action": "update", "requirement_edits": [
+          {"op": "set_count", "targets": ["@donkey", "@dog", "@rabbit"], "count": 20, "source_text": "每类20张"}]},
+        "expect": {"category_changes": {"donkey": {"count": 20}, "dog": {"count": 20}, "rabbit": {"count": 20}},
+          "total": 60, "stage": "terms", "ask": false, "may_change": ["donkey", "dog", "rabbit"]}},
+       {"message": "狗改成10张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 10, "source_text": "狗改成10张"}]},
+        "expect": {"category_changes": {"dog": {"count": 10}}, "total": 50, "may_change": ["dog"]}}
+     ]},
+    {"id": "F1", "group": "新旧需求切换及普通问答", "title": "单独另找一批",
+     "prefix": "three_each_20", "tracked_conditions": ["水印"],
+     "turns": [
+       {"message": "另外单独再找一批猫的图片，10张，跟刚才的分开",
+        "fixture": {"action": "replace", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "猫", "scene": "猫", "count": 10, "source_text": "猫的图片，10张"}]},
+        "expect": {"categories": {"cat": {"match": ["猫"], "count": [10, null]}}, "total": 10, "stage": "terms", "ask": false, "replace": true}},
+       {"message": "猫不要水印",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "add_condition", "targets": ["@cat"], "text": "不要水印", "source_text": "猫不要水印"}]},
+        "expect": {"category_changes": {"cat": {"conditions": ["水印"]}}, "total": 10, "may_change": ["cat"], "common_may_change": true}}
+     ]},
+    {"id": "F2", "group": "新旧需求切换及普通问答", "title": "替换原需求后改总数",
+     "prefix": "three_each_20", "tracked_conditions": [],
+     "turns": [
+       {"message": "不要刚才那些了，改成找汽车在雪地行驶的图片15张",
+        "fixture": {"action": "replace", "media_type": "image", "requirement_edits": [
+          {"op": "add_category", "targets": [], "label": "汽车", "scene": "汽车在雪地行驶", "count": 15, "source_text": "汽车在雪地行驶的图片15张"}]},
+        "expect": {"categories": {"car": {"match": ["汽车"], "scene": ["雪地", "行驶"], "count": [15, null]}}, "total": 15, "stage": "terms", "ask": false, "replace": true}},
+       {"message": "改成20张",
+        "fixture": {"action": "revise_terms", "target_count": 20},
+        "expect": {"category_changes": {"car": {"count": [20, null]}}, "total": 20, "may_change": ["car"]}}
+     ]},
+    {"id": "F3", "group": "新旧需求切换及普通问答", "title": "询问原因不改草稿",
+     "prefix": "three_each_20", "tracked_conditions": [],
+     "turns": [
+       {"message": "为什么要分三类？",
+        "fixture": {"action": "answer", "reply": "你列了毛驴、狗和兔子三种画面，每类分别找20张。"},
+        "expect": {"total": 60, "action": "answer", "unchanged": true}},
+       {"message": "那狗改成25张",
+        "fixture": {"action": "revise_terms", "requirement_edits": [
+          {"op": "set_count", "targets": ["@dog"], "count": 25, "source_text": "狗改成25张"}]},
+        "expect": {"category_changes": {"dog": {"count": 25}}, "total": 65, "may_change": ["dog"]}}
+     ]},
+    {"id": "F4", "group": "新旧需求切换及普通问答", "title": "询问状态不虚报执行",
+     "prefix": "three_each_20", "tracked_conditions": [],
+     "turns": [
+       {"message": "现在开始检索了吗？",
+        "fixture": {"action": "answer", "reply": "还没有。检索词仍待你点击确认，确认后才会检索。"},
+        "expect": {"total": 60, "action": "answer", "unchanged": true, "reply_forbid": ["已开始检索", "正在检索", "已经开始检索", "已找到"]}},
+       {"message": "为什么还没开始？",
+        "fixture": {"action": "answer", "reply": "词表需要你确认后才会启动检索。"},
+        "expect": {"total": 60, "action": "answer", "unchanged": true, "reply_forbid": ["已开始检索", "正在检索", "已经开始检索", "已找到"]}}
+     ]}
+  ]
+}

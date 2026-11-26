@@ -47,12 +47,22 @@ def _category_id(label):
     return 'cat_' + hashlib.sha256(label.encode()).hexdigest()[:16]
 
 
+def check_request_scope(proposal, previous, message):
+    if (draft_from_state(previous)['categories'] and proposal.get('requirement_edits')
+            and proposal['action'] != 'replace' and re.search(r'单独|另外', message)
+            and re.search(r'(?:跟|与|和)(?:刚才|之前|原来|前面).{0,8}(?:分开|独立)', message)):
+        raise ValueError('The user explicitly requests a separate batch; use replace with only the new request, instead of appending categories to the previous draft')
+
+
 def apply_edits(state, edits, message):
     """Apply a bounded atomic patch; untouched scenes, quantities and conditions survive."""
     if not isinstance(edits, list) or len(edits) > 40:
         raise ValueError('requirement_edits must contain at most 40 operations')
     draft = draft_from_state(state)
     categories = draft['categories']
+    if (len(categories) > 1 and edits and re.fullmatch(
+            rf'\s*(?:那个|这个|它|那类|这类)\s*(?:改成|改为|改|要)?\s*({NUMBER})\s*张[。.!！]?\s*', message)):
+        raise ValueError('Category reference is ambiguous among several categories; ask a scope clarification and preserve the draft')
     for edit in edits:
         if (not isinstance(edit, dict) or set(edit) - FIELDS
                 or not {'op', 'targets', 'source_text'} <= set(edit) or edit['op'] not in OPS):
@@ -75,6 +85,11 @@ def apply_edits(state, edits, message):
             amounts = {number_value(m[1]) for m in re.finditer(rf'({NUMBER})\s*张', source)}
             if state.get('question') == 'target_count' and re.fullmatch(rf'\s*{NUMBER}\s*', source):
                 amounts.add(number_value(source.strip()))
+            # Answering "which category?" keeps the quantity quoted in the question's turn.
+            pending = pending_scope_amounts(state)
+            if count not in amounts and count in pending:
+                edit['source_text'] = source = source + '｜' + state['pending_clarification']['source_text']
+                amounts |= pending
             if count not in amounts:
                 raise ValueError('Image quantity must quote an image count, not a scene object or term count')
         allowed = {'add_category': {'label', 'scene', 'count'},
@@ -116,11 +131,19 @@ def apply_edits(state, edits, message):
         elif op == 'update_category':
             if edit['label'] is None and edit['scene'] is None:
                 raise ValueError('Category update has no changes')
+            if (edit['scene'] is not None and edit['label'] is None
+                    and selected[0]['label'] == selected[0]['scene']
+                    and selected[0]['label'] not in edit['scene']):
+                raise ValueError('The category label contains the old scene; update label together with scene, quoting the new entity name from this message. Keep category_id unchanged')
             for field in ('label', 'scene'):
                 if edit[field] is not None:
                     if edit[field] not in source:
                         context = source + selected[0]['scene'] + selected[0]['label']
-                        if field != 'scene' or any(char.isalnum() and char not in context for char in edit[field]):
+                        scene_chars = iter(edit['scene'] or '')
+                        label_from_scene = field == 'label' and edit['scene'] is not None and all(
+                            any(char == candidate for candidate in scene_chars) for char in edit[field])
+                        recomposed_scene = field == 'scene' or label_from_scene
+                        if not recomposed_scene or any(char.isalnum() and char not in context for char in edit[field]):
                             raise ValueError('Changed fields must be grounded in this message and the previous scene; do not invent new content')
                         selected[0]['evidence']['scene_context'] = selected[0]['scene']
                     selected[0][field] = edit[field]
@@ -135,13 +158,17 @@ def apply_edits(state, edits, message):
             text = edit['text']
             if not text:
                 raise ValueError('Condition operation needs text')
-            if op == 'add_condition' and text not in source:
+            inherited_common = op == 'add_condition' and text in (state.get('constraints') or [])
+            if op == 'add_condition' and text not in source and not inherited_common:
                 raise ValueError('New conditions must quote the user message')
             for category in selected:
                 conditions = category['conditions']
                 if op == 'add_condition':
                     if text not in [c['text'] for c in conditions]:
-                        conditions.append({'text': text, 'source_text': source})
+                        condition = {'text': text, 'source_text': source}
+                        if inherited_common and text not in source:
+                            condition['previous_common_condition'] = text
+                        conditions.append(condition)
                 else:
                     if text not in [c['text'] for c in conditions]:
                         raise ValueError('Cannot remove an unknown condition')
@@ -162,6 +189,30 @@ def allocated_total(draft):
     categories = draft['categories']
     return (sum(c['target_count'] for c in categories)
             if categories and all(c['target_count'] is not None for c in categories) else None)
+
+
+def pending_scope_amounts(state):
+    """Image counts quoted by the turn whose scope is still being clarified."""
+    pending = state.get('pending_clarification')
+    if not pending or pending.get('field') != 'scope' or state.get('question') != 'custom_clarification':
+        return set()
+    return {number_value(m[1]) for m in re.finditer(rf'({NUMBER})\s*张', pending['source_text'])}
+
+
+def retarget_total(draft, total, source):
+    """Apply a new overall image count without inventing a per-category split.
+
+    One category follows the total; unallocated categories keep the total
+    unallocated. Several allocated categories need an explicit per-category edit.
+    """
+    draft = deepcopy(draft)
+    categories = draft['categories']
+    if len(categories) == 1 and categories[0]['target_count'] is not None:
+        categories[0]['target_count'] = total
+        categories[0]['evidence']['target_count'] = source
+    elif len(categories) > 1 and any(c['target_count'] is not None for c in categories):
+        raise ValueError('各类已有数量，改总数需要说明各类如何调整；请用 set_count 修改具体类别，或追问 scope')
+    return draft
 
 
 def project_draft(state, draft, explicit_total=None):
@@ -203,9 +254,46 @@ def render_draft(state):
     return text
 
 
+def check_initial_allocation(proposal, previous, state, message, explicit_targets=()):
+    """Reject an omitted explicit global quota before saving a new request.
+
+    This checks a narrow, unambiguous suffix; category interpretation and
+    correction still belong to the model. Conflicting totals need clarification.
+    """
+    if proposal['action'] not in ('update', 'replace', 'revise_terms'):
+        return
+    if proposal['action'] != 'replace' and draft_from_state(previous)['categories']:
+        return
+    categories = draft_from_state(state)['categories']
+    stated_counts = {number_value(m[1]) for m in re.finditer(
+        rf'(?:图片|照片|图)\s*[，,]?\s*({NUMBER})\s*张(?:[，,。.!！]|$)', message)}
+    if len(categories) == 1 and len(stated_counts) == 1 and state.get('target_count') is None:
+        raise ValueError('Explicit image quantity was omitted from the new single-category request; save the stated total or category count')
+    for target in explicit_targets:
+        matches = [c for c in categories if target['label'] in (c['label'], c['scene'])]
+        if len(matches) == 1 and matches[0]['target_count'] != target['count']:
+            raise ValueError('Explicit category image quantity was omitted; preserve each stated quota using add_category.count or set_count')
+    total = re.search(rf'(?:总共|一共|总计|合计|总数|总量)\s*({NUMBER})\s*张', message)
+    allocated = allocated_total(draft_from_state(state))
+    if (total and allocated is not None and allocated != number_value(total[1])
+            and (proposal.get('clarification') or {}).get('field') != 'conflict'):
+        raise ValueError('Explicit total conflicts with category quotas; preserve the categories and ask a conflict clarification instead of choosing one quantity silently')
+    if re.search(r'总共|一共|总计|合计|总数|总量', message):
+        return
+    match = re.search(
+        rf'[，,；;]\s*(?:各|每(?:个)?(?:类型|类别|种类)|每类|每种)'
+        rf'\s*(?:都)?(?:要|需要)?\s*({NUMBER})\s*张(?:图片|照片)?[。.!！]?\s*$', message)
+    if match and categories and any(c['target_count'] != number_value(match[1]) for c in categories):
+        raise ValueError('Explicit per-category image quantity was omitted; apply set_count to every new category instead of asking for quantity again')
+
+
 def check_clarification(proposal, state, message):
     """Known fields cannot be requested again; genuine conflicts have their own scope."""
     clarification = proposal.get('clarification')
+    if ((state.get('pending_clarification') or {}).get('field') == 'conflict'
+            and re.fullmatch(rf'\s*(?:就)?按(?:每类|每种|各)\s*({NUMBER})\s*张(?:算|计算)?[。.!！]?\s*', message)
+            and not proposal.get('requirement_edits')):
+        raise ValueError('Resolve the pending quantity conflict with requirement_edits/set_count for the stated categories; an answer or confirm action does not resolve the saved conflict')
     if clarification is not None:
         if (not isinstance(clarification, dict) or set(clarification) != {'field', 'source_text', 'question'}
                 or clarification['field'] not in ('media_type', 'subject', 'target_count', 'scope', 'conflict')

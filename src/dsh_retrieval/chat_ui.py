@@ -914,7 +914,7 @@ async function confirmGuidedExpansion(proposal,editor,confirmedRefill,confirmedE
     await refreshTaskSidebar();
     state.guidedPhase='search';state.proposedExpansion=null;editor.disabled=true;retireDraftActions();
     $('new-request').classList.add('hidden');$('feedback-box').classList.remove('hidden');
-    $('status').textContent='需求已保存 · 等待检索启动';
+    $('status').textContent='需求已确认，处理进度见右侧。';
     await refreshHistory();
     setBusy(false);
     if(confirmedExecution||state.task.search_enqueue?.backend==='confirmed-terms-agent'||state.task.search_enqueue?.status==='queued')await guidedTick();else await guidedStartSearch();

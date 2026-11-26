@@ -13,7 +13,7 @@ import urllib.request
 
 from .errors import ServiceError
 from .image_quantities import image_count_evidence, number_value as _number_value
-from .requirement_draft import apply_edits, project_draft, draft_from_state, check_clarification
+from .requirement_draft import apply_edits, project_draft, draft_from_state, check_clarification, retarget_total, check_initial_allocation, check_request_scope
 from .dialogue import PROMPT as DIALOGUE_PROMPT, explicit_category_targets, resolve_count_edits
 from .expansion_models import (MAX_EXPANSIONS, normalize_grouped_expansion,
                                preview_edited_groups, seal_explicit_targets)
@@ -209,6 +209,8 @@ class ModelRuntime:
         context = {'current_request': {key: state.get(key) for key in
                          ('subject', 'target_count', 'media_type', 'constraints')},
                         'stage': state['stage'], 'last_question': state['question'],
+                        'pending_clarification': (state.get('pending_clarification')
+                                                  if state['question'] == 'custom_clarification' else None),
                         'raw_request': state.get('raw_request', ''),
                         'effective_request': state.get('effective_request'),
                         'reference_request': state.get('reference_request'),
@@ -279,6 +281,7 @@ class ModelRuntime:
                 raise ServiceError('MODEL_OUTPUT_INVALID',
                     'Only change common constraints explicitly stated in this turn; do not copy category conditions into common constraints', 502)
             try:
+                check_request_scope(value, state, message)
                 base = {} if value['action'] == 'replace' else state
                 draft = apply_edits(base, semantic_edits, message)
                 projected = project_draft(base, draft, value.get('target_count'))
@@ -288,7 +291,10 @@ class ModelRuntime:
             if value.get('subject') not in (None, state.get('subject')):
                 raise ServiceError('MODEL_OUTPUT_INVALID', 'Use requirement_edits to change categories; do not overwrite their subject', 502)
             try:
-                projected = project_draft(state, draft_from_state(state), value.get('target_count'))
+                draft = draft_from_state(state)
+                if value.get('target_count') is not None and value['target_count'] != state.get('target_count'):
+                    draft = retarget_total(draft, value['target_count'], message)
+                projected = project_draft(state, draft, value.get('target_count'))
             except ValueError as error:
                 raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None
         elif not isinstance(semantic_edits, list):
@@ -299,6 +305,7 @@ class ModelRuntime:
         if semantic_edits and value.get('media_type') is not None:
             projected['media_type'] = value['media_type']
         try:
+            check_initial_allocation(value, state, projected, message, explicit_category_targets(message))
             check_clarification(value, projected, message)
         except ValueError as error:
             raise ServiceError('MODEL_OUTPUT_INVALID', str(error), 502) from None

@@ -67,6 +67,33 @@ class RequirementUnderstandingTest(unittest.TestCase):
                                                ['毛驴', '狗', '兔子'], 60), dict.fromkeys(['毛驴', '狗', '兔子'], 20))
         self.assertEqual(coordinator.snapshot(self.actor, 'demo', result['session_id'])['request']['requirement_draft'], draft)
 
+    def test_omitted_explicit_initial_quotas_are_repaired_before_save(self):
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': EDITS[:-1]},
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': EDITS},
+        ])
+        result = self.initial(coordinator)
+        self.assertEqual(result['stage'], 'terms')
+        self.assertEqual(result['request']['target_count'], 60)
+        self.assertEqual(len(self.transport.calls), 2)
+        repair = json.loads(self.transport.calls[1]['messages'][1]['content'])['repair']
+        self.assertIn('quantity was omitted', repair['reason'])
+        self.assertEqual(coordinator.snapshot(self.actor, 'demo', result['session_id'])['request'], result['request'])
+
+    def test_separately_stated_initial_quotas_cannot_be_omitted(self):
+        message = '找猫在窗边的图片10张，狗在草地上奔跑的图片15张'
+        missing = [edit('add_category', label=scene, scene=scene, source_text=message)
+                   for scene in ('猫在窗边', '狗在草地上奔跑')]
+        complete = [{**item, 'count': count} for item, count in zip(missing, (10, 15))]
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': missing},
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': complete},
+        ])
+        result = self.turn(coordinator, message)
+        self.assertEqual(result['request']['target_count'], 25)
+        self.assertEqual(result['stage'], 'terms')
+        self.assertEqual(len(self.transport.calls), 2)
+
     def test_new_subject_without_categories_repairs_before_saving_total(self):
         message = '找猫在窗边和狗在草地的图片，总共20张，不规定各类数量'
         coordinator = self.coordinator([
@@ -134,6 +161,97 @@ class RequirementUnderstandingTest(unittest.TestCase):
         self.assertNotIn('需要多少张', result['reply'])
         self.assertEqual(result['request']['requirement_draft'], first['request']['requirement_draft'])
         self.assertEqual(len(self.transport.calls), 3)
+
+    def test_scene_label_is_updated_with_scene_without_changing_category_identity(self):
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': [
+                edit('add_category', label='兔子睡觉', scene='兔子睡觉', count=20, source_text='兔子睡觉20张')]},
+            {'action': 'update', 'requirement_edits': [
+                edit('update_category', ['兔子睡觉'], scene='兔子吃草', source_text='兔子改成吃草')]},
+            {'action': 'update', 'requirement_edits': [
+                edit('update_category', ['兔子睡觉'], label='兔子吃草', scene='兔子吃草', source_text='兔子改成吃草')]},
+        ])
+        first = self.turn(coordinator, '兔子睡觉20张的图片')
+        result = self.turn(coordinator, '兔子改成吃草', first)
+        before = first['request']['requirement_draft']['categories'][0]
+        after = result['request']['requirement_draft']['categories'][0]
+        self.assertEqual(after['category_id'], before['category_id'])
+        self.assertEqual(after['target_count'], 20)
+        self.assertEqual((after['label'], after['scene']), ('兔子吃草', '兔子吃草'))
+        self.assertNotIn('睡觉', result['request']['effective_request'])
+        self.assertEqual(len(self.transport.calls), 3)
+
+    def test_common_condition_can_be_preserved_for_other_categories_when_one_is_exempted(self):
+        state = project_draft({}, apply_edits({}, EDITS, INITIAL))
+        state['constraints'] = ['不要水印']
+        patch = [edit('add_condition', ['毛驴', '狗'], text='不要水印', source_text='兔子可以有水印')]
+        draft = apply_edits(state, patch, '兔子可以有水印')
+        self.assertEqual([len(c['conditions']) for c in draft['categories']], [1, 1, 0])
+        self.assertEqual(draft['categories'][0]['conditions'][0]['previous_common_condition'], '不要水印')
+        with self.assertRaisesRegex(ValueError, 'New conditions'):
+            apply_edits({**state, 'constraints': []}, patch, '兔子可以有水印')
+
+    def test_explicit_total_conflict_cannot_be_silently_discarded(self):
+        message = '毛驴、狗、兔子的图片各20张，总共50张'
+        edits = [edit('add_category', label=label, scene=label, count=20, source_text=message)
+                 for label in ('毛驴', '狗', '兔子')]
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': edits},
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': edits,
+             'clarification': {'field': 'conflict', 'source_text': '各20张，总共50张',
+                               'question': '每类20张合计60张，与50张冲突，以哪个为准？'}},
+            {'action': 'answer', 'reply': '好的，每类20张，共60张。'},
+            {'action': 'update', 'requirement_edits': [
+                edit('set_count', ['毛驴', '狗', '兔子'], count=20, source_text='每类20张')]},
+        ])
+        result = self.turn(coordinator, message)
+        self.assertEqual(result['stage'], 'request')
+        self.assertEqual(result['question'], 'custom_clarification')
+        self.assertIn('50', result['reply'])
+        self.assertEqual(len(self.transport.calls), 2)
+        resolved = self.turn(coordinator, '按每类20张算', result)
+        self.assertEqual(resolved['stage'], 'terms')
+        self.assertEqual(resolved['request']['target_count'], 60)
+        self.assertEqual(len(self.transport.calls), 4)
+
+    def test_separate_batch_cannot_append_to_previous_categories(self):
+        message = '另外单独再找一批猫的图片，10张，跟刚才的分开'
+        add = edit('add_category', label='猫', scene='猫', source_text=message)
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': EDITS},
+            {'action': 'update', 'requirement_edits': [add]},
+            {'action': 'replace', 'media_type': 'image', 'requirement_edits': [{**add, 'count': 10}]},
+        ])
+        first = self.initial(coordinator)
+        result = self.turn(coordinator, message, first)
+        self.assertEqual(result['request']['target_count'], 10)
+        self.assertEqual([c['label'] for c in result['request']['requirement_draft']['categories']], ['猫'])
+        self.assertEqual(len(self.transport.calls), 3)
+
+    def test_ambiguous_category_quantity_reference_cannot_be_guessed(self):
+        state = project_draft({}, apply_edits({}, EDITS, INITIAL))
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            apply_edits(state, [edit('set_count', ['兔子'], count=30, source_text='那个改成30张')], '那个改成30张')
+
+    def test_updated_label_can_omit_scene_connecting_words_without_inventing_content(self):
+        message = '毛驴奔跑20张'
+        state = project_draft({}, apply_edits({}, [edit('add_category', label='毛驴奔跑', scene='毛驴奔跑', count=20, source_text=message)], message))
+        draft = apply_edits(state, [edit('update_category', ['毛驴奔跑'], label='马奔跑', scene='马在奔跑', source_text='换成马在奔跑')], '换成马在奔跑')
+        self.assertEqual(draft['categories'][0]['label'], '马奔跑')
+        self.assertEqual(draft['categories'][0]['category_id'], state['requirement_draft']['categories'][0]['category_id'])
+        with self.assertRaisesRegex(ValueError, 'grounded'):
+            apply_edits(state, [edit('update_category', ['毛驴奔跑'], label='马奔跑', scene='马在沙滩奔跑', source_text='换成马在奔跑')], '换成马在奔跑')
+
+    def test_partial_counts_only_ask_for_categories_without_quantity(self):
+        coordinator = self.coordinator([{
+            'action': 'update', 'media_type': 'image', 'requirement_edits': [
+                edit('add_category', label='猫', scene='猫', count=10, source_text='猫要10张'),
+                edit('add_category', label='狗', scene='狗', source_text='狗')],
+            'reply': '需要多少张图片？',
+        }])
+        result = self.turn(coordinator, '找猫和狗的图片，猫要10张')
+        self.assertEqual(result['reply'], '狗需要多少张图片？')
+        self.assertEqual(result['request']['requirement_draft']['categories'][0]['target_count'], 10)
 
     def test_partial_save_then_clarify_only_unresolved_scope(self):
         coordinator = self.coordinator([{
@@ -245,6 +363,104 @@ class RequirementUnderstandingTest(unittest.TestCase):
         result = self.turn(coordinator, '重新找5张猫图片', first)
         self.assertEqual([c['label'] for c in result['request']['requirement_draft']['categories']], ['猫'])
         self.assertEqual(result['request']['target_count'], 5)
+
+    def test_new_total_follows_single_allocated_category(self):
+        # F2: "改成20张" left the only category at 15 while the total said 20.
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': [
+                edit('add_category', label='汽车', scene='汽车在雪地行驶', count=15, source_text='汽车在雪地行驶的图片15张')]},
+        ])
+        first = self.turn(coordinator, '找汽车在雪地行驶的图片15张')
+        result = self.turn(coordinator, '改成20张', first)
+        self.assertEqual(len(self.transport.calls), 1)
+        category = result['request']['requirement_draft']['categories'][0]
+        self.assertEqual((category['target_count'], result['request']['target_count']), (20, 20))
+        self.assertEqual(category['evidence']['target_count'], '改成20张')
+        self.assertIn('汽车20张', result['request']['effective_request'])
+        state = coordinator.store.read(self.actor, 'demo', result['session_id'])
+        self.assertEqual(state['requirement_draft']['categories'][0]['target_count'], 20)
+
+    def test_bare_total_with_several_allocated_categories_is_not_split_deterministically(self):
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': EDITS},
+            {'action': 'revise_terms', 'target_count': 90},
+            {'action': 'clarify', 'question': '90张要怎么分到毛驴、狗和兔子？',
+             'clarification': {'field': 'scope', 'source_text': '改成90张', 'question': '90张要怎么分到毛驴、狗和兔子？'}},
+        ])
+        first = self.initial(coordinator)
+        result = self.turn(coordinator, '改成90张', first)
+        # The bare total reaches the model; the proposal that invents a split is repaired.
+        self.assertEqual(len(self.transport.calls), 3)
+        self.assertIn('各类已有数量', json.loads(self.transport.calls[2]['messages'][1]['content'])['repair']['reason'])
+        self.assertEqual(result['question'], 'custom_clarification')
+        self.assertEqual(result['request']['target_count'], 60)
+        self.assertEqual(result['request']['requirement_draft'], first['request']['requirement_draft'])
+
+    def test_scope_answer_reuses_quantity_from_pending_clarification(self):
+        # E3: answering "狗" to "which category goes to 30?" must not re-ask or fail evidence.
+        question = '要改成30张的是毛驴、狗还是兔子？'
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': EDITS},
+            {'action': 'clarify', 'question': question,
+             'clarification': {'field': 'scope', 'source_text': '那个改成30张', 'question': question}},
+            {'action': 'revise_terms', 'requirement_edits': [edit('set_count', ['狗'], count=30, source_text='狗')]},
+        ])
+        first = self.initial(coordinator)
+        asked = self.turn(coordinator, '那个改成30张', first)
+        self.assertEqual((asked['question'], asked['reply']), ('custom_clarification', question))
+        self.assertEqual(asked['request']['requirement_draft'], first['request']['requirement_draft'])
+        result = self.turn(coordinator, '狗', asked)
+        self.assertEqual(len(self.transport.calls), 3)
+        context = json.loads(self.transport.calls[2]['messages'][1]['content'])
+        self.assertEqual(context['pending_clarification'], {'field': 'scope', 'source_text': '那个改成30张'})
+        categories = result['request']['requirement_draft']['categories']
+        self.assertEqual([c['target_count'] for c in categories], [20, 30, 20])
+        self.assertEqual(categories[1]['evidence']['target_count'], '狗｜那个改成30张')
+        self.assertEqual(result['request']['target_count'], 70)
+        state = coordinator.store.read(self.actor, 'demo', result['session_id'])
+        self.assertNotIn('pending_clarification', state)
+
+    def test_resolved_or_abandoned_clarification_quantity_cannot_be_reused(self):
+        question = '要改成30张的是哪一类？'
+        coordinator = self.coordinator([
+            {'action': 'update', 'media_type': 'image', 'requirement_edits': EDITS},
+            {'action': 'clarify', 'question': question,
+             'clarification': {'field': 'scope', 'source_text': '那个改成30张', 'question': question}},
+            {'action': 'revise_terms', 'requirement_edits': [
+                edit('update_category', ['兔子'], scene='兔子吃草', source_text='兔子改成吃草')]},
+        ])
+        first = self.initial(coordinator)
+        asked = self.turn(coordinator, '那个改成30张', first)
+        moved_on = self.turn(coordinator, '兔子改成吃草', asked)
+        state = coordinator.store.read(self.actor, 'demo', moved_on['session_id'])
+        self.assertNotIn('pending_clarification', state)
+        with self.assertRaisesRegex(ValueError, 'not a scene object'):
+            apply_edits(state, [edit('set_count', ['狗'], count=30, source_text='狗')], '狗')
+        # Only a scope question carries quantity; a missing-count question does not.
+        draft = apply_edits({}, EDITS[:3], INITIAL)
+        waiting = {**project_draft({}, draft), 'question': 'custom_clarification',
+                   'pending_clarification': {'field': 'target_count', 'source_text': '猫要30张'}}
+        with self.assertRaises(ValueError):
+            apply_edits(waiting, [edit('set_count', ['狗'], count=30, source_text='狗')], '狗')
+
+
+class CoreScenarioRegressionTest(unittest.TestCase):
+    """24 core multi-turn scenarios replay ideal proposals; failures are backend merge bugs."""
+    def test_core_scenarios_with_ideal_proposals_match_saved_state(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'requirement_evaluation', Path(__file__).resolve().parents[1] / 'tools/evaluate_requirement_understanding.py')
+        evaluation = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(evaluation)
+        from contextlib import redirect_stdout
+        import io
+        runtime, transport = evaluation.fixture_runtime()
+        with redirect_stdout(io.StringIO()):
+            rows = evaluation.evaluate(runtime, 'fixture', evaluation.load_scenarios(), mode='fixture', transport=transport)
+        self.assertEqual(len({row['scenario'] for row in rows}), 24)
+        for row in rows:
+            with self.subTest(scenario=row['scenario'], turn=row['turn'], message=row['message']):
+                self.assertEqual(row['outcome'], 'passed_first', (row.get('error_message'), row['errors']))
 
 
 if __name__ == '__main__':
