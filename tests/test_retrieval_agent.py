@@ -1,0 +1,247 @@
+"""Plan/confirm/execute continuity through one retrieval owner and real ledgers."""
+from copy import deepcopy
+import json
+from pathlib import Path
+import time
+import unittest
+from unittest.mock import patch
+
+from dsh_retrieval.dialogue import DialogueCoordinator, DialogueStore, _new_dialogue_state
+from dsh_retrieval.errors import ServiceError
+from dsh_retrieval.expansion_jobs import ExpansionJobs
+from dsh_retrieval.expansion_models import preview_edited_groups
+from dsh_retrieval.models import Actor
+from dsh_retrieval.retrieval_agent import RetrievalAgent
+import test_confirmed_terms_agent as fixtures
+
+
+class Models:
+    def __init__(self):
+        self.calls = 0
+        self.version = 'initial'
+
+    def binding(self, llm, vlm):
+        return {'llm': llm, 'vlm': vlm, 'version': self.version}
+
+    def expand_chunk(self, *args, **kwargs):
+        self.calls += 1
+        return preview_edited_groups(None, [
+            {'primary_label': '狗', 'auxiliary_terms': ['柯基']},
+            {'primary_label': '猫', 'auxiliary_terms': ['橘猫']}])
+
+    def bind(self, result, binding, **kwargs):
+        return result
+
+
+class RetrievalAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.f = fixtures.ConfirmedTermsAgentTest(); self.f.setUp(); self.addCleanup(self.f.doCleanups)
+        self.actor = self.f.actor; self.service = self.f.service
+        self.initial_tasks = len(self.service.list_tasks(self.actor, 'demo'))
+        # Keep a separate durable planning ledger, not a formal task/run ledger.
+        import tempfile
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / 'dialogue.sqlite'
+        self.models = Models(); self.store = DialogueStore(self.path); self.addCleanup(self.store.close)
+        self.dialogue = DialogueCoordinator(self.store, self.models, self.f.f.projects)
+        self.state = {**_new_dialogue_state(), 'subject': '狗、猫', 'media_type': 'image',
+                      'target_count': 5, 'raw_request': '狗3张、猫2张', 'effective_request': '狗3张、猫2张',
+                      'stage': 'terms', 'question': 'review_terms',
+                      'messages': [{'role': 'user', 'text': '狗3张、猫2张'}]}
+        self.session, self.version = self.store.save(self.actor, 'demo', None, 0, self.state)
+        self.queue = ExpansionJobs(self.path, self.models, self.dialogue, self.f.f.projects, self.service)
+        self.addCleanup(self.queue.close)
+        self.agent = RetrievalAgent(self.queue, self.service, self.f.agent)
+        self.f.window.confirmed_terms = self.agent
+        self.f.dispatch.confirmed_terms_agent = self.agent
+        handler = self.f.server.RequestHandlerClass
+        handler.dialogue = self.dialogue; handler.expansion_jobs = self.queue; handler.retrieval_terms = self.agent
+        self.root = f'/v1/retrieval/projects/demo/dialogue-sessions/{self.session}/retrieval-agent/terms'
+
+    def plan(self):
+        body = {'dialogue_session_id': self.session, 'dialogue_version': self.version,
+                'raw_request': '狗3张、猫2张', 'dimension_id': 'default', 'target_count': 5,
+                'model_selection': {'llm': 'llm', 'vlm': 'vlm'}}
+        status, job = self.f.call(self.root, body)
+        self.assertEqual(status, 202, job)
+        for _ in range(100):
+            job = self.agent.get(self.actor, 'demo', self.session, job['job_id'])
+            if job['status'] == 'completed':break
+            time.sleep(.01)
+        self.assertEqual(job['status'], 'completed', job)
+        return job
+
+    def confirmation(self, job):
+        proposal = self.f.body()
+        proposal['query_spec']['grouped_expansion'] = deepcopy(job['result']['plan'])
+        return {**job['confirmation'], 'proposal': proposal}
+
+    def receipt_count(self):
+        return self.queue.db.execute('SELECT COUNT(*) FROM retrieval_agent_confirmations').fetchone()[0]
+
+    def test_same_agent_pauses_for_confirmation_and_resumes_original_plan(self):
+        self.f.automatic_intake()
+        job = self.plan()
+        self.assertEqual(job['agent'], self.agent.descriptor('planning'))
+        self.assertEqual(job['phase'], 'waiting_confirmation')
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
+        body = self.confirmation(job)
+        body['proposal']['node_modes'].update(retrieval='auto', cleaning='auto')
+        body['proposal']['query_spec']['rules'] = [{'rule_id': 'no-watermark', 'predicate_ref': 'watermark.present@1',
+            'operator': 'eq', 'value': False, 'hardness': 'hard', 'origin': 'user_confirmed'}]
+        status, result = self.f.call(self.root + '/' + job['job_id'] + '/confirm', body)
+        self.assertEqual(status, 202, result)
+        self.assertEqual(result['agent']['workflow_ref'], job['agent']['workflow_ref'])
+        self.assertEqual(result['planning']['job_ref'], job['job_id'])
+        ref = result['search_enqueue']['job_ref']
+        view = self.f.wait_intake(result['task_id'], ref)
+        self.assertTrue(view['artifacts_ready'], view)
+        self.assertEqual(view['planning']['plan_digest'], job['result']['plan']['plan_digest'])
+        self.assertEqual(view['agent']['workflow_ref'], job['agent']['workflow_ref'])
+        status, continued = self.f.call(self.root + '/' + job['job_id'])
+        self.assertEqual(status, 200, continued)
+        self.assertEqual(continued['task_id'], result['task_id'])
+        self.assertEqual(continued['planning_job_ref'], job['job_id'])
+        self.assertEqual(continued['execution']['job_ref'], ref)
+        self.assertIsNone(continued['confirmation'])
+        newer = self.agent.execution_context(self.actor, result['task_id'], 'retrieval',
+                                            plan_digest='sha256:' + '0' * 64)
+        self.assertIsNone(newer['planning'])
+        self.assertEqual(self.models.calls, 1)  # Approval/execution do not expand again.
+
+    def test_confirmation_replays_after_archive_and_process_reopen(self):
+        job = self.plan(); body = self.confirmation(job)
+        first, replayed = self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'click-one', body)
+        self.assertFalse(replayed)
+        with self.assertRaises(ServiceError):self.dialogue.snapshot(self.actor, 'demo', self.session)
+        reopened = ExpansionJobs(self.path, self.models, self.dialogue, self.f.f.projects, self.service)
+        self.addCleanup(reopened.close)
+        agent = RetrievalAgent(reopened, self.service, self.f.agent)
+        result, replayed = agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'click-two', body)
+        self.assertTrue(replayed); self.assertEqual(result['task_id'], first['task_id'])
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks + 1)
+        altered = deepcopy(body); altered['proposal']['query_spec']['raw_request'] += '不要水印'
+        with self.assertRaisesRegex(ServiceError, 'different settings'):
+            agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'click-three', altered)
+
+    def test_crash_after_task_commit_recovers_without_duplicate_task(self):
+        job = self.plan(); body = self.confirmation(job)
+        original = self.service.create_task
+        def interrupted(*args):
+            original(*args)
+            raise RuntimeError('simulated lost acknowledgement')
+        with patch.object(self.service, 'create_task', side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, 'lost acknowledgement'):
+                self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'first', body)
+        result, replayed = self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'retry', body)
+        self.assertTrue(replayed); self.assertIn('task_id', result)
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks + 1)
+
+    def test_lost_task_acknowledgement_cannot_archive_a_newer_request(self):
+        job = self.plan(); body = self.confirmation(job)
+        original = self.service.create_task
+        def interrupted(*args):
+            original(*args)
+            raise RuntimeError('simulated lost acknowledgement')
+        with patch.object(self.service, 'create_task', side_effect=interrupted):
+            with self.assertRaises(RuntimeError):
+                self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'first', body)
+        self.store.save(self.actor, 'demo', self.session, self.version, {**self.state, 'target_count': 6})
+        task, replayed = self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'retry', body)
+        self.assertTrue(replayed)
+        self.assertIn('task_id', task)
+        self.assertEqual(self.dialogue.snapshot(self.actor, 'demo', self.session)['request']['target_count'], 6)
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks + 1)
+
+    def test_stale_session_changed_plan_and_changed_models_are_rejected(self):
+        job = self.plan(); body = self.confirmation(job)
+        altered = deepcopy(body); altered['proposal']['query_spec']['raw_request'] = '猫5张'
+        with self.assertRaises(ServiceError):self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'raw', altered)
+        self.models.version = 'rotated'
+        with self.assertRaisesRegex(ServiceError, 'configuration changed'):
+            self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'model', body)
+        self.models.version = 'initial'
+        self.store.save(self.actor, 'demo', self.session, self.version, {**self.state, 'target_count': 6})
+        with self.assertRaises(ServiceError):self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'stale', body)
+        self.assertEqual(self.receipt_count(), 0);self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
+
+    def test_foreign_owner_and_nonconfirmation_cannot_create_task(self):
+        job = self.plan(); body = self.confirmation(job)
+        bad = {**body, 'action': 'continue'}
+        for actor, request in [(self.actor, bad), (Actor('tenant-a', 'other'), body)]:
+            with self.assertRaises(ServiceError):self.agent.confirm(actor, 'demo', self.session, job['job_id'], 'forbidden', request)
+        self.assertEqual(self.receipt_count(), 0);self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
+
+    def test_source_revocation_rejects_approval_before_business_draft(self):
+        job = self.plan(); self.f.revoked = True
+        with self.assertRaisesRegex(ServiceError, 'revoked'):
+            self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'revoked', self.confirmation(job))
+        self.assertEqual(self.receipt_count(), 0);self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
+
+    def test_disabled_project_cannot_resume_a_plan(self):
+        job = self.plan(); body = self.confirmation(job)
+        self.agent.enabled_projects = frozenset()
+        with self.assertRaisesRegex(ServiceError, 'not enabled'):
+            self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], 'disabled', body)
+        self.assertEqual(self.receipt_count(), 0)
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
+
+    def test_regeneration_invalidates_older_plan_even_without_dialogue_edit(self):
+        old = self.plan(); body = self.confirmation(old)
+        self.agent.start(self.actor, 'demo', {'dialogue_session_id': self.session, 'dialogue_version': self.version,
+            'raw_request': '狗3张、猫2张', 'dimension_id': 'default', 'target_count': 5,
+            'model_selection': {'llm': 'llm', 'vlm': 'vlm'}, 'regeneration_key': 'new-plan'})
+        with self.assertRaisesRegex(ServiceError, 'latest complete retrieval plan'):
+            self.agent.confirm(self.actor, 'demo', self.session, old['job_id'], 'old-click', body)
+        self.assertEqual(self.receipt_count(), 0)
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
+
+    def test_concurrent_clicks_create_one_task(self):
+        import threading
+        job = self.plan(); body = self.confirmation(job); results = []; errors = []
+        barrier = threading.Barrier(2)
+        def click(key):
+            try:
+                barrier.wait(timeout=3)
+                results.append(self.agent.confirm(self.actor, 'demo', self.session, job['job_id'], key, body))
+            except Exception as error:errors.append(error)
+        threads = [threading.Thread(target=click, args=(key,)) for key in ('first', 'second')]
+        for thread in threads:thread.start()
+        for thread in threads:thread.join(10)
+        self.assertFalse(any(t.is_alive() for t in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(len({r[0]['task_id'] for r in results}), 1)
+        self.assertEqual(sorted(r[1] for r in results), [False, True])
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks + 1)
+
+
+class RetrievalAgentBrowserRoutingTest(unittest.TestCase):
+    def test_new_plan_confirmation_resumes_agent_without_creating_an_unrelated_draft(self):
+        import os
+        import shutil
+        import subprocess
+        from dsh_retrieval.chat_ui import CHAT_JS
+        if not shutil.which('node'):self.skipTest('Node required')
+        source = CHAT_JS[CHAT_JS.index('function draftBody('):CHAT_JS.index('function groupPreviewBody(')]
+        source += CHAT_JS[CHAT_JS.index('async function confirmGuidedExpansion('):CHAT_JS.index('async function guidedStartSearch(')]
+        script = r"""
+const assert=require('node:assert/strict');
+const proposal={raw:'狗5张',count:5,plan:{groups:[],plan_digest:'reviewed'},lines:'狗',jobId:'expjob_one',
+ confirmation:{action:'confirm',plan_digest:'reviewed',dialogue_version:1}};
+const state={proposedExpansion:proposal,dialogueId:'dlg_one',task:null,resumeDraft:null};
+const fields={'new-request':{classList:{add(){}}},'feedback-box':{classList:{remove(){}}},status:{textContent:''}};
+const events=[];const execution={candidate_intake:'auto'};
+const api=async(path,options)=>{assert.equal(path,'/plans/dlg_one/expjob_one/confirm');
+ assert.equal(options.body.action,'confirm');assert.equal(options.body.plan_digest,'reviewed');
+ assert.equal(options.body.proposal.query_spec.raw_request,'狗5张');
+ assert.deepEqual(options.body.proposal.query_spec.retrieval_execution,execution);
+ events.push('resume');return {task_id:'rt_one',search_enqueue:{status:'queued'}}};
+const fn=new Function('state','$','api','key','setBusy','sessionStorage','localStorage','refreshTaskSidebar','retireDraftActions','message','refreshHistory','guidedTick','expansionJobPath',
+ process.env.SOURCE+';return confirmGuidedExpansion')(
+ state,id=>fields[id],api,()=> 'click',()=>{}, {removeItem(){}},{setItem(){}},async()=>{},()=>{},()=>{},async()=>{},async()=>events.push('execution'),s=>'/plans/'+s);
+(async()=>{await fn(proposal,{value:'狗',disabled:false},{enabled:false,libraries:[],limits:{}},execution);
+ assert.deepEqual(events,['resume','execution']);assert.equal(state.task.task_id,'rt_one');assert.equal(state.dialogueId,null);
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        run = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)

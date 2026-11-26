@@ -2,6 +2,8 @@
 
 检索 Agent 词表阶段 `retrieval-terms@1` 已接入原队列与模型端口。规范路径为 `/v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms` 与 `/v1/retrieval/tasks/{task_id}/retrieval-agent/terms`，支持原 GET/POST、`/{job_id}` GET 和 `/{job_id}/retry` POST；以下 `expansion-jobs` 路径保留为同一账本的兼容别名。响应新增 `agent={capability:retrieval, phase:terms, workflow_ref:retrieval-terms@1, implementation_ref:grouped-terms-agent@1}`，原状态/进度/result结构保持。词表阶段不是正式 Agent 执行 run，不新增 Task 或批准。完整接口见 [OpenAPI](retrieval-terms.openapi.yaml)。
 
+2026-11-26：新窗口由统一`retrieval-agent@1`拥有规划和执行。完成规划返回`phase=waiting_confirmation`及确认模板，明确确认`POST .../retrieval-agent/terms/{job_id}/confirm`后才创建正式任务、归档原会话并继续同一Agent；返回task与原规划作业/摘要关联。确认后仍可从原规划地址读取执行阶段。重复点击/重试复用同一任务，旧需求、旧词表、模型/权限失效不得确认；确认回执丢失不能覆盖后来修改的新需求。新响应`agent`为统一身份，原词表适配器描述保留在`phase_adapter`；旧记录/旧接口兼容。见[实施及验证](../docs/dev/reports/retrieval-agent-unification.md)。
+
 编辑入口也接受 {dimension_id, parent_label, groups:[{primary_label, auxiliary_terms}]}，输出 generator=user-edited@1。辅助词可为空，表示仅保留主标签；不自动补齐固定数量。用户预览后可以返回修改，新方案生成新摘要，正式确认沿用草稿摘要与版本校验。持久化后的分组在历史正式版本中展示。分组配额语义见下文；已确认组配额的多组任务按组目录打包（`image-delivery@3`，见 `contracts/image-delivery.md`）；未确认各组目标的多组任务的打包准备仍明确拒绝。
 
 `grouped-expansion@1` 将“交付分类”和“召回用词”分开：每个 group 的 `primary_label` 是独立交付单元，`package_name` 必须与主标签相同且 `package_mode=separate`；`auxiliary_terms` 只用于建立后续查询分支，不创建独立结果包，也不单独占用交付数量。

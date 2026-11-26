@@ -71,7 +71,7 @@ PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
 EXPANSIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/expansions$")
-EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)/(?:expansion-jobs|retrieval-agent/terms)(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
+EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/dialogue-sessions/(dlg_[A-Za-z0-9]+)/(?:expansion-jobs|retrieval-agent/terms)(?:/(expjob_[a-f0-9]{32})(?:/(retry|confirm))?)?$")
 TASK_EXPANSION_JOBS_PATH = re.compile(r"^/v1/retrieval/tasks/(rt_[a-f0-9]{32})/(?:expansion-jobs|retrieval-agent/terms)(?:/(expjob_[a-f0-9]{32})(?:/(retry))?)?$")
 RETRIEVAL_RECALL_PATH = re.compile(r"^/v1/retrieval/tasks/(rt_[a-f0-9]{32})/retrieval-agent/recall$")
 INTENT_PREVIEW_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/intent-preview$")
@@ -1112,6 +1112,12 @@ class Handler(BaseHTTPRequestHandler):
                     if body.get('dialogue_session_id') != session_id:
                         raise ServiceError('INVALID_SPEC', 'Session binding mismatch', 422)
                     return HTTPStatus.ACCEPTED, self.retrieval_terms.start(actor, project_id, body), False
+                if operation == 'confirm' and '/retrieval-agent/terms/' in self.path:
+                    result, replayed = self.retrieval_terms.confirm(actor, project_id, session_id, job_id,
+                        self.headers.get('Idempotency-Key', ''), body)
+                    result['search_enqueue'] = self._start_confirmed_search(
+                        actor, result['task_id'], 'retrieval-plan:' + job_id)
+                    return HTTPStatus.ACCEPTED, result, replayed
                 if operation != 'retry' or body:
                     raise ServiceError('INVALID_SPEC', 'Invalid expansion retry', 422)
                 return HTTPStatus.ACCEPTED, self.retrieval_terms.retry(actor, project_id, session_id, job_id), False
@@ -2480,6 +2486,17 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.task_commands = TaskCommandStore(getattr(dialogue, 'store', None) or DialogueStore())
     BoundHandler.expansion_jobs = expansion_jobs  # legacy dependency name
     BoundHandler.retrieval_terms = expansion_jobs
+    if expansion_jobs is not None:
+        from .retrieval_agent import RetrievalAgent
+        executor = getattr(BoundHandler.agent_window, 'confirmed_terms', None)
+        if isinstance(executor, RetrievalAgent):
+            executor = executor.execution
+        BoundHandler.retrieval_terms = RetrievalAgent(expansion_jobs, service, executor,
+            enabled_projects=getattr(BoundHandler.agent_window, 'enabled_projects', None))
+        if executor is not None:
+            BoundHandler.agent_window.confirmed_terms = BoundHandler.retrieval_terms
+            if search_dispatch is not None:
+                search_dispatch.confirmed_terms_agent = BoundHandler.retrieval_terms
     if expansion_jobs is not None and getattr(expansion_jobs, 'recall_provider', None) is None:
         expansion_jobs.recall_provider = getattr(first_search, 'recall', None)
     BoundHandler.task_events = task_events or TaskEventFeed(
@@ -2742,10 +2759,11 @@ def main() -> None:
     finally:
         server.server_close()
         handler.task_commands.close()
-        if agent_deployment:
-            agent_deployment.close()
         if search_dispatch:
             search_dispatch.close()
+        if agent_deployment:
+            agent_deployment.close()
+        expansion_jobs.close()
         if refill_runtime:
             refill_runtime.close()
         if cleaning_dispatch:

@@ -1,9 +1,10 @@
 openapi: 3.1.0
 info:
-  title: Retrieval Agent provisional terms phase
-  version: 1.0.0
+  title: Retrieval Agent planning and confirmed continuation
+  version: 1.1.0
   description: Existing grouped-expansion contracts and durable expansion_jobs ledger.
-    Legacy expansion-jobs paths are aliases. No Task/approval/run created. Bearer/project
+    Legacy expansion-jobs paths are aliases. Planning creates no business Task or run;
+    only the explicit confirm operation resumes the same retrieval owner. Bearer/project
     and external-task-reference headers follow the existing deployment and shared
     access contract; no self-declared owner permissions.
 paths:
@@ -115,6 +116,32 @@ paths:
           description: Invalid request
         '503':
           description: Terms phase not installed
+  /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms/{job_id}/confirm:
+    parameters: *id003
+    post:
+      operationId: confirmRetrievalPlan
+      description: Owner-only confirmation of the latest complete plan. Replay resumes the same task, including after session archival.
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, minLength: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlanConfirmation'}
+      responses:
+        '202':
+          description: Approved task linked to its original planning job; original search outbox handles dispatch.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlanContinuation'}
+        '403': {description: Owner or resource permission denied}
+        '404': {description: Plan not found in this owner scope}
+        '409': {description: Stale plan, changed model or policy, or conflicting replay}
+        '422': {description: Explicit valid confirmation required}
+        '503': {description: Retrieval execution not installed}
   /v1/retrieval/tasks/{task_id}/retrieval-agent/terms:
     parameters:
     - &id004
@@ -380,6 +407,39 @@ components:
               before enqueue and every batch checkpoint; retain original request/group
               sizes/quotas. Client report payloads are rejected.
       unevaluatedProperties: false
+    RetrievalAgentIdentity:
+      type: object
+      additionalProperties: false
+      required: [capability, workflow_ref, phase]
+      properties:
+        capability: {const: retrieval}
+        workflow_ref: {const: 'retrieval-agent@1'}
+        phase: {enum: [planning, retrieval, candidates, cancelled]}
+    PlanningLink:
+      type: object
+      additionalProperties: false
+      required: [job_ref, plan_digest]
+      properties:
+        job_ref: {type: string, pattern: '^expjob_[a-f0-9]{32}$'}
+        plan_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+    PlanConfirmation:
+      type: object
+      additionalProperties: false
+      required: [action, dialogue_version, plan_digest, proposal]
+      properties:
+        action: {const: confirm}
+        dialogue_version: {type: integer, minimum: 1}
+        plan_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        proposal: {$ref: './openapi.yaml#/components/schemas/DraftBody'}
+    PlanContinuation:
+      allOf:
+      - $ref: './openapi.yaml#/components/schemas/TaskSummary'
+      - type: object
+        required: [agent, planning, search_enqueue]
+        properties:
+          agent: {$ref: '#/components/schemas/RetrievalAgentIdentity'}
+          planning: {$ref: '#/components/schemas/PlanningLink'}
+          search_enqueue: {type: object}
     TermJob:
       type: object
       required:
@@ -392,17 +452,34 @@ components:
           type: string
           pattern: ^expjob_[a-f0-9]{32}$
         agent:
-          const:
-            capability: retrieval
-            phase: terms
-            workflow_ref: retrieval-terms@1
-            implementation_ref: grouped-terms-agent@1
+          oneOf:
+          - $ref: '#/components/schemas/RetrievalAgentIdentity'
+          - const:
+              capability: retrieval
+              phase: terms
+              workflow_ref: retrieval-terms@1
+              implementation_ref: grouped-terms-agent@1
+        phase:
+          enum: [planning, waiting_confirmation, failed, retrieval, candidates, cancelled]
+        planning_job_ref:
+          type: string
+        confirmation:
+          type: [object, 'null']
+          description: Explicit confirmation template for a complete, unapproved plan.
+        execution:
+          oneOf:
+          - type: 'null'
+          - $ref: './agent-jobs.openapi.yaml#/components/schemas/Job'
         status:
           enum:
           - queued
           - running
           - failed
           - completed
+          - waiting_confirmation
+          - ready
+          - unknown
+          - cancelled
         result:
           oneOf:
           - type: 'null'

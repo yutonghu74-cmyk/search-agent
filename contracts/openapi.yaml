@@ -530,7 +530,15 @@ components:
             - $ref: './query-spec-v3.schema.json'
           description: Video v3 drafts can be saved; confirmation returns VIDEO_EXECUTION_UNAVAILABLE until the video execution chain is integrated.
         node_modes:
-          const: {expansion: manual, retrieval: manual, cleaning: manual, refill: manual, packaging: manual}
+          type: object
+          additionalProperties: false
+          required: [expansion, retrieval, cleaning, refill, packaging]
+          properties:
+            expansion: {const: manual}
+            retrieval: {enum: [manual, auto]}
+            cleaning: {enum: [manual, auto]}
+            refill: {enum: [manual, auto]}
+            packaging: {const: manual}
           default: {expansion: manual, retrieval: manual, cleaning: manual, refill: manual, packaging: manual}
     DraftBody:
       allOf:

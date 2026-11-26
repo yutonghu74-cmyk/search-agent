@@ -609,10 +609,10 @@ function watchExpansionJob(job){
   if(job.status==='completed'&&job.result?.plan){
     bubble.remove();state.expansionJobBubble=null;
     if(!job.result.plan.groups.length||job.result.plan.groups.every(group=>['图片','图像','素材','数据'].includes(group.primary_label))){message('assistant','','要找什么主体或场景？例如“狗”或“客厅”。');return}
-    if(state.proposedExpansion?.jobId!==job.job_id){
+    if(state.proposedExpansion?.jobId!==job.job_id||(job.confirmation&&!state.proposedExpansion?.confirmation)){
       const previous=state.proposedExpansion;
       const lines=job.result.plan.groups.map(group=>group.primary_label+' | '+group.auxiliary_terms.join('，')).join('\n');
-      state.proposedExpansion={raw:job.raw_request,count:job.target_count,plan:job.result.plan,lines,version:(previous?.version||0)+1,jobId:job.job_id};
+      state.proposedExpansion={raw:job.raw_request,count:job.target_count,plan:job.result.plan,lines,version:(previous?.version||0)+1,jobId:job.job_id,agent:job.agent,confirmation:job.confirmation};
       state.guidedPhase='expansion';renderPlanningWorkflow('expansion');saveDialogueSession();
       showTermReview(state.proposedExpansion,job.feedback_text?'已调整检索词：':'检索词：');
     }
@@ -902,13 +902,20 @@ async function confirmGuidedExpansion(proposal,editor,confirmedRefill,confirmedE
     if(confirmedExecution){body.query_spec.retrieval_execution=confirmedExecution;
       if(confirmedExecution.candidate_intake){body.node_modes.retrieval='auto';body.node_modes.cleaning='auto'}
     }
-    const path=state.resumeDraft?'/v1/retrieval/projects/demo/drafts/'+state.resumeDraft.draft_id:'/v1/retrieval/projects/demo/drafts';
-    if(state.resumeDraft)body.expected_draft_version=state.resumeDraft.draft_version;
-    state.draft=await api(path,{method:'POST',keyValue:key('draft'),body});
-    state.conversationId=state.draft.conversation_id;
-    state.resumeDraft={draft_id:state.draft.draft_id,draft_version:state.draft.draft_version};
-    state.task=await api('/v1/retrieval/tasks',{method:'POST',keyValue:key('task'),body:{draft_id:state.draft.draft_id,expected_draft_version:state.draft.draft_version,proposal_digest:state.draft.proposal_digest,action:'confirm'}});
-    if(state.dialogueId){await api(`/v1/retrieval/projects/demo/dialogue-sessions/${state.dialogueId}/archive`,{method:'POST',body:{task_id:state.task.task_id}}).catch(()=>{});state.dialogueId=null}
+    const resumeAgent=Boolean(proposal.confirmation&&proposal.jobId);
+    if(resumeAgent&&(!confirmedExecution||plan.plan_digest!==proposal.confirmation.plan_digest))throw new Error('检索方案或执行设置已变化，请重新生成并确认最新完整方案。');
+    if(resumeAgent){
+      state.task=await api(expansionJobPath(state.dialogueId)+'/'+proposal.jobId+'/confirm',{method:'POST',keyValue:key('plan-confirm'),body:{...proposal.confirmation,proposal:body}});
+      state.conversationId=state.task.conversation_id||null;
+    }else{
+      const path=state.resumeDraft?'/v1/retrieval/projects/demo/drafts/'+state.resumeDraft.draft_id:'/v1/retrieval/projects/demo/drafts';
+      if(state.resumeDraft)body.expected_draft_version=state.resumeDraft.draft_version;
+      state.draft=await api(path,{method:'POST',keyValue:key('draft'),body});
+      state.conversationId=state.draft.conversation_id;
+      state.resumeDraft={draft_id:state.draft.draft_id,draft_version:state.draft.draft_version};
+      state.task=await api('/v1/retrieval/tasks',{method:'POST',keyValue:key('task'),body:{draft_id:state.draft.draft_id,expected_draft_version:state.draft.draft_version,proposal_digest:state.draft.proposal_digest,action:'confirm'}});
+    }
+    if(state.dialogueId){if(!resumeAgent)await api(`/v1/retrieval/projects/demo/dialogue-sessions/${state.dialogueId}/archive`,{method:'POST',body:{task_id:state.task.task_id}}).catch(()=>{});state.dialogueId=null}
     sessionStorage.removeItem('dsh-dialogue');
     localStorage.setItem('dsh-task-id',state.task.task_id);
     await refreshTaskSidebar();

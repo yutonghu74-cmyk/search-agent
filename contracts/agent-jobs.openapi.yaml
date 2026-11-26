@@ -585,6 +585,12 @@ components:
           - confirmed_terms
         implementation_ref:
           type: string
+        agent:
+          $ref: './retrieval-terms.openapi.yaml#/components/schemas/RetrievalAgentIdentity'
+        planning:
+          oneOf:
+          - type: 'null'
+          - $ref: './retrieval-terms.openapi.yaml#/components/schemas/PlanningLink'
         code:
           type: string
           nullable: true

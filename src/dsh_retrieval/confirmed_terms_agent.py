@@ -240,7 +240,7 @@ class ConfirmedTermsRetrievalAgent:
         if published is not None and 'candidate_intake' not in links['policy']: status = 'completed'
         spec = json.loads(task.confirmed_proposal_json)['query_spec']
         terms = compile_query_branches(spec)['branches'] if current else []
-        return dict(schema_version='agent-job@1', job_ref=ref, task_id=task_id, capability='retrieval',
+        view = dict(schema_version='agent-job@1', job_ref=ref, task_id=task_id, capability='retrieval',
             workflow_ref=WORKFLOW, status=status, phase='cancelled' if status=='cancelled' else 'candidates' if status in ('completed','waiting_confirmation') else 'retrieval',
             revision=links['revision'], generation=links['generation'], task_version=task.task_version,
             confirmation=links['review'] if status == 'waiting_confirmation' else None,
@@ -257,6 +257,11 @@ class ConfirmedTermsRetrievalAgent:
             candidate_intake=links['policy'].get('candidate_intake', 'manual'),
             cleaning_operation_id=(links.get('intake') or {}).get('operation_id'),
             execution_mode='confirmed_terms', implementation_ref='confirmed-terms-executor@1')
+        owner = getattr(self, 'owner', None)
+        if owner is not None:
+            view.update(owner.execution_context(actor, task_id, view['phase'],
+                plan_digest=spec['grouped_expansion']['plan_digest']))
+        return view
 
     def _published(self, actor, task_id, links):
         published = self.engine.repository.get_current_candidate_manifest(actor, task_id)
