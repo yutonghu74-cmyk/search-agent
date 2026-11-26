@@ -156,6 +156,7 @@ class Handler(BaseHTTPRequestHandler):
     cleaning_reader: Any = None
     cleaning_service: Any = None
     agent_planning: Any = None
+    agent_management: Any = None
     agent_jobs: Any = None
     agent_window: Any = None
     cleaning_dispatch: Any = None
@@ -457,6 +458,24 @@ class Handler(BaseHTTPRequestHandler):
                 value = self.agent_window.ensure_job(actor, prepare.group(1), self.headers.get('Idempotency-Key', ''))
                 return HTTPStatus.OK, value, False
             raise ServiceError('NOT_FOUND', 'Agent window route not found', 404)
+        self._run(action)
+        return True
+
+    def _agent_management_route(self, parsed, *, post=False):
+        match = re.fullmatch(r'/v1/retrieval/projects/([^/]+)/agent-management(?:/(register|publish|bindings))?', parsed.path)
+        if match is None: return False
+        def action():
+            if self.agent_management is None:
+                raise ServiceError('AGENT_MANAGEMENT_UNAVAILABLE', 'Agent management is not configured', 503)
+            if parsed.query: raise ServiceError('INVALID_SPEC', 'Query parameters are not supported', 422)
+            actor, project, operation = self._actor(), match.group(1), match.group(2)
+            if not post and operation is None:
+                return HTTPStatus.OK, self.agent_management.discover(actor, project), False
+            if post and operation is not None:
+                command = getattr(self.agent_management, {'register': 'register', 'publish': 'publish', 'bindings': 'bind'}[operation])
+                value, replayed = command(actor, project, self.headers.get('Idempotency-Key', ''), self._body())
+                return HTTPStatus.OK, value, replayed
+            raise ServiceError('NOT_FOUND', 'Agent management route not found', 404)
         self._run(action)
         return True
 
@@ -1029,6 +1048,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._agent_window_route(urlsplit(self.path), post=True):
             return
+        if self._agent_management_route(urlsplit(self.path), post=True):
+            return
         if self._agent_job_route(urlsplit(self.path), post=True):
             return
         if self._agent_stage_route(urlsplit(self.path), post=True):
@@ -1578,6 +1599,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._shared_route(parsed):
             return
         if self._agent_window_route(parsed):
+            return
+        if self._agent_management_route(parsed):
             return
         if self._agent_job_route(parsed):
             return
@@ -2427,7 +2450,7 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
                    expansion_jobs=None, refill_service=None, task_events=None,
                    query_images=None, browse_only=False, identity_provider=None,
                    identity_mode="development", platform_browser=None, video_initial_intake=None, agent_planning=None,
-                   shared_access=None, agent_jobs=None) -> type[Handler]:
+                   shared_access=None, agent_jobs=None, agent_management=None) -> type[Handler]:
     """Bind one service instance per server, without global repository state."""
     class BoundHandler(Handler):
         pass
@@ -2465,6 +2488,7 @@ def create_handler(service: TaskService, result_reader: Any = None, model_runtim
     BoundHandler.cleaning_reader = cleaning_reader
     BoundHandler.cleaning_service = cleaning_service
     BoundHandler.agent_planning = agent_planning
+    BoundHandler.agent_management = agent_management
     BoundHandler.agent_jobs = agent_jobs
     BoundHandler.agent_window = getattr(service, 'agent_execution', None)
     if BoundHandler.agent_window is not None:

@@ -186,6 +186,31 @@ class RetrievalAgentTest(unittest.TestCase):
         self.assertEqual(self.receipt_count(), 0)
         self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
 
+    def test_factory_keeps_management_and_plan_confirmation_routes_together(self):
+        import test_agent_management as managed_fixtures
+        from dsh_retrieval.api import create_handler
+        management = managed_fixtures.AgentManagementTest()
+        management.setUp(); self.addCleanup(management.doCleanups)
+        management.actor = self.actor
+        management.ready(); management.bind()
+        handler = create_handler(self.service, first_search=self.f.engine,
+            search_dispatch=self.f.dispatch, dialogue=self.dialogue,
+            expansion_jobs=self.queue, agent_management=management.service)
+        self.addCleanup(handler.task_commands.close)
+        self.f.server.RequestHandlerClass = handler
+        status, catalog = self.f.call('/v1/retrieval/projects/demo/agent-management')
+        self.assertEqual(status, 200, catalog)
+        self.assertEqual(catalog['binding']['version'], 1)
+        self.assertEqual(self.f.call('/v1/retrieval/projects/demo/agent-management', user='other')[0], 403)
+        job = self.plan()
+        status, task = self.f.call(self.root + '/' + job['job_id'] + '/confirm', self.confirmation(job))
+        self.assertEqual(status, 202, task)
+        self.assertEqual(task['planning']['job_ref'], job['job_id'])
+        self.assertEqual(task['agent']['workflow_ref'], 'retrieval-agent@1')
+        status, catalog_after = self.f.call('/v1/retrieval/projects/demo/agent-management')
+        self.assertEqual(status, 200, catalog_after)
+        self.assertEqual(catalog_after['binding'], catalog['binding'])
+
     def test_regeneration_invalidates_older_plan_even_without_dialogue_edit(self):
         old = self.plan(); body = self.confirmation(old)
         self.agent.start(self.actor, 'demo', {'dialogue_session_id': self.session, 'dialogue_version': self.version,

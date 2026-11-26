@@ -71,13 +71,17 @@ def build_planning_runner(config, *, authority, model_environment, model_binding
 
 def build_agent_planning_service(task_service, config, *, authority, context_provider,
                                  model_environment, model_binding, journal=None, review_store=None,
-                                 lease_seconds=30, adapters_provider=None, project_routes=None):
+                                 lease_seconds=30, adapters_provider=None, project_routes=None, agent_management=None):
     """Opt-in API composition; actor-scoped callbacks, no ambient HTTP identity.
 
     authority(actor, invocation) must return current authorized StageAuthority.
     Model callbacks resolve immutable, actor-authorized profile snapshots.
     No SDK run or business execution is started merely by constructing this service.
     """
+    if agent_management is not None:
+        if project_routes is not None:
+            raise invalid('choose managed or custom project routes')
+        project_routes = agent_management.project_routes
     if (journal is None) != (review_store is None):
         raise invalid('provide both persistence ports or neither')
     if journal is None:
@@ -87,10 +91,13 @@ def build_agent_planning_service(task_service, config, *, authority, context_pro
         review_store = AgentStageStore(journal)
     from ...harness.stage_service import AgentPlanningService
     def runner_factory(actor):
-        return build_planning_runner(config, authority=lambda inv: authority(actor, inv),
+        runner = build_planning_runner(config, authority=lambda inv: authority(actor, inv),
             model_environment=lambda ref: model_environment(actor, ref),
             model_binding=lambda ref: model_binding(actor, ref), journal=journal, actor=actor,
             installed_adapters=adapters_provider(actor) if adapters_provider is not None else None)
+        if agent_management is not None:
+            agent_management.validate_runner(runner)
+        return runner
     return AgentPlanningService(task_service, journal=journal, review_store=review_store,
         runner_factory=runner_factory, context_provider=context_provider, lease_seconds=lease_seconds,
         project_routes=project_routes)
