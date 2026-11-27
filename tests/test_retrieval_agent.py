@@ -58,10 +58,13 @@ class RetrievalAgentTest(unittest.TestCase):
         handler.dialogue = self.dialogue; handler.expansion_jobs = self.queue; handler.retrieval_terms = self.agent
         self.root = f'/v1/retrieval/projects/demo/dialogue-sessions/{self.session}/retrieval-agent/terms'
 
-    def plan(self):
-        body = {'dialogue_session_id': self.session, 'dialogue_version': self.version,
-                'raw_request': '狗3张、猫2张', 'dimension_id': 'default', 'target_count': 5,
+    def plan(self, **changes):
+        current = self.dialogue.snapshot(self.actor, 'demo', self.session)
+        body = {'dialogue_session_id': self.session, 'dialogue_version': current['version'],
+                'raw_request': current['request']['effective_request'], 'dimension_id': 'default',
+                'target_count': current['request']['target_count'],
                 'model_selection': {'llm': 'llm', 'vlm': 'vlm'}}
+        body.update(changes)
         status, job = self.f.call(self.root, body)
         self.assertEqual(status, 202, job)
         for _ in range(100):
@@ -73,11 +76,168 @@ class RetrievalAgentTest(unittest.TestCase):
 
     def confirmation(self, job):
         proposal = self.f.body()
+        proposal['query_spec']['raw_request'] = job['raw_request']
+        proposal['query_spec']['target_count'] = job['target_count']
+        proposal['query_spec']['refill_policy']['target_count'] = job['target_count']
         proposal['query_spec']['grouped_expansion'] = deepcopy(job['result']['plan'])
         return {**job['confirmation'], 'proposal': proposal}
 
+    def turn(self, message, interpretation=None):
+        from test_dialogue import proposal
+        current = self.dialogue.snapshot(self.actor, 'demo', self.session)
+        with patch.object(self.models, 'interpret_dialogue_turn', create=True,
+                          return_value=interpretation or proposal('update')):
+            return self.dialogue.turn(self.actor, 'demo', {
+                'session_id': self.session, 'expected_version': current['version'],
+                'message': message, 'llm_id': 'llm', 'phase': 'terms',
+                'generate_terms_when_complete': True})
+
+    def structured(self):
+        from dsh_retrieval.requirement_draft import project_draft, render_draft
+        draft = {'schema_version': 'requirement-draft@1', 'categories': [
+            {'category_id': 'dog', 'label': '狗', 'scene': '狗吃饭', 'target_count': 3,
+             'conditions': [], 'evidence': {}},
+            {'category_id': 'cat', 'label': '猫', 'scene': '猫睡觉', 'target_count': 2,
+             'conditions': [], 'evidence': {}}]}
+        self.state = project_draft(self.state, draft)
+        self.state['effective_request'] = render_draft(self.state)
+        self.version = self.store.save(self.actor, 'demo', self.session, self.version, self.state)[1]
+
     def receipt_count(self):
         return self.queue.db.execute('SELECT COUNT(*) FROM retrieval_agent_confirmations').fetchone()[0]
+
+    def test_total_count_reuses_terms_and_confirms_latest_backend_version(self):
+        self.state.update(raw_request='狗和猫共5张', effective_request='狗和猫共5张')
+        self.version = self.store.save(self.actor, 'demo', self.session, self.version, self.state)[1]
+        original = self.plan(); calls = self.models.calls
+        turn = self.turn('改成20张')
+        self.assertEqual(turn['planning_change'], 'quantity')
+        updated = self.plan()
+        self.assertEqual(self.models.calls, calls)
+        self.assertEqual(updated['status'], 'completed')
+        self.assertEqual(updated['result']['plan'], original['result']['plan'])
+        self.assertEqual(updated['reuse']['source_job_id'], original['job_id'])
+        self.assertEqual(updated['confirmation']['dialogue_version'], turn['version'])
+        self.assertEqual(self.plan()['job_id'], updated['job_id'])
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
+        with self.assertRaises(ServiceError):
+            self.agent.confirm(self.actor, 'demo', self.session, original['job_id'], 'old', self.confirmation(original))
+        task, _ = self.agent.confirm(self.actor, 'demo', self.session, updated['job_id'], 'new', self.confirmation(updated))
+        self.assertEqual(task['planning']['job_ref'], updated['job_id'])
+        self.assertEqual(self.service.repository.get(self.actor, task['task_id']).target_count, 20)
+
+    def test_category_count_and_condition_changes_preserve_other_scope_and_restart(self):
+        from test_dialogue import proposal
+        self.structured(); original = self.plan(); calls = self.models.calls
+        turn = self.turn('狗改成30张，其他不变', proposal('update', requirement_edits=[
+            {'op': 'set_count', 'targets': ['dog'], 'count': 30, 'source_text': '狗改成30张'}]))
+        self.assertEqual(turn['planning_change'], 'quantity')
+        updated = self.plan()
+        groups = updated['result']['plan']['groups']
+        self.assertEqual([(g['primary_label'], g['delivery_target']) for g in groups], [('狗', 30), ('猫', 2)])
+        self.assertEqual([g['auxiliary_terms'] for g in groups],
+                         [g['auxiliary_terms'] for g in original['result']['plan']['groups']])
+        turn = self.turn('狗不要水印', proposal('update', requirement_edits=[
+            {'op': 'add_condition', 'targets': ['dog'], 'text': '不要水印', 'source_text': '狗不要水印'}]))
+        self.assertEqual(turn['planning_change'], 'cleaning')
+        cleaned = self.plan()
+        self.assertEqual(self.models.calls, calls)
+        self.assertEqual(cleaned['result']['plan'], updated['result']['plan'])
+        self.assertIn('本类条件：不要水印', cleaned['raw_request'])
+        restored = ExpansionJobs(self.path, self.models, self.dialogue, self.f.f.projects, self.service)
+        try:
+            agent = RetrievalAgent(restored, self.service)
+            readback = agent.get(self.actor, 'demo', self.session)
+            for key in ('job_id', 'dialogue_version', 'result', 'reuse', 'status'):
+                self.assertEqual(readback[key], cleaned[key])
+        finally:
+            restored.close()
+        body = self.confirmation(cleaned)
+        task, _ = self.agent.confirm(self.actor, 'demo', self.session, cleaned['job_id'], 'cleaned', body)
+        saved = self.service.repository.get(self.actor, task['task_id'])
+        spec = json.loads(saved.confirmed_proposal_json)['query_spec']
+        self.assertIn('本类条件：不要水印', spec['raw_request'])
+        self.assertEqual(spec['target_count'], 32)
+
+    def test_count_plus_cleaning_and_partial_allocation_never_guess_group_quotas(self):
+        from test_dialogue import proposal
+        self.structured(); original = self.plan(); calls = self.models.calls
+        turn = self.turn('猫要10张且不要文字', proposal('update', requirement_edits=[
+            {'op': 'set_count', 'targets': ['cat'], 'count': 10, 'source_text': '猫要10张'},
+            {'op': 'add_condition', 'targets': ['cat'], 'text': '不要文字', 'source_text': '不要文字'}]))
+        self.assertEqual(turn['planning_change'], 'quantity_and_cleaning')
+        updated = self.plan()
+        self.assertEqual(self.models.calls, calls)
+        self.assertEqual([g['delivery_target'] for g in updated['result']['plan']['groups']], [3, 10])
+        self.assertNotEqual(updated['result']['plan']['plan_digest'], original['result']['plan']['plan_digest'])
+        # A model's taxonomy cannot stand in for an exact category-to-group map.
+        state = self.store.read(self.actor, 'demo', self.session)
+        state['requirement_draft']['categories'][0]['label'] = '小狗'
+        state['subject'] = '小狗吃饭、猫睡觉'
+        state['effective_request'] = None
+        state['planning_change'] = 'quantity'  # Even an erroneous marker cannot bypass the fact diff.
+        self.store.save(self.actor, 'demo', self.session, turn['version'], state)
+        calls = self.models.calls
+        self.assertIsNone(self.plan()['reuse']); self.assertGreater(self.models.calls, calls)
+
+    def test_scene_and_term_strategy_changes_do_not_reuse(self):
+        from test_dialogue import proposal
+        self.structured(); self.plan(); calls = self.models.calls
+        turn = self.turn('狗改为奔跑', proposal('update', requirement_edits=[
+            {'op': 'update_category', 'targets': ['dog'], 'scene': '狗奔跑', 'source_text': '狗改为奔跑'}]))
+        self.assertIsNone(turn['planning_change']); updated = self.plan()
+        self.assertIsNone(updated['reuse']); self.assertGreater(self.models.calls, calls)
+        calls = self.models.calls
+        turn = self.turn('狗要40张，检索词换一批', proposal('update', requirement_edits=[
+            {'op': 'set_count', 'targets': ['dog'], 'count': 40, 'source_text': '狗要40张'}],
+            expansion_instruction='检索词换一批'))
+        self.assertIsNone(turn['planning_change']); self.plan()
+        self.assertGreater(self.models.calls, calls)
+
+    def test_explicit_regeneration_model_change_and_unknown_condition_do_not_reuse(self):
+        from test_dialogue import proposal
+        self.plan(); self.turn('改成20张'); calls = self.models.calls
+        self.assertIsNone(self.plan(regeneration_key='explicit')['reuse'])
+        self.assertGreater(self.models.calls, calls)
+        self.turn('改成30张'); calls = self.models.calls; self.models.version = 'new-model-config'
+        self.assertIsNone(self.plan()['reuse']); self.assertGreater(self.models.calls, calls)
+        turn = self.turn('换到公园场景', proposal('update', constraints='公园场景'))
+        self.assertIsNone(turn['planning_change']); calls = self.models.calls
+        self.assertIsNone(self.plan()['reuse']); self.assertGreater(self.models.calls, calls)
+
+    def test_textual_agreement_rebases_confirmation_without_approving_or_expanding(self):
+        from test_dialogue import proposal
+        original = self.plan(); calls = self.models.calls
+        turn = self.turn('就按这些词', proposal('confirm_terms'))
+        self.assertEqual(turn['planning_change'], 'unchanged')
+        updated = self.plan()
+        self.assertEqual(updated['result']['plan'], original['result']['plan'])
+        self.assertEqual(self.models.calls, calls)
+        self.assertEqual(self.receipt_count(), 0)
+        self.assertEqual(len(self.service.list_tasks(self.actor, 'demo')), self.initial_tasks)
+        self.assertEqual(updated['confirmation']['dialogue_version'], turn['version'])
+
+    def test_common_cleaning_condition_add_and_remove_keep_terms(self):
+        from test_dialogue import proposal
+        original = self.plan(); calls = self.models.calls
+        for message, constraint in [('不要水印', '不要水印'), ('水印也可以', '')]:
+            turn = self.turn(message, proposal('update', constraints=constraint))
+            self.assertEqual(turn['planning_change'], 'cleaning')
+            updated = self.plan()
+            self.assertEqual(updated['result']['plan'], original['result']['plan'])
+            self.assertEqual(self.models.calls, calls)
+            self.assertEqual(updated['raw_request'], turn['request']['effective_request'])
+
+    def test_legacy_plan_and_injected_reuse_cannot_bypass_generation_or_scope(self):
+        original = self.plan()
+        state = self.queue._load(original['job_id'])[1]; state.pop('request_facts')
+        self.queue._save(original['job_id'], state)
+        self.turn('改成20张'); calls = self.models.calls
+        self.assertIsNone(self.plan()['reuse']); self.assertGreater(self.models.calls, calls)
+        with self.assertRaises(ServiceError):
+            self.agent.start(self.actor, 'demo', {'reuse': True})
+        with self.assertRaises(ServiceError):
+            self.agent.get(Actor('tenant-a', 'other'), 'demo', self.session)
 
     def test_same_agent_pauses_for_confirmation_and_resumes_original_plan(self):
         self.f.automatic_intake()

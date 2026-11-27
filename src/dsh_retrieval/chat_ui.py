@@ -518,6 +518,7 @@ function showTermReview(proposal,intro='我建议用这些检索词：'){
   const compact=proposal.changeSummary;
   const bubble=message('assistant','',(compact?`总目标 ${compact.beforeCount} → ${proposal.count} 张，检索词沿用。`:`合计需要 ${proposal.count} 张\n`+intro+'\n'+proposal.lines)+
     (groups.length>1&&groups.some(group=>group.delivery_target!=null)?'\n各组目标：'+groups.map(group=>group.primary_label+' '+group.delivery_target+' 张').join('、'):'')+
+    (proposal.reuse?'\n当前需求：'+proposal.raw:'')+
     '\n补数：'+(refill.enabled?'自动补足':'不自动补数')+'\n'+historyNote+
     (execution?'\n确认后，由检索 Agent 按这份完整词表查找图片。':'')+
     (execution?.candidate_intake?'\n候选自动进入现有清洗流程，按已确认条件检测；图片会发送给本次选定的清洗模型，失败或未知不算通过，结果就绪后再确认交付。':''));
@@ -612,9 +613,9 @@ function watchExpansionJob(job){
     if(state.proposedExpansion?.jobId!==job.job_id||(job.confirmation&&!state.proposedExpansion?.confirmation)){
       const previous=state.proposedExpansion;
       const lines=job.result.plan.groups.map(group=>group.primary_label+' | '+group.auxiliary_terms.join('，')).join('\n');
-      state.proposedExpansion={raw:job.raw_request,count:job.target_count,plan:job.result.plan,lines,version:(previous?.version||0)+1,jobId:job.job_id,agent:job.agent,confirmation:job.confirmation};
+      state.proposedExpansion={raw:job.raw_request,count:job.target_count,plan:job.result.plan,lines,version:(previous?.version||0)+1,jobId:job.job_id,agent:job.agent,confirmation:job.confirmation,reuse:job.reuse};
       state.guidedPhase='expansion';renderPlanningWorkflow('expansion');saveDialogueSession();
-      showTermReview(state.proposedExpansion,job.feedback_text?'已调整检索词：':'检索词：');
+      showTermReview(state.proposedExpansion,job.reuse?'已更新数量或清洗条件，检索词保持不变：':job.feedback_text?'已调整检索词：':'检索词：');
     }
     return;
   }
@@ -843,16 +844,18 @@ async function applyDialogueTurn(turn,proposal,text,selection,signal,active=()=>
       onStage('正在生成检索词');
       await prepareGuidedExpansion(turn.request.effective_request||turn.request.raw_request,turn.request.target_count,signal,selection);return;
     }
+    if(turn.planning_change&&turn.stage==='terms'&&proposal){
+      onStage('正在更新待确认方案');
+      await prepareGuidedExpansion(turn.request.effective_request||turn.request.raw_request,turn.request.target_count,signal,selection);return;
+    }
     if((turn.requirement_edits||[]).length&&turn.stage==='terms'&&proposal){
       onStage('正在生成检索词');
       await prepareGuidedExpansion(turn.request.effective_request,turn.request.target_count,signal,selection);return;
     }
     if(turn.action==='confirm_terms'&&proposal){showTermReview(proposal,'检索词还需要你亲自确认：');return}
     if(turn.action==='revise_terms'&&turn.stage==='terms'&&proposal&&turn.request.target_count!==proposal.count
-       &&!turn.expansion_instruction&&!(turn.count_edits||[]).some(edit=>edit.target==='terms')
-       &&proposal.plan.groups.every(group=>group.delivery_target==null)){
-      const updated={...proposal,count:turn.request.target_count,raw:turn.request.effective_request||proposal.raw,version:(proposal.version||1)+1,changeSummary:{beforeCount:proposal.count}};
-      state.proposedExpansion=updated;saveDialogueSession();showTermReview(updated,`目标改为 ${updated.count} 张，检索词保持不变：`);return;
+       &&!turn.expansion_instruction&&!(turn.count_edits||[]).some(edit=>edit.target==='terms')){
+      onStage('正在更新待确认方案');await prepareGuidedExpansion(turn.request.effective_request||turn.request.raw_request,turn.request.target_count,signal,selection);return;
     }
     if(turn.action==='revise_terms'&&turn.stage==='terms'&&proposal){onStage('正在生成检索词');await reviseGuidedExpansion(proposal,{value:proposal.lines},{value:text},turn,selection,signal);return}
     if(turn.action==='replace'){state.proposedExpansion=null;state.guidedPhase='input';state.resumeDraft=null;state.draft=null;saveDialogueSession()}

@@ -7,15 +7,17 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .dialogue import resolve_count_edits
 from .errors import ServiceError
 from .pipeline_timing import measured, bind
-from .expansion_models import MAX_EXPANSIONS, preview_edited_groups
+from .expansion_models import MAX_EXPANSIONS, preview_edited_groups, with_delivery_targets
 from .retrieval_terms_agent import RetrievalTermsAgent
 from .explicit_term_edits import explicit_term_list
+from .retrieval_plan_updates import request_facts, reusable_change
 from .query_spec import digest
 from .model_runtime import _INITIAL_GROUP_TERMS, _grounded_followup_term_count, _number_value
 
@@ -161,7 +163,15 @@ class ExpansionJobs:
             direct_groups = None  # This mode uses a model with verified recall context.
             targets = {g['primary_label']: len(g['auxiliary_terms']) for g in current}
         request_digest = digest(body)
-        with self.lock:
+        store = getattr(self.dialogue, 'store', None) if task_id is None else None
+        with self.lock, (store.lock if store is not None else nullcontext()):
+            saved_request = None
+            if store is not None:
+                self._current(actor, project_id, body['dialogue_session_id'], body['dialogue_version'], None)
+                saved_request = store.read(actor, project_id, body['dialogue_session_id'])
+                if (body['raw_request'] != self.dialogue._effective_request(saved_request)
+                        or body['target_count'] != saved_request['target_count']):
+                    saved_request = None
             row = self.db.execute('''SELECT job_id,request_digest,state FROM expansion_jobs
                 WHERE tenant_id=? AND user_id=? AND project_id=? AND session_id=?
                 ORDER BY rowid DESC LIMIT 1''',
@@ -191,13 +201,59 @@ class ExpansionJobs:
                                         for group in starting_groups) if starting_groups else 0,
                        'total': sum(targets.values()) if targets else None,
                        'result': None, 'error': None, 'failed_batch': None}
+            initial['request_facts'] = request_facts(saved_request) if saved_request is not None else None
+            retained = self._retained_plan(row, body, binding, saved_request)
+            if retained is not None:
+                result, reuse = retained
+                groups = result['plan']['groups']
+                initial.update(status='completed', result=result, reuse=reuse, groups=groups,
+                    targets={g['primary_label']: len(g['auxiliary_terms']) for g in groups},
+                    completed=sum(len(g['auxiliary_terms']) for g in groups),
+                    total=sum(len(g['auxiliary_terms']) for g in groups), completed_at=self._now(),
+                    first_batch_at=self._now())
             self.db.execute('INSERT INTO expansion_jobs VALUES (?,?,?,?,?,?,?,?,?,?)',
                             (job_id, actor.tenant_id, actor.user_id, project_id,
                              body['dialogue_session_id'], body['dialogue_version'], request_digest,
                              json.dumps(body, ensure_ascii=False), json.dumps(initial, ensure_ascii=False), self._now()))
             self.db.commit()
-            self._schedule(job_id)
+            if initial['status'] != 'completed':
+                self._schedule(job_id)
             return self._public(job_id)
+
+    def _retained_plan(self, row, body, binding, saved_request):
+        # This path never accepts a client-provided reuse verdict or term table.
+        if (row is None or saved_request is None or not saved_request.get('planning_change')
+                or any(key in body for key in ('regeneration_key', 'feedback_text', 'count_edits',
+                                               'requested_terms_per_group', 'term_count_only'))):
+            return None
+        previous_payload, previous, _ = self._load(row[0])
+        if (previous['status'] != 'completed' or previous.get('model_binding') != binding
+                or previous_payload['model_selection'] != body['model_selection']
+                or previous_payload['dialogue_version'] >= body['dialogue_version']):
+            return None
+        facts = request_facts(saved_request)
+        kind = reusable_change(previous.get('request_facts'), facts)
+        if (kind is None and saved_request.get('planning_change') == 'unchanged'
+                and previous.get('request_facts') == facts):
+            kind = 'unchanged'
+        if kind is None:
+            return None
+        result = deepcopy(previous['result'])
+        groups = result['plan']['groups']
+        categories = (saved_request.get('requirement_draft') or {}).get('categories', [])
+        allocated = {c['label']: c['target_count'] for c in categories}
+        if not categories:
+            allocated = {c['label']: c['count'] for c in saved_request.get('category_targets', [])}
+        labels = {g['primary_label'] for g in groups}
+        if allocated and all(v is not None for v in allocated.values()):
+            if set(allocated) != labels or sum(allocated.values()) != body['target_count']:
+                return None  # Never guess a category/group correspondence or allocation.
+            result['plan'] = with_delivery_targets(result['plan'], allocated)
+        elif any(g['delivery_target'] is not None for g in groups):
+            if kind not in ('cleaning', 'unchanged') or sum(g['delivery_target'] or 0 for g in groups) != body['target_count']:
+                return None
+        result['note'] = '沿用已保存检索词，仅更新图片数量或清洗条件；未调用扩词模型，仍需发起人确认。'
+        return result, {'source_job_id': row[0], 'kind': kind, 'model_calls': 0}
 
     def get(self, actor, project_id, session_id, job_id=None):
         self.projects.require_access(actor, project_id, 'default', 'create')
@@ -299,6 +355,7 @@ class ExpansionJobs:
                 'target_terms': state['total'], 'failed_batch': state['failed_batch'],
                 'preview_groups': preview,
                 'changes': changes,
+                'reuse': deepcopy(state.get('reuse')),
                 'timing_ms': {'first_batch': elapsed('first_batch_at'),
                               'complete': elapsed('completed_at')},
                 'error': state['error'], 'result': state['result']}

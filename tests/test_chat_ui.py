@@ -77,9 +77,11 @@ const turn={action:'revise_terms',stage:'terms',session_id:'dlg_x',version:2,req
 await apply(turn,proposal,'兔子不要了',{llm:'selected'},null);
 assert.equal(generated.length,1);assert.equal(generated[0][0],'毛驴20张、狗30张');assert.equal(generated[0][1],50);
 assert.equal(revised,0);
+await apply({...turn,requirement_edits:[],planning_change:'cleaning',request:{target_count:60,effective_request:'狗20张、猫40张；不要水印'}},proposal,'不要水印',{llm:'selected'},null);
+assert.equal(generated.length,2);assert.equal(generated[1][0],'狗20张、猫40张；不要水印');assert.equal(revised,0);
 state.proposedExpansion=proposal;
 await apply({...turn,stage:'request',request:{target_count:null},reply:'新增猫图片需要多少张？'},proposal,'再加猫',{},null);
-assert.equal(generated.length,1);assert.equal(state.proposedExpansion,null);assert.equal(state.guidedPhase,'input');
+assert.equal(generated.length,2);assert.equal(state.proposedExpansion,null);assert.equal(state.guidedPhase,'input');
 })().catch(e=>{console.error(e);process.exit(1)});
 """
         result = subprocess.run(['node', '-e', script], env={**os.environ, 'SOURCE': source}, capture_output=True, text=True)
@@ -543,18 +545,21 @@ const assert=require('node:assert/strict');
 const fields={'request-text':{value:'改成20张，其他不变'},'llm-model':{value:'llm'},
  'vlm-model':{value:'vlm'},'target-count':{value:''},'stop-request':{classList:{add(){},remove(){}}},
  status:{textContent:''}};
-const $=id=>fields[id];let calls=0,review=null;
+const $=id=>fields[id];let calls=0,review=null,updates=0;
 const state={task:null,requestController:null,dialogueId:'dlg_x',dialogueVersion:1,dialogueStage:'terms',
  targetCountTouched:false,proposedExpansion:{raw:'找10张猫图片',count:10,version:1,
  lines:'猫 | 猫在草地',plan:{groups:[{primary_label:'猫',auxiliary_terms:['猫在草地'],delivery_target:null}]}}};
 const api=async()=>{calls++;return {session_id:'dlg_x',version:2,stage:'terms',action:'revise_terms',
  request:{target_count:20,effective_request:'找 20 张猫图片'},count_edits:[],expansion_instruction:null}};
 const message=()=>({setAttribute(){},remove(){}});
-const prepare=new Function('state','$','api','message','setDialogueBusy','saveDialogueSession','groupInputBody','showTermReview',
+const prepare=new Function('state','$','api','message','setDialogueBusy','saveDialogueSession','groupInputBody','showTermReview','prepareGuidedExpansion',
  process.env.SOURCE+';return prepareTask')(state,$,api,message,()=>{},()=>{},()=>({groups:[{primary_label:'猫',auxiliary_terms:['猫在草地']}]}),
- (proposal)=>{review=proposal});
+ (proposal)=>{review=proposal},async(raw,count)=>{updates++;assert.equal(state.dialogueVersion,2);
+ assert.equal(state.proposedExpansion.count,10);
+ review=state.proposedExpansion={...state.proposedExpansion,raw,count,jobId:'new-job',confirmation:{dialogue_version:2}}});
 (async()=>{await prepare();assert.equal(calls,1);assert.equal(review.count,20);
  assert.equal(review.raw,'找 20 张猫图片');assert.equal(state.proposedExpansion.count,20);
+ assert.equal(updates,1);assert.equal(review.confirmation.dialogue_version,2);
  state.proposedExpansion.plan.groups[0].delivery_target=10;fields['request-text'].value='改成30张，其他不变';
  await prepare();assert.equal(calls,1);assert.match(fields.status.textContent,/每组的新目标/);
 })().catch(error=>{console.error(error);process.exit(1)});

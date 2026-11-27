@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Retrieval Agent planning and confirmed continuation
-  version: 1.1.0
+  version: 1.2.0
   description: Existing grouped-expansion contracts and durable expansion_jobs ledger.
     Legacy expansion-jobs paths are aliases. Planning creates no business Task or run;
     only the explicit confirm operation resumes the same retrieval owner. Bearer/project
@@ -463,6 +463,15 @@ components:
           enum: [planning, waiting_confirmation, failed, retrieval, candidates, cancelled]
         planning_job_ref:
           type: string
+        reuse:
+          type: [object, 'null']
+          description: Server-verified retention of a prior complete term table. No expansion model call; this remains an unapproved plan at the new dialogue version. Missing on old servers.
+          additionalProperties: false
+          required: [source_job_id, kind, model_calls]
+          properties:
+            source_job_id: {type: string, pattern: '^expjob_[a-f0-9]{32}$'}
+            kind: {enum: [quantity, cleaning, quantity_and_cleaning, unchanged]}
+            model_calls: {const: 0}
         confirmation:
           type: [object, 'null']
           description: Explicit confirmation template for a complete, unapproved plan.

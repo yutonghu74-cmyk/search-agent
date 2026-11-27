@@ -12,6 +12,7 @@ from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .retrieval_plan_updates import planning_change
 from .errors import ServiceError
 from .requirement_draft import (apply_edits, project_draft, render_draft, check_clarification, draft_from_state,
                                 retarget_total, check_initial_allocation, check_request_scope)
@@ -46,7 +47,7 @@ media_type: image/video/text。constraints: 完整的新约束文本，保留未
 已有猫图100张时，用户说“不要有人”：提交 action=update、constraints="不要有人"，不改主体数量；随后说“算了有人也行，无所谓”：提交 action=update、constraints=""。这两轮都不是 confirm 或普通 answer；只有成功保存后才能说已更新。
 reply: 对用户的自然回应，最多 600 字。question: 确实缺失/歧义时的具体问题，否则 null。类型、主体、图片数量已明确时不再问摘要对不对。
 count_edits: 数量操作列表，每项 {target:images|terms, labels:[], operation:set|add|scale, value:数字}。图片 labels 为空；词数每项只选一个已有组，多组分开写。翻倍 scale 2，减半 scale 0.5，加减用 add，明确总数用 set。后端计算并向上取整。每组最终词数 1–200。不要同时在 target_count 重复同一相对操作。
-expansion_instruction: 需要改词义/范围时的完整指令，消解指代并保留其他组。只改数量时可省略。不要承诺未在字段/操作中表达的改动。
+expansion_instruction: 需要改词义/范围时的完整指令，消解指代并保留其他组。只改图片数量或水印、文字、模糊等清洗条件时省略，不要把清洗条件改写成换检索词指令。不要承诺未在字段/操作中表达的改动。
 例如：主体已知、正在问张数时，“需要20张”只补 target_count=20，不再要求重复主体或确认摘要。缺项时保存已知字段并在 reply 中自然追问。已有修复反馈 repair 时按其原因修正，不重复被拒绝提案。'''
 
 
@@ -859,6 +860,11 @@ class DialogueCoordinator:
         if question == 'unsupported_media' and action != 'answer':
             reply = ('视频可通过“视频草稿”入口保存整段视频需求，检索与交付尚未开放。'
                      if next_state['media_type'] == 'video' else '文字资料检索暂不开放。')
+        next_state['planning_change'] = planning_change(prior, next_state, proposal, action)
+        if next_state['planning_change']:
+            reply = ('检索方案保持不变，请点击确认按钮开始检索。'
+                     if next_state['planning_change'] == 'unchanged'
+                     else '已更新需求，正在准备最新待确认方案。')
         next_state['messages'].append({'role': 'assistant', 'text': reply})
         next_state['message_count'] = prior.get('message_count', len(prior['messages'])) + 2
         self.projects.require_access(actor, project_id, 'default', 'create')
@@ -872,6 +878,7 @@ class DialogueCoordinator:
                 'action': action, 'stage': next_state['stage'], 'question': question,
                 'count_edits': proposal.get('count_edits', []),
                 'requirement_edits': semantic_edits,
+                'planning_change': next_state['planning_change'],
                 'expansion_instruction': proposal.get('expansion_instruction'),
                 'reply': reply, 'reply_source': 'model' if model_interpreted and reply == natural else 'system',
                 'summary': summary, 'request': {
@@ -892,6 +899,7 @@ class DialogueCoordinator:
         return {'schema_version': 'dialogue-turn@1', 'session_id': session_id,
                 'version': state['version'], 'stage': state['stage'],
                 'question': state['question'], 'summary': self._summary(state),
+                'planning_change': state.get('planning_change'),
                 'request': {'raw_request': self._request(state),
                             'effective_request': self._effective_request(state),
                             'target_count': state['target_count'],
