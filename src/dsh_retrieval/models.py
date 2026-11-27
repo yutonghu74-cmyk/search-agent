@@ -58,10 +58,12 @@ class Task:
     active_cleaning_operation_id: str | None = None
     active_plan_digest: str | None = None
     conversation_id: str | None = None
+    request_number: str | None = None
 
     def to_summary(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
+            **({"request_number": self.request_number} if self.request_number is not None else {}),
             "confirmed_revision": self.confirmed_revision,
             "pending_draft": None,
             "task_version": self.task_version,

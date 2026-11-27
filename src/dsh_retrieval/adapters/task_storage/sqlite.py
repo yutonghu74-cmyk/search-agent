@@ -141,6 +141,9 @@ def decode(value):
                 defaults = {"width": None, "height": None, "sharpness": None}
                 data = {**data, **{key: value for key, value in defaults.items()
                                    if key in missing}}
+        if kind == 'Task' and 'request_number' in missing:
+            data = {**data, 'request_number': None}
+            missing = missing - {'request_number'}
         if kind in {"Task", "Draft"} and missing == {"conversation_id"}:
             data = {**data, "conversation_id": None}
         if set(data) != expected:
@@ -218,7 +221,7 @@ class SQLiteTaskRepository:
                            "task_result_read_items", "task_step_read_runs",
                            "task_step_read_items", "task_read_summaries",
                            "task_read_summaries_meta", "task_node_read_heads", "task_node_read_items",
-                           "task_event_write_heads", "chat_read_summaries", "chat_read_meta"}
+                           "task_event_write_heads", "chat_read_summaries", "chat_read_meta", "task_request_numbers"}
                 allowed.update({'harness_journal_meta', 'harness_stages', 'harness_stage_heads',
                                 'harness_model_budgets', 'harness_attempts', 'harness_tool_receipts',
                                 'harness_attempt_tools', 'harness_run_events',
@@ -250,6 +253,8 @@ class SQLiteTaskRepository:
                 )""")
                 db.execute("CREATE INDEX IF NOT EXISTS search_dispatch_pending_idx "
                            "ON search_dispatch_outbox(status, created_at)")
+                from ...request_numbers import ensure_table
+                ensure_table(db)
                 db.execute("""CREATE TABLE IF NOT EXISTS task_read_summaries (
                     task_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
                     owner_user_id TEXT NOT NULL, project_id TEXT NOT NULL,
@@ -374,6 +379,8 @@ class SQLiteTaskRepository:
     @staticmethod
     def _sync_task_read_summaries(db, memory, *, task_ids=None, searches=None):
         """Keep the bounded list projection in the business write transaction."""
+        from ...request_numbers import sync_numbers
+        sync_numbers(db, memory)
         from ...chat_history import sync as sync_chat_history
         sync_chat_history(db, memory, task_ids=task_ids)
         live = set(memory._tasks)
@@ -760,6 +767,21 @@ class SQLiteTaskRepository:
                                retryable=True) from exc
 
     def get(self, *args, **kwargs): return self._call("get", False, *args, **kwargs)
+
+    def get_by_request_number(self, actor, project_id, number):
+        try:
+            with closing(self._connect()) as db:
+                row = db.execute('SELECT task_id FROM task_request_numbers WHERE request_number=? '
+                                 'AND tenant_id=? AND owner_user_id=? AND project_id=?',
+                                 (number, actor.tenant_id, actor.user_id, project_id)).fetchone()
+        except sqlite3.Error as exc:
+            raise ServiceError('STORAGE_UNAVAILABLE', 'Request number index unavailable', 503, True) from exc
+        if row is None:
+            raise ServiceError('NOT_FOUND', '需求编号不存在或当前无权访问', 404)
+        task = self.get(actor, row[0])
+        if task.request_number != number or task.project_id != project_id:
+            raise ServiceError('STORAGE_CORRUPT', 'Request number index differs from task', 500)
+        return task
 
     def historical_options(self, actor, project_id, dimension_id):
         from ...historical_dedup import options
