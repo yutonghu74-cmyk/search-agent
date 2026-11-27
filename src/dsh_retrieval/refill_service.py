@@ -24,6 +24,14 @@ class ConfirmedRefillService:
         self.tasks = tasks
         self.results = results
         self.runtime = runtime
+        self.recall_provider = None
+        search = getattr(runtime.adapter, 'search', None)
+        if callable(getattr(search, 'recall', None)):
+            from .retrieval_recall import read_recall
+            search.cleaning_feedback_reader = results
+            self.recall_provider = lambda actor, task_id: read_recall(search, actor, task_id)
+            search.refill_feedback_reader = lambda actor, task_id, report: self.preview(
+                actor, task_id, recall_report=report)['feedback']
 
     @staticmethod
     def _policy(task):
@@ -79,10 +87,42 @@ class ConfirmedRefillService:
         return tuple(position for _, _, position in sorted(ranked, key=lambda row: row[:2])), \
             view, {key: [labels[group] for group in value] for key, value in position_groups.items()}
 
-    def preview(self, actor, task_id):
+    def preview(self, actor, task_id, *, recall_report=None):
+        from .retrieval_feedback import continuation_feedback
+        report = recall_report
+        if report is None and self.recall_provider is not None:
+            report = self.recall_provider(actor, task_id)
+        view = self._preview(actor, task_id, recall_report=report)
+        if report is not None:
+            scope = {k: view[k] for k in ('task_id', 'revision', 'generation', 'task_version')}
+            cleaning = report.get('cleaning') or {}
+            if (report['scope'] != scope or cleaning.get('status') != 'observed'
+                    or cleaning['result_set_id'] != view.get('result_set_id')
+                    or cleaning['result_set_digest'] != view.get('result_set_digest')):
+                raise ServiceError('REVISION_CONFLICT', 'Recall/cleaning evidence changed before continuation', 409)
+        if ((report or {}).get('cleaning', {}).get('pending_review_count', 0)
+                and not view.get('active_reservation_id') and view['execution'].get('stop_reason') is None):
+            view.update(action='wait', stop_reason='NEED_USER_INPUT', next_position=None,
+                        waiting_for_review=True)
+        budget = (report or {}).get('execution_budget')
+        if budget is not None:
+            view['execution']['search_budget'] = budget
+            needed = (view.get('next_position') or {}).get('candidate_window_cap') or 1
+            if (view['action'] in ('search_more', 'await_owner')
+                    and (budget['remaining_calls'] == 0 or budget['remaining_hit_slots'] < needed)):
+                view.update(action='partial_delivery', stop_reason='EXECUTION_LIMIT_REACHED', next_position=None)
+        fresh = self.tasks.get(actor, task_id)
+        if (fresh.confirmed_revision, fresh.run_generation, fresh.task_version) != (
+                view['revision'], view['generation'], view['task_version']):
+            raise ServiceError('REVISION_CONFLICT', 'Task changed during feedback analysis', 409)
+        view['feedback'] = continuation_feedback(view, report)
+        return view
+
+    def _preview(self, actor, task_id, *, recall_report=None):
         task = self.tasks.get(actor, task_id)
         result = self.results.get_current_result_set(actor, task_id)
         policy, node_mode = self._policy(task)
+        publication = {k: result.get(k) for k in ('result_set_id', 'result_set_digest')}
         limits = self._limits(task)
         evidence = self.runtime.reservations.execution_evidence(actor, task_id)
         # Expose measured effective output, not raw file counts or an estimated
@@ -96,9 +136,10 @@ class ConfirmedRefillService:
                         max(0, limits['max_vlm_calls'] - evidence['vlm_calls'])),
                     'remaining_rounds': (None if limits['max_rounds'] is None else
                         max(0, limits['max_rounds'] - evidence['issued_rounds']))}
-        positions = self.runtime.adapter.list_refill_positions(
-            actor, task_id, revision=task.confirmed_revision,
-            generation=task.run_generation)
+        positions = (() if policy['mode'] == 'input_only' else
+                     self.runtime.adapter.list_refill_positions(
+                         actor, task_id, revision=task.confirmed_revision,
+                         generation=task.run_generation))
         reservations = self.runtime.reservations.list_current(actor, task_id)
         issued = frozenset(item.position_fingerprint for item in reservations)
         # Once a refill page commits, its cursor is no longer among the next
@@ -114,7 +155,7 @@ class ConfirmedRefillService:
                            if item.position_fingerprint in {
                                p.fingerprint for p in positions}), None)
         if active is not None and evidence["stop_reason"] is None:
-            return {
+            return {**publication,
                 "task_id": task_id, "revision": task.confirmed_revision,
                 "generation": task.run_generation, "task_version": task.task_version,
                 "accepted_count": result["accepted_count"], "target_count": task.target_count,
@@ -125,7 +166,7 @@ class ConfirmedRefillService:
                 "execution": {**evidence, **limits},
             }
         if evidence["stop_reason"] is not None:
-            return {
+            return {**publication,
                 "task_id": task_id, "revision": task.confirmed_revision,
                 "generation": task.run_generation, "task_version": task.task_version,
                 "accepted_count": result["accepted_count"], "target_count": task.target_count,
@@ -138,7 +179,7 @@ class ConfirmedRefillService:
                              max(0, limits["max_rounds"] - evidence["issued_rounds"]))
         focused, group_gaps, position_groups = self._quota_focus(task, result, positions)
         from .recall_strategy import rank_refill_positions
-        focused, strategy_reasons = rank_refill_positions(focused, reservations, evidence['rounds'])
+        focused, strategy_reasons = rank_refill_positions(focused, reservations, evidence['rounds'], recall=recall_report)
         if group_gaps:
             needs = {r['label']: r['gap'] for r in group_gaps}
             focused = tuple(sorted(focused, key=lambda p: -max(
@@ -175,7 +216,7 @@ class ConfirmedRefillService:
             if group_gaps:
                 next_view["group_labels"] = position_groups.get(
                     decision.next_position.fingerprint, [])
-        view = {
+        view = {**publication,
             "task_id": task_id, "revision": task.confirmed_revision,
             "generation": task.run_generation, "task_version": task.task_version,
             "accepted_count": result["accepted_count"], "target_count": task.target_count,
@@ -235,11 +276,13 @@ class ConfirmedRefillService:
             "position_fingerprint": reservation.position_fingerprint,
         }
 
-    def finalize_stop(self, actor, task_id, reason):
-        self.runtime.reservations.record_execution_stop(actor, task_id, reason)
+    def finalize_stop(self, actor, task_id, reason, *, expected_scope=None):
+        fence = (dict(expected_revision=expected_scope[0], expected_generation=expected_scope[1],
+                      expected_task_version=expected_scope[2]) if expected_scope is not None else {})
+        self.runtime.reservations.record_execution_stop(actor, task_id, reason, **fence)
         finalize = getattr(self.results, "finalize_refill_stop", None)
         if callable(finalize):
-            finalize(actor, task_id, reason)
+            finalize(actor, task_id, reason, **fence)
 
     def finalize_pending_stops(self):
         pending = getattr(self.runtime.reservations, "pending_stop_finalizations", None)
@@ -273,16 +316,24 @@ class ConfirmedRefillService:
             self.runtime.reservations.complete_result_iteration(
                 actor, current["operation_id"], current["accepted_count"])
         view = self.preview(actor, event["task_id"])
+        if (any(view[k] != event[k] for k in ('revision', 'generation', 'task_version'))
+                or view.get('result_set_id') != event['result_set_id']):
+            return {'status': 'superseded', 'task_id': event['task_id']}
         if view["action"] == "wait" and view["active_reservation_id"]:
             dispatched = self.runtime.dispatch_reservation(view["active_reservation_id"])
             return {"status": dispatched["status"], "replayed": True,
+                    "feedback": view["feedback"],
                     "reservation_id": view["active_reservation_id"],
                     "iteration": view["iteration"]}
+        if view.get('waiting_for_review'):
+            return {'status': 'waiting_review', 'feedback': view['feedback'], 'gap': view['gap']}
         if view["action"] != "search_more" or view["next_position"] is None:
             if view["stop_reason"] in {"EXECUTION_LIMIT_REACHED", "NO_PROGRESS",
                                        "SEARCH_STRATEGIES_EXHAUSTED"}:
-                self.finalize_stop(actor, event["task_id"], view["stop_reason"])
+                self.finalize_stop(actor, event["task_id"], view["stop_reason"], expected_scope=(
+                    event["revision"], event["generation"], event["task_version"]))
             return {"status": "stopped", "action": view["action"],
+                    "feedback": view["feedback"],
                     "stop_reason": view["stop_reason"], "gap": view["gap"]}
         position_fingerprint = view["next_position"]["position_fingerprint"]
         position = next((item for item in self.runtime.adapter.list_refill_positions(
@@ -301,6 +352,7 @@ class ConfirmedRefillService:
             actor, reservation.reservation_id, current["accepted_count"])
         dispatched = self.runtime.dispatch_reservation(reservation.reservation_id)
         return {"status": dispatched["status"], "replayed": replayed,
+                "feedback": view["feedback"],
                 "reservation_id": reservation.reservation_id,
                 "iteration": reservation.iteration,
                 "position_fingerprint": reservation.position_fingerprint}

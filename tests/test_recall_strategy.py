@@ -80,3 +80,43 @@ class RecallStrategyTest(unittest.TestCase):
             reservations + (self.reservation(a, 4),), rounds + [self.round(4, 8)])
         self.assertEqual(ranked[0], a)
         self.assertEqual(reasons[a.fingerprint]['reason'], 'continue_productive_branch')
+
+
+class CleaningFeedbackStrategyTest(unittest.TestCase):
+    position = RecallStrategyTest.position
+    reservation = RecallStrategyTest.reservation
+    round = RecallStrategyTest.round
+    def report(self, entries):
+        return {'complete': True, 'mapping_complete': True, 'cleaning': {'status': 'observed'},
+            'branches': [{'query_text': 'dog', 'sources': [
+                {'library_id': library, 'binding_id': None, 'index_version': 'v1', 'plan_id': None,
+                 'committed_pages': pages, 'cleaning': dict(effective_unique=gain, candidate_count=10,
+                     unknown=unknown, unassessed=missing, uncertain_coverage=bool(unknown or missing))}
+                for library, gain, pages, unknown, missing in entries]}]}
+
+    def test_first_cleaning_yield_prioritizes_productive_approved_source(self):
+        a, b = self.position('a'), self.position('b')
+        report = self.report([('a', 3, 1, 0, 0), ('b', 0, 0, 0, 0)])
+        ranked, reasons = rank_refill_positions((b, a), (), [], recall=report)
+        self.assertEqual(ranked, (a, b))
+        self.assertEqual(reasons[a.fingerprint]['evidence_source'], 'published_cleaning_attribution')
+        self.assertEqual(reasons[a.fingerprint]['completed_rounds'], 0)
+
+    def test_known_failure_probes_alternative_but_unknown_never_counts_as_zero(self):
+        a, b = self.position('a'), self.position('b')
+        report = self.report([('a', 0, 1, 0, 0), ('b', 0, 0, 0, 0)])
+        self.assertEqual(rank_refill_positions((a, b), (), [], recall=report)[0], (b, a))
+        report = self.report([('a', 0, 1, 1, 0), ('b', 0, 0, 0, 0)])
+        ranked, reasons = rank_refill_positions((a, b), (self.reservation(a, 1),),
+            [self.round(1, 0)], recall=report)
+        self.assertEqual(ranked, (a, b))
+        self.assertIsNone(reasons[a.fingerprint]['last_new_unique_accepted'])
+
+    def test_new_round_yield_replaces_initial_attribution_without_double_counting(self):
+        a, b = self.position('a'), self.position('b')
+        report = self.report([('a', 8, 1, 0, 0), ('b', 0, 0, 0, 0)])
+        ranked, reasons = rank_refill_positions((a, b), (self.reservation(a, 1),),
+            [self.round(1, 0)], recall=report)
+        self.assertEqual(ranked, (b, a))
+        self.assertEqual(reasons[a.fingerprint]['new_unique_accepted'], 0)
+        self.assertEqual(reasons[a.fingerprint]['completed_rounds'], 1)

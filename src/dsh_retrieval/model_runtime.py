@@ -866,9 +866,9 @@ class ModelRuntime:
                               'current_groups': current_groups,
                               **({'recall_context': recall_context} if recall_context is not None else {})}, ensure_ascii=False)
         if recall_context is not None:
-            prompt += ('\nrecall_context 是后端核验的当前候选覆盖统计，仅作为改词依据，不能当作清洗或语义质量判定。'
+            prompt += ('\nrecall_context 是后端核验的召回统计。cleaning.status=observed 才表示有当前已发布清洗结果，accepted_count/失败规则原因来自业务账本；这不是全库召回率或人工语义质量评测。未知和未评估不得当作淘汰或零收益。'
                        '保持 current_groups 中的组标签及用户原始主体、否定与数量要求；'
-                       '结合零命中和重复覆盖提出不同可见场景的辅助词，不提交来源变更或自动执行。')
+                       '结合实际命中、重复覆盖及已知清洗失败原因调整辅助描述，保留原动作/场景和所有硬条件；不得为提高数量删除失败规则、放宽条件、改变素材库或预算。新词表只供发起人确认，不自动执行。')
         failure = None
         for attempt in range(2):
             try:

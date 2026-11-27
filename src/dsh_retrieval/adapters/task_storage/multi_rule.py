@@ -3024,7 +3024,8 @@ class SQLiteMultiRuleApprovalRepository:
             return result, steps_reader(*inputs)
         return self._transaction(False, read, with_connection=True)
 
-    def finalize_refill_stop(self, actor, task_id, reason):
+    def finalize_refill_stop(self, actor, task_id, reason, *, expected_revision=None,
+                             expected_generation=None, expected_task_version=None):
         """Move a durable automatic stop to the explicit owner-decision gate.
 
         The run-status gate fences late writers. The immutable preview keeps
@@ -3037,6 +3038,10 @@ class SQLiteMultiRuleApprovalRepository:
         def finalize(memory, retrieval, candidates, state, db):
             task = self.manifests.retrieval._authorize(
                 memory, actor, task_id, action="approve")
+            if ((expected_revision is not None and task.confirmed_revision != expected_revision)
+                    or (expected_generation is not None and task.run_generation != expected_generation)
+                    or (expected_task_version is not None and task.task_version != expected_task_version)):
+                raise ServiceError('REVISION_CONFLICT', 'Feedback stop no longer matches the task', 409)
             row = db.execute("""SELECT stop_reason FROM refill_execution_stops
                 WHERE task_id=? AND revision=? AND generation=?""",
                 (task_id, task.confirmed_revision, task.run_generation)).fetchone()

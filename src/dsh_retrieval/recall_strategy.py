@@ -13,7 +13,13 @@ def suggest_term_adjustments(report):
     if not report['mapping_complete'] or report['totals'].get('content_unknown_candidates', 0):
         return [{'action': 'repair_mapping', 'reason': '部分命中缺少稳定身份或完整内容摘要，先核对素材映射。'}]
     totals = report['totals']
+    cleaning = report.get('cleaning') or {}
+    if cleaning.get('status') == 'observed' and cleaning['pending_review_count']:
+        return [{'action': 'wait_or_reconcile', 'reason': '清洗仍有待复核素材，未知不能当作淘汰或零产出；先核对检测结果。'}]
     suggestions = []
+    if cleaning.get('status') == 'observed' and cleaning['gap'] > 0 and cleaning['failed_count']:
+        suggestions.append({'action': 'diversify_terms',
+            'reason': f"已发布清洗结果淘汰{cleaning['failed_count']}张，有效缺口{cleaning['gap']}张；可在原主体、场景和硬条件内调整辅助描述，不能放宽失败规则。"})
     for group in (report.get('grouping') or {}).get('groups', ()):
         if group['delivery_target'] is not None and group['observed_candidates'] < group['delivery_target']:
             suggestions.append({'action': 'broaden_terms', 'group_label': group['primary_label'],
@@ -43,7 +49,7 @@ def _branch_key(binding):
             binding['parameters'].get('plan_id'), binding['parameters'].get('binding_id'))
 
 
-def rank_refill_positions(positions, reservations, rounds):
+def rank_refill_positions(positions, reservations, rounds, *, recall=None):
     """Rank measured productive branches, then probe alternatives after zero yield.
 
     Reservations supply durable library/query attribution. Never infer cleaning
@@ -69,6 +75,33 @@ def rank_refill_positions(positions, reservations, rounds):
         value[1] += row.get('candidate_count') or 0
         value[2] += 1
         value[3] = gain
+    seeded = set()
+    # First-page cleaning now provides evidence before the first refill round.
+    # Never count it again once this physical branch has a refill reservation.
+    reserved = set()
+    legacy_binding = False
+    for reservation in reservations:
+        if reservation.position_binding_json is None:
+            legacy_binding = True
+            continue
+        reserved.add(_branch_key(parse_refill_position(RefillPosition(
+            reservation.library_id, reservation.position_fingerprint, reservation.position_binding_json))))
+    if (recall and recall.get('complete') and recall.get('mapping_complete')
+            and (recall.get('cleaning') or {}).get('status') == 'observed' and not legacy_binding):
+        for branch in recall['branches']:
+            for source in branch['sources']:
+                measured = source.get('cleaning')
+                physical = (source['library_id'], branch['query_text'], source.get('index_version'),
+                            source.get('plan_id'), source['binding_id'])
+                if measured and measured.get('uncertain_coverage'):
+                    stats.pop(physical, None)
+                    continue
+                if (physical in reserved or not measured or not source['committed_pages']
+                        or measured['unassessed'] or measured['unknown']):
+                    continue
+                stats[physical] = [measured['effective_unique'], measured['candidate_count'],
+                                   0, measured['effective_unique']]
+                seeded.add(physical)
     def key(position):
         binding = parse_refill_position(position)
         branch = _branch_key(binding)
@@ -88,7 +121,8 @@ def rank_refill_positions(positions, reservations, rounds):
         branch = _branch_key(binding)
         value = stats.get(branch)
         reasons[position.fingerprint] = {
-            'strategy': 'effective_unique_yield@1',
+            'strategy': 'effective_unique_yield@2' if branch in seeded else 'effective_unique_yield@1',
+            'evidence_source': 'published_cleaning_attribution' if branch in seeded else 'refill_rounds',
             'reason': ('continue_productive_branch' if value and value[0] > 0
                        and not (value[3] == 0) else
                        'probe_approved_alternative' if value is None else 'retry_low_yield_branch'),

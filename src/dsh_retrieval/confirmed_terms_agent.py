@@ -172,6 +172,9 @@ class ConfirmedTermsRetrievalAgent:
         if not callable(getattr(cleaning_service, 'prepare', None)) or not callable(getattr(cleaning_service, 'confirm', None)) or not callable(getattr(cleaning_dispatch, 'notify', None)):
             raise ValueError('installed cleaning preparation and dispatch required')
         self.cleaning_service, self.cleaning_dispatch = cleaning_service, cleaning_dispatch
+        reader = getattr(cleaning_service, 'repository', None)
+        if callable(getattr(reader, 'get_current_result_set', None)):
+            self.engine.cleaning_feedback_reader = reader
 
     def policy(self, actor, project, *, candidate_intake='default'):
         self.service.projects.require_access(actor, project, 'default', 'read')

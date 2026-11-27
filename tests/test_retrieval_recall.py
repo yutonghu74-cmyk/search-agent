@@ -229,7 +229,7 @@ class RetrievalRecallTest(unittest.TestCase):
         model.expand_chunk('狗3张，不要人', 'llm', 'vlm', limit=1, recall_context=evidence)
         self.assertEqual(captured[0][1]['raw_request'], '狗3张，不要人')
         self.assertEqual(captured[0][1]['recall_context'], evidence)
-        self.assertIn('不能当作清洗', captured[0][0])
+        self.assertIn('不是全库召回率或人工语义质量评测', captured[0][0])
 
     def test_actual_chat_analysis_action_uses_read_then_provisional_terms_api(self):
         from dsh_retrieval.chat_ui import CHAT_JS

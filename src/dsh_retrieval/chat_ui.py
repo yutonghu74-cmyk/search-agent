@@ -279,7 +279,7 @@ function renderPlanningWorkflow(stage='request'){
  labels.forEach((label,index)=>{const item=document.createElement('div');item.className='node-card';item.append(nodeHeader(index+1,label,stage==='request'?'未开始':index<active?'已完成':index===active?'进行中':'未开始','div'));nodes.append(item)});
 }
 function demandCard(progress){const query=confirmedQuery(progress);const card=document.createElement('details');card.className='node-card';card.append(nodeHeader(1,'诉求澄清',query?'已完成':'进行中'));const body=document.createElement('div');body.className='node-body';const summary=document.createElement('p');const labels=query?.grouped_expansion?.groups?.map(group=>group.primary_label).filter(Boolean)||[];summary.textContent=query?`目标 ${query.target_count} 张 · 内容 ${labels.join('、')||'见诉求原文'}`:'正在读取已确认诉求…';body.append(summary);if(query?.raw_request){const original=document.createElement('p');original.textContent='诉求原文：'+query.raw_request;body.append(original)}card.append(body);return card}
-function refillStopLabel(reason){return ({TARGET_MET:'已达到目标',INPUT_SCOPE_COMPLETE:'固定输入范围已处理完，可部分交付',EXECUTION_LIMIT_REACHED:'已达到补数轮次上限',VLM_CALL_LIMIT_REACHED:'已达到 VLM 调用预算',NO_PROGRESS:'连续补数没有新增有效结果',SEARCH_STRATEGIES_EXHAUSTED:'当前批准的检索策略已耗尽',NEED_USER_INPUT:'需要发起人确认',REFILL_SCHEDULED:'已进入自动补数调度'})[reason]||reason||'无'}
+function refillStopLabel(reason){return ({TARGET_MET:'已达到目标',INPUT_SCOPE_COMPLETE:'固定输入范围已处理完，可部分交付',EXECUTION_LIMIT_REACHED:'已达到执行预算或轮次上限',VLM_CALL_LIMIT_REACHED:'已达到 VLM 调用预算',NO_PROGRESS:'连续补数没有新增有效结果',SEARCH_STRATEGIES_EXHAUSTED:'当前批准的检索策略已耗尽',NEED_USER_INPUT:'需要发起人确认',REFILL_SCHEDULED:'已进入自动补数调度'})[reason]||reason||'无'}
 function refillRoundOutcome(outcome){return ({pending:'进行中',result:'已出结果',empty:'无新增候选'})[outcome]||outcome||'未知'}
 function refillRoundRows(execution){return (execution?.rounds||[]).map(round=>[`第 ${round.iteration} 轮 · ${refillRoundOutcome(round.outcome)}`,`返回候选 ${round.candidate_count??'未知'} · 新增有效 ${round.new_unique_accepted??'待结果'} · 累计有效 ${round.accepted_after??round.baseline_accepted??'未知'} · VLM 调用 ${round.vlm_calls??0}`])}
 function refillExecutionSummary(plan){const execution=plan.execution||{};return `目标 ${plan.target_count} · 累计有效 ${plan.accepted_count} · 缺口 ${plan.gap} · ${plan.stop_reason?'停止原因 '+refillStopLabel(plan.stop_reason):plan.action==='wait'?'补数进行中':'尚未停止'} · 已发 ${execution.issued_rounds??0} 轮 · 已完成 ${execution.completed_rounds??0} 轮 · VLM 调用 ${execution.vlm_calls??0}${execution.remaining_vlm_calls!=null?` · 剩余调用预算 ${execution.remaining_vlm_calls}`:""}${execution.remaining_rounds!=null?` · 剩余轮数 ${execution.remaining_rounds}`:""}${execution.effective_yield!=null?` · 补数有效产出 ${(execution.effective_yield*100).toFixed(1)}%`:""}`}
@@ -1361,9 +1361,10 @@ async function showRecallAnalysis(){
  try{
   const report=await api(`/v1/retrieval/tasks/${taskId}/retrieval-agent/recall`);
   if(!current()||report.scope.task_version!==version){bubble.remove();return}
-  const totals=report.totals;
+  const totals=report.totals,cleaning=report.cleaning;
+  const qualityNote=cleaning?.status==='observed'?`\n清洗后有效 ${cleaning.accepted_count} 张，淘汰 ${cleaning.failed_count} 张，待复核 ${cleaning.pending_review_count} 张，相同内容去重 ${cleaning.duplicate_count} 张；有效缺口 ${cleaning.gap} 张。`:'\n尚无当前已发布清洗结果，不能把候选当作有效素材。';
   bubble.querySelector('p').textContent=`${totals.raw_hits} 条命中，${totals.unique_candidates} 个唯一候选，${totals.repeated_hits} 次重复覆盖；其中 ${totals.assignable_candidates} 个符合本次候选清单的输入范围。`+
-    (report.complete?'':'当前记录尚未完整，不能据此判断零收益。')+'\n'+report.suggestions.map(row=>row.reason).join('\n')+'\n这些候选尚未按本次统计判定为清洗通过。';
+    (report.complete?'':'当前记录尚未完整，不能据此判断零收益。')+'\n'+report.suggestions.map(row=>row.reason).join('\n')+qualityNote+(report.continuation?'\n'+report.continuation.reason:'');
   reviewDetails(bubble,'查看各词召回',report.branches.map(row=>row.query_text+'：'+
     (row.sources.every(source=>source.committed_pages===0)?'尚无已提交页面':`${row.raw_hits} 条命中 · 新增 ${row.new_unique_candidates} 个候选 · 重复 ${row.repeated_hits} 次 · 未映射 ${row.unresolved_hits} 条`)).join('\n'));
   if(report.can_refine)guidedAction(bubble,'根据召回调整词表',async()=>{

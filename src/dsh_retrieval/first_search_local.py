@@ -569,10 +569,10 @@ class LocalFirstSearch:
         return {**result, 'mode': self.mode,
                 'note': '仅记录原始检索页；未清洗、未计算有效素材数。'}
 
-    def progress(self, actor, task_id):
+    def progress(self, actor, task_id, *, browsing=False):
         reader = getattr(self.service.repository, 'get_task_read_binding', self.service.repository.get)
         task = reader(actor, task_id)
-        progress = read_retrieval_progress(self.repository, actor, task_id, browsing=task.media_type == 'video')
+        progress = read_retrieval_progress(self.repository, actor, task_id, browsing=browsing or task.media_type == 'video')
         progress['members'] = self._mark_initial_members(actor, task_id, progress['members'])
         if any('initial_deferred' in m for m in progress['members']):
             progress['source_strategy'] = {
@@ -597,7 +597,23 @@ class LocalFirstSearch:
 
     def recall(self, actor, task_id):
         from .retrieval_recall import read_recall
-        return read_recall(self, actor, task_id)
+        report = read_recall(self, actor, task_id)
+        feedback = getattr(self, 'refill_feedback_reader', None)
+        if callable(feedback):
+            try:
+                report['continuation'] = feedback(actor, task_id, report)
+            except ServiceError as error:
+                if error.code == 'NOT_FOUND':
+                    report['continuation'] = {'action': 'wait_for_cleaning',
+                        'reason': '当前尚无已发布清洗结果，不能据命中数量自动补数。'}
+                elif error.code == 'REVISION_CONFLICT' and report['cleaning']['status'] == 'not_current':
+                    report['continuation'] = {'action': 'wait_for_result',
+                        'reason': '新一轮检索或清洗尚未发布当前结果，等待原运行，不重复派发。'}
+                else:
+                    raise
+            report.pop('evidence_digest')
+            report['evidence_digest'] = digest(report)
+        return report
 
     def candidates(self, actor, task_id, *, limit=200, cursor=None, query='', changes=False):
         approved = self.repository.get_browse_current(actor, task_id)

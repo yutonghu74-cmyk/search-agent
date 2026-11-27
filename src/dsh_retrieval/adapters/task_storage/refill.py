@@ -440,7 +440,8 @@ class SQLiteRefillReservationRepository:
             raise ServiceError("STORAGE_UNAVAILABLE", "refill execution evidence unavailable", 503,
                                retryable=True) from exc
 
-    def record_execution_stop(self, actor, task_id, reason, *, expected_revision=None, expected_generation=None):
+    def record_execution_stop(self, actor, task_id, reason, *, expected_revision=None, expected_generation=None,
+                              expected_task_version=None):
         if reason not in {"EXECUTION_LIMIT_REACHED", "VLM_CALL_LIMIT_REACHED",
                           "NO_PROGRESS", "SEARCH_STRATEGIES_EXHAUSTED"}:
             raise ValueError("invalid refill stop reason")
@@ -454,6 +455,8 @@ class SQLiteRefillReservationRepository:
                         and (task.confirmed_revision, task.run_generation) !=
                             (expected_revision, expected_generation)):
                     raise ServiceError('REVISION_CONFLICT', 'refill stop scope changed', 409)
+                if expected_task_version is not None and task.task_version != expected_task_version:
+                    raise ServiceError('REVISION_CONFLICT', 'refill stop version changed', 409)
                 db.execute("""INSERT OR IGNORE INTO refill_execution_stops
                     (task_id,revision,generation,stop_reason,created_at)
                     VALUES (?,?,?,?,?)""", (task_id, task.confirmed_revision,
