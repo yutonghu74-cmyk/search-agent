@@ -145,7 +145,7 @@ function renderAgentWindowWorkspace(data){
  state.task={...state.task,...data};const job=data.agent_job;
  state.searchSnapshot={taskId:data.task_id,revision:data.confirmed_revision,generation:data.run_generation,
   progress:data.progress,workflow:data.workflow,search:{pagination_stopped:['completed','cancelled','failed','unknown'].includes(job?.status)},candidates:{raw_hit_count:data.candidate_count}};
- resetResultWorkspace();$('task-sidebar-identity').classList.remove('hidden');$('task-sidebar-id').textContent=data.task_id;
+ resetResultWorkspace();$('task-sidebar-identity').classList.remove('hidden');if(typeof setTaskIdentity==='function')setTaskIdentity(data);else $('task-sidebar-id').textContent=data.request_number||data.task_id;
  const presentation=agentWindowPresentation(data),count=data.target_count??data.progress.counts.requested;
  if(typeof updateChatHeader==='function')updateChatHeader(data.raw_request||'图片查找',presentation.title);
  $('task-sidebar-summary').textContent=`想找 ${count} 张图片 · 找到的图片还需筛选`;

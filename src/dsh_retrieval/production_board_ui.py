@@ -19,6 +19,7 @@ async function api(path){const response=await fetch(path,{headers,cache:'no-stor
 function cell(row,value){const el=document.createElement('td');if(value!==undefined)el.textContent=value;row.append(el);return el}
 function date(value){if(!value)return'时间未知';const d=new Date(value);return Number.isNaN(d.getTime())?'时间未知':new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(d)}
 function requestNumber(item){
+ if(item.request_number)return item.request_number;
  const id=String(item.task_id||''),match=/^rt_([a-f0-9]{32})$/i.exec(id);if(!match)return id||'编号未知';
  const code=match[1].slice(-8).toUpperCase(),created=item.created_at?new Date(item.created_at):null;
  if(!created||Number.isNaN(created.getTime()))return '时间未知-'+code;

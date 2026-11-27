@@ -67,6 +67,7 @@ PROGRESS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/progress$")
 RESULTS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/results$")
 RESULT_EXCLUSIONS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/result-exclusions$")
 MANUAL_REVIEWS_PATH = re.compile(r"^/v1/retrieval/tasks/([^/]+)/manual-reviews$")
+REQUEST_NUMBER_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks/by-number/([^/]+)$")
 PROJECT_TASKS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/tasks$")
 PROJECT_CONVERSATIONS_PATH = re.compile(r"^/v1/retrieval/projects/([^/]+)/conversations$")
 CONVERSATION_PATH = re.compile(r"^/v1/retrieval/conversations/([^/]+)$")
@@ -1745,6 +1746,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._stream_task_events(parsed, event_stream_match.group(1))
             except ServiceError as error:
                 self._json(error.status, error.as_dict(trace_id=trace_id))
+            return
+        number_match = REQUEST_NUMBER_PATH.fullmatch(urlsplit(self.path).path)
+        if number_match:
+            def number_action():
+                if urlsplit(self.path).query:
+                    raise ServiceError('INVALID_SPEC', '需求编号查询不接受额外参数', 422)
+                project, number = number_match.groups()
+                return HTTPStatus.OK, self.service.lookup_request_number(self._actor(), project, number), False
+            self._run(number_action)
             return
         recall_match = RETRIEVAL_RECALL_PATH.fullmatch(urlsplit(self.path).path)
         if recall_match:

@@ -6,6 +6,26 @@ info:
 servers:
   - url: http://127.0.0.1:8080
 paths:
+  /v1/retrieval/projects/{project_id}/tasks/by-number/{request_number}:
+    get:
+      operationId: lookupConfirmedRequestNumber
+      description: Exact owner/project-scoped lookup of a confirmed request number. Case-insensitive input; returns the existing internal task_id. Does not create or dispatch work.
+      parameters:
+      - {name: project_id, in: path, required: true, schema: {type: string}}
+      - name: request_number
+        in: path
+        required: true
+        schema: {type: string, example: REQ-20261127-143025-A7K9Q2}
+      responses:
+        '200':
+          description: Existing confirmed task summary
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TaskSummary'}
+        '403': {description: Project access denied}
+        '404': {description: Unknown number or not owned by the current actor/project}
+        '422': {description: Malformed number or unexpected query parameters}
+        '503': {description: Number lookup storage unavailable}
   /v1/retrieval/tasks/{task_id}/retrieval-agent/recall:
     $ref: './retrieval-terms.openapi.yaml#/paths/~1v1~1retrieval~1tasks~1{task_id}~1retrieval-agent~1recall'
   /v1/retrieval/projects/{project_id}/dialogue-sessions/{session_id}/retrieval-agent/terms:
@@ -573,6 +593,10 @@ components:
       required: [task_id, task_version, task_lifecycle, run_generation, run_status, status_url, events_url, trace_id]
       properties:
         task_id: {type: string}
+        request_number:
+          type: string
+          pattern: '^REQ-[0-9]{8}-[0-9]{6}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$'
+          description: Optional immutable display number assigned on formal confirmation. Date/time use Asia/Shanghai; internal task_id remains the API and idempotency identity. Absent on legacy tasks.
         confirmed_revision: {type: [integer, 'null']}
         pending_draft: {type: 'null'}
         project_id: {type: string}

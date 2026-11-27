@@ -21,7 +21,7 @@ SOURCE_TABLES = ('local_ledger', 'retrieval_ledger', 'candidate_ledger',
     'cleaning_usage_steps', 'cleaning_usage_http', 'retrieval_execution_budgets',
     'multi_rule_cleaning_ledger', 'plan_set_ledger', 'image_deliveries',
     'cleaning_checkpoints', 'refill_reservations', 'refill_iteration_metrics',
-    'refill_execution_stops')
+    'refill_execution_stops', 'task_request_numbers')
 
 
 def source_digest(path):

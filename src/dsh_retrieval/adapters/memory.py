@@ -153,6 +153,9 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
                 batch_id="batch_" + uuid.uuid4().hex, confirmed_proposal_json=draft.proposal_json,
                 conversation_id=draft.conversation_id,
             )
+            from ..request_numbers import issue_number
+            task.request_number = issue_number(task.created_at,
+                {item.request_number for item in self._tasks.values() if item.request_number is not None})
             self._tasks[task.task_id] = task
             self._revisions[task.task_id] = {1: draft.proposal_json}
             self._batches[task.batch_id] = (actor.tenant_id, draft.project_id, task.task_id)
@@ -495,6 +498,14 @@ class InMemoryTaskRepository(MemoryCleaningMixin):
             self._tasks[task.task_id] = replace(task)
             self._idempotency[scope] = (request_digest, task.task_id)
             return replace(task), False
+
+    def get_by_request_number(self, actor, project_id, number):
+        with self._lock:
+            for task in self._tasks.values():
+                if (task.request_number == number and task.project_id == project_id
+                        and task.tenant_id == actor.tenant_id and task.owner_user_id == actor.user_id):
+                    return self.get(actor, task.task_id)
+        raise ServiceError('NOT_FOUND', '需求编号不存在或当前无权访问', 404)
 
     def get(self, actor: Actor, task_id: str) -> Task:
         with self._lock:

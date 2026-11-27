@@ -399,6 +399,17 @@ class TaskService:
             previous = current
         return tuple(result)
 
+    def lookup_request_number(self, actor, project_id, number):
+        from .request_numbers import normalize_number
+        number = normalize_number(number)
+        self.projects.require_access(actor, project_id, 'default', 'read')
+        lookup = getattr(self.repository, 'get_by_request_number', None)
+        if not callable(lookup):
+            raise ServiceError('REQUEST_NUMBER_LOOKUP_UNAVAILABLE', '当前存储尚未配置需求编号查询', 503)
+        task = lookup(actor, project_id, number)
+        self.projects.require_access(actor, task.project_id, task.dimension_id, 'read')
+        return task.to_summary()
+
     def list_tasks(self, actor: Actor, project_id: str) -> tuple[dict[str, Any], ...]:
         if not isinstance(project_id, str) or not project_id.strip():
             raise invalid("project_id is required", "$.project_id")
