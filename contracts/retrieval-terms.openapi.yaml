@@ -580,9 +580,8 @@ components:
             relevance:
               const: not_assessed
             accepted_count:
-              type: [integer, 'null']
-              minimum: 0
-              description: Current published business count only; null when no current verified cleaning result is available.
+              type: 'null'
+              description: Legacy quality placeholder remains null; measured business counts are in cleaning.accepted_count.
             corpus_recall:
               type: 'null'
         cleaning:

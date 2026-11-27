@@ -135,7 +135,7 @@ def read_recall(engine, actor, task_id):
                                  for g in spec['grouped_expansion']['groups']]}
                      if spec.get('grouped_expansion') else None),
         'quality': {'relevance': 'not_assessed',
-                    'accepted_count': cleaning.get('accepted_count'), 'corpus_recall': None},
+                    'accepted_count': None, 'corpus_recall': None},
         'cleaning': cleaning,
         'execution_state': 'incomplete' if not complete else 'observed',
         'execution_budget': progress.get('execution_budget'),

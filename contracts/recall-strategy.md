@@ -31,7 +31,7 @@ ConfirmedRefillService 从当前任务revision/generation的持久预留和已�
 
 ## 召回与清洗反馈回执
 
-原 `retrieval-agent/recall` 只读报告增加 `cleaning` 和 `continuation`。前者引用当前已发布结果的摘要，给出有效数、失败/待复核/内容重复、逐组缺口及验证器规则原因计数；无当前结果时不填有效数。原 `quality.relevance` 仍为 not_assessed，corpus_recall 仍为 null。`sources[].cleaning` 按首次候选身份归因，共享未知/未评估覆盖单独标记，不能据此认为别的分支零收益。
+原 `retrieval-agent/recall` 只读报告增加 `cleaning` 和 `continuation`。前者引用当前已发布结果的摘要，给出有效数、失败/待复核/内容重复、逐组缺口及验证器规则原因计数；无当前结果时不填有效数。原 `quality.relevance` 仍为 not_assessed，quality.accepted_count/corpus_recall 保留原null契约；实测有效数放在新增cleaning.accepted_count中，旧客户端无需更换解析类型。`sources[].cleaning` 按首次候选身份归因，共享未知/未评估覆盖单独标记，不能据此认为别的分支零收益。
 
 `continuation` 是同一个业务补数决策的只读投影：已自动授权则 continue_approved，手动模式则 owner_confirmation，在途则等待；当前已发布结果含unknown时暂停新补数并等待原待复核流程，不把未知计为零收益。复核发布新结果后由原事件链重新评估。达标或预算/无进展/已批准策略耗尽则停止。原 auto_refill_outbox 每轮结果保存 `retrieval-feedback@1` 证据回执，包含任务/revision/generation/task_version、结果摘要、选择理由和停止原因；重复事件复用原预留，读取不派发。清洗发布后检索页仅用同revision/generation的只读浏览入口恢复，执行版本栅栏不放宽。停止写入同时核对原版本，旧事件不得停止新运行。
 

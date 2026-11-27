@@ -62,7 +62,8 @@ class RetrievalFeedbackTest(unittest.TestCase):
         before = self.engine.search_budget.snapshot(approved.scope); calls = self.detector.calls
         report = self.engine.recall(self.actor, tid)
         self.assertEqual(report['cleaning']['status'], 'observed')
-        self.assertEqual(report['quality']['accepted_count'], result['accepted_count'])
+        self.assertIsNone(report['quality']['accepted_count'])
+        self.assertEqual(report['cleaning']['accepted_count'], result['accepted_count'])
         self.assertEqual(report['cleaning']['failed_count'], result['failed_count'])
         self.assertGreater(report['cleaning']['failed_count'], 0)
         self.assertTrue(report['cleaning']['reason_counts'])
