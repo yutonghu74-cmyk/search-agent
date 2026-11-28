@@ -64,11 +64,14 @@ class ExpansionJobs:
                     or body.get('current_groups', current) != current or body.get('count_edits')
                     or body.get('term_count_only') or body.get('requested_terms_per_group') is not None):
                 raise ServiceError('INVALID_SPEC', '召回调整需保留当前主体、组别、词数及配额；其他修改请单独提出', 422)
+            from .recall_adjustment import adjustment_scope
+            adjustment = adjustment_scope(recall, spec['grouped_expansion']['groups'])
             transformed['current_groups'] = current
             transformed['feedback_text'] = body.get('feedback_text') or (
                 '根据实际召回统计调整辅助词，增加不同可见场景的候选覆盖；保留主体、否定条件、分组及配额。'
                 '命中数量不能证明语义相关或清洗通过。')
             transformed['confirmation_feedback_text'] = transformed['feedback_text']
+            recall = {**recall, 'adjustment': adjustment}
         transformed.update(dialogue_session_id='task:' + task_id,
                            dialogue_version=body['expected_task_version'],
                            source_revision=body['expected_revision'])
@@ -190,6 +193,11 @@ class ExpansionJobs:
                                if current is not None and targets and (count_only or all(
                                    targets[group['primary_label']] >= len(group['auxiliary_terms'])
                                    for group in current)) else None)
+            adjustment = (recall_context or {}).get('adjustment')
+            if adjustment and adjustment['preserved_groups']:
+                starting_groups = [{'primary_label': g['primary_label'], 'auxiliary_terms':
+                    [] if g['primary_label'] in adjustment['editable_groups'] else list(g['auxiliary_terms'])}
+                    for g in current]
             initial = {'agent': self.terms_agent.descriptor(), 'status': 'queued', 'groups': starting_groups, 'targets': targets,
                        'queued_at': self._now(), 'first_batch_at': self._now() if starting_groups else None,
                        'completed_at': None,
@@ -335,6 +343,10 @@ class ExpansionJobs:
                        'target_after': payload['target_count'],
                        'added_terms': len(new - old), 'removed_terms': len(old - new),
                        'added_groups': len(new_labels - old_labels), 'removed_groups': len(old_labels - new_labels)}
+        adjustment = (payload.get('recall_context') or {}).get('adjustment')
+        if adjustment:
+            from .recall_adjustment import adjustment_changes
+            adjustment = adjustment_changes(adjustment, payload['current_groups'], state.get('groups'))
         return {'job_id': job_id, 'agent': state.get('agent', RetrievalTermsAgent.descriptor()),
                 'dialogue_session_id': meta[3], 'dialogue_version': meta[4],
                 'task_id': meta[3][5:] if meta[3].startswith('task:') else None,
@@ -348,7 +360,8 @@ class ExpansionJobs:
                 'confirmation_feedback_text': payload.get('confirmation_feedback_text'),
                 'requested_terms_per_group': payload.get('requested_terms_per_group'),
                 'recall_feedback': ({'evidence_digest': payload['recall_context']['evidence_digest'],
-                                     'scope': payload['recall_context']['scope']}
+                                     'scope': payload['recall_context']['scope'],
+                                     **({'adjustment': adjustment} if adjustment else {})}
                                     if payload.get('recall_context') else None),
                 'source_groups': payload.get('current_groups') if payload.get('term_count_only') else None,
                 'status': state['status'], 'completed_terms': state['completed'],
@@ -433,8 +446,8 @@ class ExpansionJobs:
         report = self.recall_provider(actor, task_id)
         if report['evidence_digest'] != expected_digest:
             raise ServiceError('RECALL_EVIDENCE_CHANGED', '召回记录已变化，请重新分析后再调整词表', 409)
-        if not report['can_refine']:
-            raise ServiceError('RECALL_NOT_READY', '召回记录待核对或没有可调整的辅助词，暂不据此自动改词', 409)
+        from .recall_adjustment import require_adjustable
+        require_adjustable(report)
         return report
 
     def _current(self, actor, project_id, session_id, version, revision, recall_context=None):

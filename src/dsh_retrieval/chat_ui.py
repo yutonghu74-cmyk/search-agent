@@ -1257,11 +1257,23 @@ function watchTaskExpansionJob(job){
     const bubble=message('assistant',job.result.note?.includes('按用户逐字指定')?'指定词表待确认':'待确认修改',summary);state.expansionPreviewBubble=bubble;
     const quotas=plan.groups.filter(group=>group.delivery_target!=null).map(group=>group.primary_label+' '+group.delivery_target+' 张').join('、');
     reviewDetails(bubble,'查看完整词表',lines+(quotas?'\n各组目标：'+quotas:''));
+    const adjustment=job.recall_feedback?.adjustment;
+    if(adjustment)reviewDetails(bubble,'查看调整范围与逐组差异',[
+      '允许调整：'+adjustment.editable_groups.join('、'),
+      '保持原词表：'+(adjustment.preserved_groups.join('、')||'无'),
+      ...adjustment.group_changes.map(row=>row.group_label+'：'+(row.editable?'新增 '+(row.added_terms.join('、')||'无')+'；移除 '+(row.removed_terms.join('、')||'无'):'保持不变')),
+      '目标数量、分组配额及原硬条件保持；仅为待确认词表，尚未执行检索。'].join('\n'));
+
     state.taskExpansionBubble?.remove?.();state.taskExpansionBubble=null;
     guidedAction(bubble,'确认新版词表',async()=>{
       if(state.expansionPreviewToken!==token||state.task?.task_id!==taskId||state.task.task_version!==baseVersion)return;
       setBusy(true);
       try{
+        if(job.recall_feedback){
+          const latest=await api(`/v1/retrieval/tasks/${taskId}/retrieval-agent/recall`);
+          if(latest.evidence_digest!==job.recall_feedback.evidence_digest)throw new Error('召回或缺口证据已变化，请重新分析并生成待确认词表。');
+          if(state.expansionPreviewToken!==token||state.task?.task_id!==taskId||state.task.task_version!==baseVersion)return;
+        }
         const pending=state.feedback;
         state.feedback=await api(`/v1/retrieval/tasks/${taskId}/feedback${pending?'/'+pending.draft_id:''}`,{method:'POST',keyValue:key('expansion-feedback'),body:{text:feedbackText,scope:'all',expected_revision:job.revision,expected_task_version:baseVersion,...(pending?{expected_draft_version:pending.draft_version}:{}),target_count:count,grouped_expansion:plan}});
         await decideFeedback('confirm',true);
@@ -1391,7 +1403,7 @@ async function showRecallAnalysis(){
   }
   reviewDetails(bubble,'查看各词召回',report.branches.map(row=>row.query_text+'：'+
     (row.sources.every(source=>source.committed_pages===0)?'尚无已提交页面':`${row.raw_hits} 条命中 · 新增 ${row.new_unique_candidates} 个候选 · 重复 ${row.repeated_hits} 次 · 未映射 ${row.unresolved_hits} 条`)).join('\n'));
-  if(report.can_refine&&report.diagnosis?.next_step.action!=='target_reached')guidedAction(bubble,'根据召回调整词表',async()=>{
+  if(report.can_refine&&(!report.diagnosis||['review_strategy','review_candidates'].includes(report.diagnosis.next_step.action)))guidedAction(bubble,'根据召回调整词表',async()=>{
    if(!current())return;
    const llm=$('llm-model').value,vlm=$('vlm-model').value;
    if(!llm||!vlm){$('status').textContent='请先选择已配置的模型';return}

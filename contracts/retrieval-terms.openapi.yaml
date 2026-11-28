@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Retrieval Agent planning and confirmed continuation
-  version: 1.4.0
+  version: 1.5.0
   description: Existing grouped-expansion contracts and durable expansion_jobs ledger.
     Legacy expansion-jobs paths are aliases. Planning creates no business Task or run;
     only the explicit confirm operation resumes the same retrieval owner. Bearer/project
@@ -519,7 +519,30 @@ components:
           - object
           - 'null'
           description: When based on recall, contains evidence_digest and original
-            source scope, not an execution approval.
+            source scope, not an execution approval. New scoped proposals also include adjustment;
+            old jobs may omit it.
+          properties:
+            evidence_digest: {type: string}
+            scope: {type: object}
+            adjustment:
+              type: object
+              properties:
+                schema_version: {const: recall-adjustment@1}
+                editable_groups: {type: array, items: {type: string}}
+                preserved_groups: {type: array, items: {type: string}}
+                evidence_digest: {type: string}
+                scope: {type: object}
+                execution_allowed: {const: false}
+                requires_owner_confirmation: {const: true}
+                group_changes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      group_label: {type: string}
+                      editable: {type: boolean}
+                      added_terms: {type: array, items: {type: string}}
+                      removed_terms: {type: array, items: {type: string}}
     RecallReport:
       type: object
       required:

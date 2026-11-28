@@ -95,6 +95,13 @@ class RetrievalTermsAgent:
                         and {g['primary_label']: set(g['auxiliary_terms']) for g in current}
                         == {g['primary_label']: set(g['auxiliary_terms']) for g in groups}):
                     raise ServiceError('EXPANSION_UNCHANGED', '新词表没有落实修改，旧词表已保留', 422)
+                adjustment = (payload.get('recall_context') or {}).get('adjustment')
+                if adjustment:
+                    old = {g['primary_label']: g['auxiliary_terms'] for g in payload['current_groups']}
+                    if ({g['primary_label'] for g in groups} != set(old)
+                            or any(g['auxiliary_terms'] != old[g['primary_label']]
+                                   for g in groups if g['primary_label'] in adjustment['preserved_groups'])):
+                        raise ServiceError('MODEL_OUTPUT_INVALID', '调整超出允许分组，原词表已保留', 422)
                 result = seal_explicit_targets(preview_edited_groups(None, groups),
                                                payload['raw_request'], payload['target_count'])
                 if payload.get('recall_context'):
