@@ -70,6 +70,9 @@ class RetrievalFeedbackTest(unittest.TestCase):
         self.assertTrue(any('失败规则' in row['reason'] for row in report['suggestions']))
         self.assertEqual(report['continuation']['action'], 'stopped')
         self.assertEqual(report['continuation']['stop_reason'], 'INPUT_SCOPE_COMPLETE')
+        self.assertEqual(report['diagnosis']['next_step']['action'], 'review_strategy')
+        self.assertEqual(report['diagnosis']['effective_gap'], result['gap'])
+        self.assertIn('CLEANING_REJECTIONS', {r['code'] for r in report['diagnosis']['facts']})
         self.assertEqual(report['scope']['task_version'], task.task_version)
         self.assertEqual(self.engine.recall(self.actor, tid)['evidence_digest'], report['evidence_digest'])
         self.assertEqual(self.detector.calls, calls)
@@ -83,6 +86,7 @@ class RetrievalFeedbackTest(unittest.TestCase):
         allowed = {b['query_text'] for b in compile_query_branches(original['query_spec'])['branches']}
         report = self.engine.recall(self.actor, tid)
         self.assertEqual(report['continuation']['action'], 'continue_approved')
+        self.assertEqual(report['diagnosis']['next_step']['action'], 'continue_approved')
         self.runtime.auto.drain()
         reservations = self.runtime.reservations.list_current(self.actor, tid)
         self.assertEqual(len(reservations), 1)
@@ -134,6 +138,7 @@ class RetrievalFeedbackTest(unittest.TestCase):
         self.assertFalse(report['can_refine'])
         self.assertEqual(report['suggestions'][0]['action'], 'wait_or_reconcile')
         self.assertEqual(report['continuation']['action'], 'review_cleaning')
+        self.assertEqual(report['diagnosis']['next_step']['action'], 'review_cleaning')
 
     def test_unknown_publication_waits_for_review_without_spending_or_stagnation_stop(self):
         from dsh_retrieval.multi_rule_contracts import DetectionResult

@@ -611,6 +611,8 @@ class LocalFirstSearch:
                         'reason': '新一轮检索或清洗尚未发布当前结果，等待原运行，不重复派发。'}
                 else:
                     raise
+            from .gap_diagnosis import diagnose_gap
+            report['diagnosis'] = diagnose_gap(report)
             report.pop('evidence_digest')
             report['evidence_digest'] = digest(report)
         return report

@@ -139,6 +139,11 @@ def read_recall(engine, actor, task_id):
         'cleaning': cleaning,
         'execution_state': 'incomplete' if not complete else 'observed',
         'execution_budget': progress.get('execution_budget'),
+        'execution_observation': {
+            'queue_state': queue.get('state'), 'queue_error': queue.get('error_code'),
+            'pending_operations': sum(m['status'] == 'pending' for m in progress['members']),
+            'more_available': sum(m['status'] == 'more_available' for m in progress['members']),
+            'not_started': sum(m['status'] == 'not_started' for m in progress['members'])},
         'can_refine': bool(complete and not totals['unresolved_hits'] and not totals['content_unknown_candidates']
                            and cleaning.get('status') != 'not_current'
                            and not cleaning.get('pending_review_count')
@@ -146,5 +151,7 @@ def read_recall(engine, actor, task_id):
                            and any(g['auxiliary_terms'] for g in spec['grouped_expansion']['groups'])),
         'note': '统计当前检索窗口的候选身份与重复覆盖；未执行来源不按零命中，不代表语义相关或全库召回率；清洗有效数仅在当前已发布结果可读时提供，归因不是因果质量评测。'}
     report['suggestions'] = suggest_term_adjustments(report)
+    from .gap_diagnosis import diagnose_gap
+    report['diagnosis'] = diagnose_gap(report)
     report['evidence_digest'] = digest(report)
     return report

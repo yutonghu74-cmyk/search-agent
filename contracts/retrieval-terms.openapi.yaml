@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Retrieval Agent planning and confirmed continuation
-  version: 1.3.0
+  version: 1.4.0
   description: Existing grouped-expansion contracts and durable expansion_jobs ledger.
     Legacy expansion-jobs paths are aliases. Planning creates no business Task or run;
     only the explicit confirm operation resumes the same retrieval owner. Bearer/project
@@ -597,6 +597,46 @@ components:
             duplicate_count: {type: integer, minimum: 0}
             gap: {type: integer, minimum: 0}
             reason_counts: {type: array, items: {type: object}}
+        execution_observation:
+          type: object
+          description: Read-only queue state and counts of pending, unread and unstarted approved positions. Not an execution permission.
+          properties:
+            queue_state: {type: [string, 'null']}
+            queue_error: {type: [string, 'null']}
+            pending_operations: {type: integer, minimum: 0}
+            more_available: {type: integer, minimum: 0}
+            not_started: {type: integer, minimum: 0}
+        diagnosis:
+          type: object
+          description: Optional additive diagnosis from the same current recall evidence. Does not call models, retry operations or infer whole-corpus sufficiency.
+          required: [schema_version, scope, effective_gap, group_gaps, corpus_sufficiency, facts, next_step, requires_confirmation_for]
+          properties:
+            schema_version: {const: gap-diagnosis@1}
+            scope: {type: object}
+            coverage: {const: current_retrieval_window_and_published_results}
+            effective_gap: {type: [integer, 'null'], minimum: 0}
+            group_gaps: {type: array, items: {type: object}}
+            corpus_sufficiency: {const: unknown}
+            facts:
+              type: array
+              items:
+                type: object
+                required: [code, summary, evidence]
+                properties:
+                  code: {type: string}
+                  summary: {type: string}
+                  evidence: {type: object}
+            next_step:
+              type: object
+              required: [action, summary, execution_allowed]
+              properties:
+                action:
+                  enum: [reconcile_operation, inspect_failure, repair_mapping, wait_for_result, review_cleaning, target_reached, review_budget, continue_approved, owner_confirmation, review_strategy, review_candidates, check_continuation]
+                summary: {type: string}
+                execution_allowed: {const: false}
+            requires_confirmation_for:
+              type: array
+              items: {enum: [new_terms, new_sources, higher_budget, relaxed_conditions]}
         execution_budget:
           type: [object, 'null']
           description: Original approved search-call and raw-hit-slot budget; does not grant additional budget.

@@ -122,6 +122,7 @@ class RetrievalRecallTest(unittest.TestCase):
         task = self.f.service.get_task(self.f.actor, tid)
         report = self.report(task)
         self.assertFalse(report['complete']); self.assertFalse(report['can_refine'])
+        self.assertEqual(report['diagnosis']['next_step']['action'], 'reconcile_operation')
         self.assertEqual(report['suggestions'][0]['action'], 'wait_or_reconcile')
         status, error = self.f.call(f'/v1/retrieval/tasks/{tid}/retrieval-agent/terms', self.request(task, report))
         self.assertEqual(status, 409, error); self.assertEqual(error['code'], 'RECALL_NOT_READY')

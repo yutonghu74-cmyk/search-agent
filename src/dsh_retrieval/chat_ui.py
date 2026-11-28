@@ -1382,9 +1382,16 @@ async function showRecallAnalysis(){
   const qualityNote=cleaning?.status==='observed'?`\n清洗后有效 ${cleaning.accepted_count} 张，淘汰 ${cleaning.failed_count} 张，待复核 ${cleaning.pending_review_count} 张，相同内容去重 ${cleaning.duplicate_count} 张；有效缺口 ${cleaning.gap} 张。`:'\n尚无当前已发布清洗结果，不能把候选当作有效素材。';
   bubble.querySelector('p').textContent=`${totals.raw_hits} 条命中，${totals.unique_candidates} 个唯一候选，${totals.repeated_hits} 次重复覆盖；其中 ${totals.assignable_candidates} 个符合本次候选清单的输入范围。`+
     (report.complete?'':'当前记录尚未完整，不能据此判断零收益。')+'\n'+report.suggestions.map(row=>row.reason).join('\n')+qualityNote+(report.continuation?'\n'+report.continuation.reason:'');
+  if(report.diagnosis){
+   const diagnosis=report.diagnosis;
+   bubble.querySelector('p').textContent+='\n下一步：'+diagnosis.next_step.summary;
+   reviewDetails(bubble,'缺口诊断与下一步',[...diagnosis.facts.map(row=>row.summary),'下一步：'+diagnosis.next_step.summary,'素材库总量是否足够：尚无法判断。'].join('\n'));
+   if(diagnosis.next_step.action==='review_cleaning')guidedAction(bubble,'查看待复核素材',async()=>{if(!current())return;await openCandidateBrowser();if(current())$('review-tab').click()});
+   if(['reconcile_operation','inspect_failure','wait_for_result','repair_mapping'].includes(diagnosis.next_step.action))guidedAction(bubble,'重新读取诊断',()=>{if(current())return showRecallAnalysis()});
+  }
   reviewDetails(bubble,'查看各词召回',report.branches.map(row=>row.query_text+'：'+
     (row.sources.every(source=>source.committed_pages===0)?'尚无已提交页面':`${row.raw_hits} 条命中 · 新增 ${row.new_unique_candidates} 个候选 · 重复 ${row.repeated_hits} 次 · 未映射 ${row.unresolved_hits} 条`)).join('\n'));
-  if(report.can_refine)guidedAction(bubble,'根据召回调整词表',async()=>{
+  if(report.can_refine&&report.diagnosis?.next_step.action!=='target_reached')guidedAction(bubble,'根据召回调整词表',async()=>{
    if(!current())return;
    const llm=$('llm-model').value,vlm=$('vlm-model').value;
    if(!llm||!vlm){$('status').textContent='请先选择已配置的模型';return}
